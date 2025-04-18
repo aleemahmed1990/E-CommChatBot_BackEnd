@@ -1,14 +1,47 @@
-// models/customer.js
 const mongoose = require("mongoose");
+
+const supportTicketSchema = new mongoose.Schema(
+  {
+    orderId: String,
+    type: String,
+    issueType: String,
+    issueDetails: String,
+    details: String,
+    status: {
+      type: String,
+      enum: ["open", "in_progress", "resolved", "closed"],
+      default: "open",
+    },
+    agentNotes: String,
+    createdAt: {
+      type: Date,
+      default: Date.now,
+    },
+    lastUpdated: {
+      type: Date,
+      default: Date.now,
+    },
+    resolution: String,
+  },
+  { _id: false }
+); // no need for _id on sub-documents unless you want it
 
 const customerSchema = new mongoose.Schema(
   {
     phoneNumber: {
-      type: String,
+      type: [String],
       required: true,
-      unique: true,
-      trim: true,
+      index: true,
+      validate: [arrayLimit, "{PATH} must have at least one phone number"],
     },
+
+    // ✅ Optional metadata to track linked/migrated numbers
+    numberLinkedHistory: [
+      {
+        number: String,
+        dateLinked: Date,
+      },
+    ],
 
     name: {
       type: String,
@@ -19,6 +52,59 @@ const customerSchema = new mongoose.Schema(
       type: String,
       default: "new", // Tracks where they are in the conversation flow
     },
+    // Add these new fields for referrals
+    referralCode: {
+      type: String,
+      default: function () {
+        return "CM" + this._id.toString().substring(0, 6);
+      },
+    },
+    referralImages: [
+      {
+        imageId: String,
+        imagePath: String,
+        approvalDate: Date,
+        sharedWith: [
+          {
+            name: String,
+            phoneNumber: String,
+            dateShared: Date,
+            status: String,
+          },
+        ],
+      },
+    ],
+    referredBy: {
+      customerId: String,
+      phoneNumber: String,
+      name: String,
+      videoId: String,
+      dateReferred: Date,
+    },
+    referralRewards: [
+      {
+        amount: Number,
+        issuedDate: Date,
+        expiryDate: Date,
+        used: Boolean,
+        usedDate: Date,
+        orderId: String,
+      },
+    ],
+    // Add these new fields specifically for discount products:
+    currentDiscountProductId: String,
+    currentDiscountProductName: String,
+    currentDiscountProductPrice: Number,
+    currentDiscountProductOriginalPrice: Number,
+    currentDiscountCategory: String,
+    // Add this field to the cart sub-schema in the customer schema
+    ecoDeliveryDiscount: {
+      type: Number,
+      default: 0,
+    },
+    // ✅ Now this is valid
+    supportTickets: [supportTicketSchema],
+
     contextData: {
       // Store additional context for the current conversation state
       categoryId: String,
@@ -30,6 +116,7 @@ const customerSchema = new mongoose.Schema(
       selectedWeight: String,
       quantity: Number,
       deliveryOption: String,
+      numberSwitchIndex: Number,
 
       editAddressIndex: Number, // <-- Add this field to fix the issue
       editAddressField: String, // <-- Also add this field for completeness
@@ -155,8 +242,7 @@ const customerSchema = new mongoose.Schema(
         isDefault: Boolean,
       },
     ],
-    referralCode: String,
-    referredBy: String,
+
     discountCodes: [
       {
         code: String,
@@ -290,7 +376,13 @@ customerSchema.methods.updateOrderStatus = function (orderId, status) {
   return Promise.reject(new Error("Order not found"));
 };
 
+function arrayLimit(val) {
+  return val.length > 0;
+}
+
 // Then create a new model with the updated schema
 const Customer = mongoose.model("Customer", customerSchema);
 
 module.exports = Customer;
+
+// models/customer.js
