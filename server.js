@@ -9,6 +9,7 @@ const Admin = require("./models/admin");
 const employeeRoutes = require("./routes/employeeRoutes");
 const supplierRoutes = require("./routes/supplierRoutes");
 const productRoutes = require("./routes/productRoutes");
+const categoryRoutes = require("./routes/categoryRoutes");
 // Import routes
 const chatbotRouter = require("./routes/chatbot-router");
 
@@ -68,6 +69,7 @@ app.use("/api/employees", employeeRoutes);
 app.use("/api/suppliers", supplierRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/chatbot", chatbotRouter);
+app.use("/api/categories", categoryRoutes);
 
 // Serve static assets in production
 if (process.env.NODE_ENV === "production") {

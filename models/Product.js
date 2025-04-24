@@ -16,6 +16,10 @@ const productSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "Supplier",
   },
+  safetyDaysStock: String,
+  noReorder: { type: Boolean, default: false },
+  useStockAmount: { type: Boolean, default: false },
+  useSafetyDays: { type: Boolean, default: false },
 
   // Basic information
   productId: {
@@ -130,8 +134,21 @@ const productSchema = new mongoose.Schema({
     default: "Public",
   },
   tags: [String],
-  categories: String,
-  subCategories: String, // Added subcategories field
+  categories: [
+    {
+      type: String,
+      required: true,
+    },
+  ],
+  subCategories: [
+    {
+      type: String,
+      required: true,
+    },
+  ], // Added subcategories field
+  noReorder: { type: Boolean, default: false },
+  useStockAmount: { type: Boolean, default: false },
+  useSafetyDays: { type: Boolean, default: false },
   notes: String,
 
   // Option for visibility control

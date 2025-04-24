@@ -193,6 +193,28 @@ router.post("/", uploadFields, async (req, res) => {
       productData.tags = JSON.parse(productData.tags);
     }
 
+    // Process our new boolean flags:
+    if (productData.noReorder !== undefined) {
+      productData.noReorder = productData.noReorder === "true";
+    }
+    if (productData.useStockAmount !== undefined) {
+      productData.useStockAmount = productData.useStockAmount === "true";
+    }
+    if (productData.useSafetyDays !== undefined) {
+      productData.useSafetyDays = productData.useSafetyDays === "true";
+    }
+
+    // Process our new boolean flags:
+    if (productData.noReorder !== undefined) {
+      productData.noReorder = productData.noReorder === "true";
+    }
+    if (productData.useStockAmount !== undefined) {
+      productData.useStockAmount = productData.useStockAmount === "true";
+    }
+    if (productData.useSafetyDays !== undefined) {
+      productData.useSafetyDays = productData.useSafetyDays === "true";
+    }
+
     // Process boolean fields
     if (productData.onceShare) {
       productData.onceShare = productData.onceShare === "true";

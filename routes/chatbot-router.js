@@ -5,6 +5,7 @@ const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const path = require("path");
 const fs = require("fs");
+const moment = require("moment");
 const mkdirp = require("mkdirp"); // You might need to install this: npm install mkdirp
 
 // At the top of your file, add:
@@ -623,18 +624,15 @@ client.on("ready", () => {
   console.log("WhatsApp client is ready!");
 });
 
-async function createOrder(customer, phoneNumber) {
-  // Generate a unique order ID
+async function createOrder(customer) {
   const orderId = "ORD" + Date.now().toString().slice(-8);
 
-  // Calculate total with all applicable discounts
   const totalWithDiscounts =
     customer.cart.totalAmount +
     customer.cart.deliveryCharge -
     (customer.cart.firstOrderDiscount || 0) -
     (customer.cart.ecoDeliveryDiscount || 0);
 
-  // Create the order
   const newOrder = {
     orderId: orderId,
     items: [...customer.cart.items],
@@ -665,44 +663,26 @@ async function createOrder(customer, phoneNumber) {
     ),
   };
 
-  // Add order to customer's history
+  // Push to order history
   customer.orderHistory.push(newOrder);
 
-  // Handle pickup timing based on order total
-  let pickupMessage = "";
-  if (customer.cart.deliveryOption === "Self Pickup") {
-    if (newOrder.totalAmount < 2000000) {
-      pickupMessage =
-        "Your order will be ready in:\n\n" +
-        "if smaller than 2million straight away just come and picket up";
-    } else if (newOrder.totalAmount > 25000000) {
-      pickupMessage =
-        "Your order will be ready in:\n\n" +
-        "if order is larger then 25 million: in 1 hours time you can pickup";
-    } else {
-      pickupMessage =
-        "Your order will be ready for pickup soon. We'll notify you when it's ready.";
-    }
-  }
+  // Clear cart and context
+  customer.cart = {
+    items: [],
+    totalAmount: 0,
+    deliveryCharge: 0,
+    deliveryOption: "Normal Delivery",
+    deliveryLocation: "",
+    firstOrderDiscount: 0,
+    ecoDeliveryDiscount: 0,
+  };
 
-  // Empty the cart
-  customer.cart.items = [];
-  customer.cart.totalAmount = 0;
-  customer.cart.deliveryCharge = 0;
-  customer.cart.firstOrderDiscount = 0;
-  customer.cart.ecoDeliveryDiscount = 0;
-  customer.cart.deliveryOption = "Normal Delivery";
-  customer.cart.deliveryLocation = "";
-
+  customer.contextData = {};
   await customer.save();
-
-  // Send pickup message if applicable
-  if (pickupMessage && phoneNumber) {
-    await sendWhatsAppMessage(phoneNumber, pickupMessage);
-  }
 
   return orderId;
 }
+
 async function sendWhatsAppMessage(to, content) {
   try {
     console.log(
@@ -762,6 +742,33 @@ async function processChatMessage(phoneNumber, text, message) {
         conversationState: "greeting",
       });
       await customer.save();
+
+      // if not already imported
+
+      // Check if we should send a pickup reminder
+      if (
+        customer.pickupPlan &&
+        customer.pickupPlan.date === moment().format("YYYY-MM-DD") &&
+        customer.cart.deliveryOption === "Self Pickup" &&
+        !customer.pickupPlan.reminderSent
+      ) {
+        const timeSlot = customer.pickupPlan.timeSlot || "any time today";
+
+        const lastOrder =
+          customer.orderHistory?.[customer.orderHistory.length - 1];
+
+        await sendWhatsAppMessage(
+          customer.phoneNumber[0],
+          `📦 *Pickup Reminder!* 📦\n\n` +
+            `Hi ${customer.name}, just a reminder that your order is ready for pickup *today* between *${timeSlot}*.\n\n` +
+            `Order ID: #${lastOrder?.orderId || "unknown"}\n\n` +
+            `If you need help, just reply with *support* anytime.`
+        );
+
+        // Mark reminder as sent
+        customer.pickupPlan.reminderSent = true;
+        await customer.save();
+      }
 
       // Send welcome message
       await sendWhatsAppMessage(
@@ -919,8 +926,9 @@ async function processChatMessage(phoneNumber, text, message) {
               `1. Update Name\n` +
               `2. Update Email\n` +
               `3. Manage Addresses\n` +
-              `4. My Account 💰\n` +
-              `5. Return to Main Menu`;
+              `4. My Account \n` +
+              `5. Manage Bank Accounts\n` +
+              `6. Return to Main Menu`;
 
             await sendWhatsAppMessage(phoneNumber, updatedProfileMessage);
 
@@ -1243,6 +1251,168 @@ for ${formatRupiah(totalPrice)}`;
             break;
         }
         break;
+      case "pickup_date_select": {
+        await customer.updateConversationState("pickup_date_main");
+
+        break;
+      }
+
+      case "pickup_date_main": {
+        if (!["1", "2", "3"].includes(text.trim())) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Please choose a valid option:\n1. Today\n2. Tomorrow\n3. Later"
+          );
+          return;
+        }
+
+        const today = moment().format("YYYY-MM-DD");
+        const tomorrow = moment().add(1, "day").format("YYYY-MM-DD");
+
+        switch (text.trim()) {
+          case "1":
+            customer.pickupPlan = { date: today };
+            break;
+          case "2":
+            customer.pickupPlan = { date: tomorrow };
+            break;
+          case "3":
+            // Go to extended 13-day calendar
+            const dateOptions = [];
+            for (let i = 0; i < 13; i++) {
+              dateOptions.push(moment().add(i, "days"));
+            }
+
+            customer.pickupDateList = dateOptions.map((d) =>
+              d.format("YYYY-MM-DD")
+            );
+            await customer.save();
+
+            let msg = "📅 *Select a pickup date (from the next 13 days):*\n";
+            msg += "--------------------------------------------\n";
+            dateOptions.forEach((date, index) => {
+              if (index === 0) {
+                msg += `${index + 1}. Today\n`;
+              } else if (index === 1) {
+                msg += `${index + 1}. Tomorrow\n`;
+              } else {
+                msg += `${index + 1}. ${date.format("Do MMMM (ddd)")}\n`;
+              }
+            });
+
+            await customer.updateConversationState(
+              "pickup_date_select_confirm"
+            );
+            await sendWhatsAppMessage(phoneNumber, msg);
+            return;
+
+          default:
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Invalid selection. Please choose 1 (Today), 2 (Tomorrow), or 3 (Later)."
+            );
+            return;
+        }
+
+        await customer.updateConversationState("pickup_time_select");
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ Got it! You're picking up on *${customer.pickupPlan.date}*.\n\n` +
+            `🕒 Now select your preferred pickup time slot:\n\n` +
+            `1. 6 AM – 9 AM\n` +
+            `2. 9 AM – 12 PM\n` +
+            `3. 12 PM – 3 PM\n` +
+            `4. 3 PM – 6 PM\n` +
+            `5. 6 PM – 9 PM`
+        );
+        break;
+      }
+      case "pickup_date_select_confirm": {
+        console.log("🚨 [pickup_date_select_confirm] Raw text:", text);
+
+        const idx = parseInt(text.trim()) - 1;
+        console.log("📍 Parsed index:", idx);
+        console.log("📍 customer.pickupDateList:", customer.pickupDateList);
+
+        if (
+          !customer.pickupDateList ||
+          !Array.isArray(customer.pickupDateList)
+        ) {
+          console.log("❌ pickupDateList is missing or not an array");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "⚠️ Something went wrong (date list missing). Please type *menu* and try again."
+          );
+          return;
+        }
+
+        if (isNaN(idx) || idx < 0 || idx >= customer.pickupDateList.length) {
+          console.log("❌ Invalid index selected:", idx);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Please select a valid number from the list (1–13)."
+          );
+          return;
+        }
+
+        const selectedDate = customer.pickupDateList[idx];
+        console.log("✅ Selected date from list:", selectedDate);
+
+        customer.pickupPlan.date = selectedDate;
+        customer.pickupDateList = []; // cleanup
+        await customer.save();
+
+        await customer.updateConversationState("pickup_time_select");
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ Got it! You're picking up on *${customer.pickupPlan.date}*.\n\n` +
+            `🕒 Now select your preferred pickup time slot:\n\n` +
+            `1. 6 AM – 9 AM\n` +
+            `2. 9 AM – 12 PM\n` +
+            `3. 12 PM – 3 PM\n` +
+            `4. 3 PM – 6 PM\n` +
+            `5. 6 PM – 9 PM`
+        );
+        break;
+      }
+
+      case "pickup_time_select": {
+        const timeOptions = {
+          1: "6 AM – 9 AM",
+          2: "9 AM – 12 PM",
+          3: "12 PM – 3 PM",
+          4: "3 PM – 6 PM",
+          5: "6 PM – 9 PM",
+        };
+
+        const timeSlot = timeOptions[text.trim()];
+        if (!timeSlot) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Please select a valid time slot (1–5)."
+          );
+          return;
+        }
+
+        customer.pickupPlan.timeSlot = timeSlot;
+
+        const lastOrder =
+          customer.orderHistory[customer.orderHistory.length - 1];
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ Your order is in progress and will be confirmed once payment is verified!\n\n` +
+            `🧾 Order ID: *#${lastOrder.orderId}*\n` +
+            `📦 We'll expect you on *${customer.pickupPlan.date}* between *${timeSlot}*.\n\n` +
+            `Thank you for shopping with us! 😊`
+        );
+
+        await customer.updateConversationState("main_menu");
+        await sendMainMenu(phoneNumber, customer);
+        break;
+      }
 
       case "cart_view":
         // Handle cart actions
@@ -1687,256 +1857,204 @@ for ${formatRupiah(totalPrice)}`;
         break;
 
       case "checkout_summary":
-        // Handle payment confirmation
-        switch (text) {
-          case "1":
-            // Yes, proceed to payment
-            await customer.updateConversationState("checkout_name");
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "what is the full name of the account you are paying from?"
-            );
-            break;
+        await customer.updateConversationState("checkout_wait_receipt");
 
-          case "2":
-            // Modify order
-            await goToCart(phoneNumber, customer);
-            break;
-
-          case "3":
-            // Come back later
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Your cart has been saved. You can return anytime to complete your purchase."
-            );
-            await sendMainMenu(phoneNumber, customer);
-            break;
-
-          case "4":
-            // Cancel process and empty cart
-            customer.cart.items = [];
-            customer.cart.totalAmount = 0;
-            customer.cart.deliveryCharge = 0;
-            await customer.save();
-
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Your order has been cancelled and your cart has been emptied."
-            );
-            await sendMainMenu(phoneNumber, customer);
-            break;
-
-          default:
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Please select a valid option (1, 2, 3, or 4), or type 0 to return to the main menu."
-            );
-            break;
-        }
-        break;
-
-      case "checkout_name":
-        // Save customer name for order
-        customer.contextData.fullName = text;
-        await customer.save();
-
-        // Send informational message about email instead of asking for it
         await sendWhatsAppMessage(
           phoneNumber,
-          "If you want to have always invoice from us, please go to your profile and give us your email, and your name that is provided by the bank you normally send transaction from."
+          "📸 Please send a screenshot of your payment transfer receipt to continue."
         );
-
-        // Small delay before proceeding to payment instructions
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-
-        // Check if this is the customer's first order and apply discount
-        let firstOrderDiscount = 0;
-        if (!customer.orderHistory || customer.orderHistory.length === 0) {
-          // Calculate 10% discount on non-discounted items
-          const regularItems = customer.cart.items.filter(
-            (item) => !item.isDiscounted
-          );
-          const regularItemsTotal = regularItems.reduce(
-            (total, item) => total + item.totalPrice,
-            0
-          );
-          firstOrderDiscount = Math.round(regularItemsTotal * 0.1); // 10% of regular items
-
-          if (firstOrderDiscount > 0) {
-            message += `First Order Discount (10%): -${formatRupiah(
-              firstOrderDiscount
-            )}\n`;
-          }
-        }
-
-        // Check for eco delivery discount
-        let ecoDeliveryDiscount = 0;
-        if (customer.cart.deliveryOption === "Eco Delivery") {
-          ecoDeliveryDiscount = Math.round(customer.cart.totalAmount * 0.05);
-        }
-
-        // Store the discounts for use in checkout
-        customer.cart.firstOrderDiscount = firstOrderDiscount;
-        customer.cart.ecoDeliveryDiscount = ecoDeliveryDiscount;
-        await customer.save();
-
-        const finalTotal =
-          customer.cart.totalAmount +
-          customer.cart.deliveryCharge -
-          firstOrderDiscount -
-          ecoDeliveryDiscount;
-
-        // Skip the email input step and go directly to payment
-        await customer.updateConversationState("checkout_payment");
-        const paymentMessage =
-          `Transfer ${formatRupiah(
-            finalTotal
-          )} to this bank account and share screenshot and transaction id with us\n\n` +
-          `Bank name: Construction Bank\n` +
-          `Account#: 1234-5678-9012-3456\n\n` +
-          `Type "Support" if you are having any trouble regarding payment and our team will help you`;
-
-        await sendWhatsAppMessage(phoneNumber, paymentMessage);
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "💡 Make sure the *bank name*, *account holder*, and *amount paid* are clearly visible."
+        );
         break;
-      // Simplified checkout_payment case with a single bank list message
-      case "checkout_payment":
-        if (text.toLowerCase() === "support") {
-          // Handle support request
-          await customer.updateConversationState("payment_support");
+
+      case "checkout_wait_receipt":
+        if (message.type !== "image") {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Our payment support team has been notified and will contact you shortly. Alternatively, you can call us at 123-456-7890 for immediate assistance."
+            "❗ You must send a screenshot of your payment receipt to proceed."
           );
+          break;
+        }
 
-          // Return to payment screen after a delay
-          setTimeout(async () => {
-            await customer.updateConversationState("checkout_payment");
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "If you're ready to continue with payment, please share a screenshot of your payment and transaction ID."
-            );
-          }, 5000);
+        // Receipt received
+        await sendWhatsAppMessage(phoneNumber, "✅ Receipt received.");
+
+        if (customer.bankAccounts && customer.bankAccounts.length > 0) {
+          customer.updateConversationState("checkout_select_saved_bank");
+
+          let msg = "*🏦 Select your saved bank account for payment:*\n\n";
+          customer.bankAccounts.forEach((bank, i) => {
+            msg += `${i + 1}. ${
+              bank.bankName
+            } - Account: ${bank.accountNumber.substring(0, 4)}xxxx (${
+              bank.accountHolderName
+            })\n`;
+          });
+          msg += `${customer.bankAccounts.length + 1}. Other Bank\n\n`;
+          msg += `ℹ️ To manage your saved bank accounts, visit your *Profile* from the Main Menu.`;
+
+          await sendWhatsAppMessage(phoneNumber, msg);
         } else {
-          // Assume they've shared payment info (screenshot or transaction ID)
-          await customer.updateConversationState("checkout_payment_bank");
-
-          // Send the entire bank list in a single message
-          const bankListMessage =
-            "*Which bank have you transferred from?*\n\n" +
-            "Please enter the bank number (code) from the list below:\n\n" +
-            "2 - Bank Rakyat Indonesia (BRI)\n" +
-            "3 - Bank Ekspor Indonesia\n" +
-            "8 - Bank Mandiri\n" +
-            "9 - Bank Negara Indonesia (BNI)\n" +
-            "11 - Bank Danamon Indonesia\n" +
-            "13 - Bank Permata\n" +
-            "14 - Bank Central Asia (BCA)\n" +
-            "16 - Bank Maybank\n" +
-            "19 - Bank Panin\n" +
-            "20 - Bank Arta Niaga Kencana\n" +
-            "22 - Bank CIMB Niaga\n" +
-            "23 - Bank UOB Indonesia\n" +
-            "26 - Bank Lippo\n" +
-            "28 - Bank OCBC NISP\n" +
-            "30 - American Express Bank LTD\n" +
-            "31 - Citibank\n" +
-            "32 - JP. Morgan Chase Bank, N.A\n" +
-            "33 - Bank of America, N.A\n" +
-            "36 - Bank Multicor\n" +
-            "37 - Bank Artha Graha\n" +
-            "47 - Bank Pesona Perdania\n" +
-            "52 - Bank ABN Amro\n" +
-            "53 - Bank Keppel Tatlee Buana\n" +
-            "57 - Bank BNP Paribas Indonesia\n" +
-            "68 - Bank Woori Indonesia\n" +
-            "76 - Bank Bumi Arta\n" +
-            "87 - Bank Ekonomi\n" +
-            "89 - Bank Haga\n" +
-            "93 - Bank IFI\n" +
-            "95 - Bank Century/Bank J Trust Indonesia\n" +
-            "97 - Bank Mayapada\n" +
-            "110 - Bank BJB\n" +
-            "111 - Bank DKI\n" +
-            "112 - Bank BPD D.I.Y\n" +
-            "113 - Bank Jateng\n" +
-            "114 - Bank Jatim\n" +
-            "115 - Bank Jambi\n" +
-            "116 - Bank Aceh\n" +
-            "117 - Bank Sumut\n" +
-            "118 - Bank Sumbar\n" +
-            "119 - Bank Kepri\n" +
-            "120 - Bank Sumsel dan Babel\n" +
-            "121 - Bank Lampung\n" +
-            "122 - Bank Kalsel\n" +
-            "123 - Bank Kalbar\n" +
-            "124 - Bank Kaltim\n" +
-            "125 - Bank Kalteng\n" +
-            "126 - Bank Sulsel\n" +
-            "127 - Bank Sulut\n" +
-            "128 - Bank NTB\n" +
-            "129 - Bank Bali\n" +
-            "130 - Bank NTT\n" +
-            "131 - Bank Maluku\n" +
-            "132 - Bank Papua\n" +
-            "133 - Bank Bengkulu\n" +
-            "134 - Bank Sulteng\n" +
-            "135 - Bank Sultra\n" +
-            "137 - Bank Banten\n" +
-            "145 - Bank Nusantara Parahyangan\n" +
-            "146 - Bank Swadesi\n" +
-            "147 - Bank Muamalat\n" +
-            "151 - Bank Mestika\n" +
-            "152 - Bank Metro Express\n" +
-            "157 - Bank Maspion\n" +
-            "159 - Bank Hagakita\n" +
-            "161 - Bank Ganesha\n" +
-            "162 - Bank Windu Kentjana\n" +
-            "164 - Bank ICBC Indonesia\n" +
-            "166 - Bank Harmoni Internasional\n" +
-            "167 - Bank QNB\n" +
-            "200 - Bank Tabungan Negara (BTN)\n" +
-            "405 - Bank Swaguna\n" +
-            "425 - Bank BJB Syariah\n" +
-            "426 - Bank Mega\n" +
-            "441 - Bank Bukopin\n" +
-            "451 - Bank Syariah Indonesia (BSI)\n" +
-            "459 - Bank Bisnis Internasional\n" +
-            "466 - Bank Sri Partha\n" +
-            "484 - Bank KEB Hana Indonesia\n" +
-            "485 - Bank MNC Internasional\n" +
-            "490 - Bank Neo\n" +
-            "494 - Bank BNI Agro\n" +
-            "503 - Bank Nobu\n" +
-            "506 - Bank Mega Syariah\n" +
-            "513 - Bank Ina Perdana\n" +
-            "517 - Bank Panin Dubai Syariah\n" +
-            "521 - Bank Bukopin Syariah\n" +
-            "523 - Bank Sahabat Sampoerna\n" +
-            "535 - SeaBank\n" +
-            "536 - Bank BCA Syariah\n" +
-            "542 - Bank Jago\n" +
-            "547 - Bank BTPN Syariah\n" +
-            "553 - Bank Mayora\n" +
-            "555 - Bank Index Selindo\n" +
-            "947 - Bank Aladin Syariah";
-
-          // Send the bank list
-          await sendWhatsAppMessage(phoneNumber, bankListMessage);
-
-          // Send the instruction as a separate message
-          setTimeout(async () => {
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Enter '1' for other banks not on the list.\nPlease enter the bank number (code) from the list above."
-            );
-          }, 1000);
+          customer.updateConversationState("checkout_enter_name");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "👤 What is the full name of the account you are paying from?"
+          );
         }
         break;
-      // Also update the validBankCodes map in the checkout_payment_bank case for completeness:
-      case "checkout_payment_bank":
-        // Create a map of valid bank codes
-        const validBankCodes = {
-          1: "Other Bank", // Special case for "Other"
+
+      case "checkout_select_saved_bank":
+        const selectedIdx = parseInt(text.trim()) - 1;
+
+        if (
+          !isNaN(selectedIdx) &&
+          selectedIdx >= 0 &&
+          selectedIdx < customer.bankAccounts.length
+        ) {
+          const selected = customer.bankAccounts[selectedIdx];
+          customer.contextData.accountHolderName = selected.accountHolderName;
+          customer.contextData.bankName = selected.bankName;
+          customer.markModified("contextData");
+          await customer.save();
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `✅ Selected: ${selected.bankName} - (${selected.accountHolderName})\n\n🛒 Processing your order...`
+          );
+
+          const orderId = await createOrder(customer, phoneNumber);
+          if (orderId) {
+            await customer.updateConversationState("order_confirmation");
+            await processChatMessage(phoneNumber, "order_confirmation");
+          }
+        } else if (text.trim() === `${customer.bankAccounts.length + 1}`) {
+          customer.updateConversationState("checkout_enter_name");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "👤 What is the full name of the account you are paying from?"
+          );
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Invalid selection. Please choose a valid option."
+          );
+        }
+        break;
+
+      case "checkout_enter_name":
+        customer.contextData.accountHolderName = text.trim();
+        await customer.save();
+
+        customer.updateConversationState("checkout_enter_bank");
+
+        const formattedBankList = `*Select a bank:*
+        --------------------------------
+        1 - Other (enter manually)
+        --------------------------------
+        2 - Bank Rakyat Indonesia (BRI)
+        3 - Bank Ekspor Indonesia
+        8 - Bank Mandiri
+        9 - Bank Negara Indonesia (BNI)
+        11 - Bank Danamon Indonesia
+        13 - Bank Permata
+        14 - Bank Central Asia (BCA)
+        16 - Bank Maybank
+        19 - Bank Panin
+        20 - Bank Arta Niaga Kencana
+        22 - Bank CIMB Niaga
+        23 - Bank UOB Indonesia
+        26 - Bank Lippo
+        28 - Bank OCBC NISP
+        30 - American Express Bank LTD
+        31 - Citibank
+        32 - JP. Morgan Chase Bank, N.A
+        33 - Bank of America, N.A
+        36 - Bank Multicor
+        37 - Bank Artha Graha
+        47 - Bank Pesona Perdania
+        52 - Bank ABN Amro
+        53 - Bank Keppel Tatlee Buana
+        57 - Bank BNP Paribas Indonesia
+        68 - Bank Woori Indonesia
+        76 - Bank Bumi Arta
+        87 - Bank Ekonomi
+        89 - Bank Haga
+        93 - Bank IFI
+        95 - Bank Century / Bank J Trust Indonesia
+        97 - Bank Mayapada
+        110 - Bank BJB
+        111 - Bank DKI
+        112 - Bank BPD D.I.Y
+        113 - Bank Jateng
+        114 - Bank Jatim
+        115 - Bank Jambi
+        116 - Bank Aceh
+        117 - Bank Sumut
+        118 - Bank Sumbar
+        119 - Bank Kepri
+        120 - Bank Sumsel dan Babel
+        121 - Bank Lampung
+        122 - Bank Kalsel
+        123 - Bank Kalbar
+        124 - Bank Kaltim
+        125 - Bank Kalteng
+        126 - Bank Sulsel
+        127 - Bank Sulut
+        128 - Bank NTB
+        129 - Bank Bali
+        130 - Bank NTT
+        131 - Bank Maluku
+        132 - Bank Papua
+        133 - Bank Bengkulu
+        134 - Bank Sulteng
+        135 - Bank Sultra
+        137 - Bank Banten
+        145 - Bank Nusantara Parahyangan
+        146 - Bank Swadesi
+        147 - Bank Muamalat
+        151 - Bank Mestika
+        152 - Bank Metro Express
+        157 - Bank Maspion
+        159 - Bank Hagakita
+        161 - Bank Ganesha
+        162 - Bank Windu Kentjana
+        164 - Bank ICBC Indonesia
+        166 - Bank Harmoni Internasional
+        167 - Bank QNB
+        200 - Bank Tabungan Negara (BTN)
+        405 - Bank Swaguna
+        425 - Bank BJB Syariah
+        426 - Bank Mega
+        441 - Bank Bukopin
+        451 - Bank Syariah Indonesia (BSI)
+        459 - Bank Bisnis Internasional
+        466 - Bank Sri Partha
+        484 - Bank KEB Hana Indonesia
+        485 - Bank MNC Internasional
+        490 - Bank Neo
+        494 - Bank BNI Agro
+        503 - Bank Nobu
+        506 - Bank Mega Syariah
+        513 - Bank Ina Perdana
+        517 - Bank Panin Dubai Syariah
+        521 - Bank Bukopin Syariah
+        523 - Bank Sahabat Sampoerna
+        535 - SeaBank
+        536 - Bank BCA Syariah
+        542 - Bank Jago
+        547 - Bank BTPN Syariah
+        553 - Bank Mayora
+        555 - Bank Index Selindo
+        947 - Bank Aladin Syariah`;
+
+        await sendWhatsAppMessage(phoneNumber, formattedBankList);
+        break;
+
+      case "checkout_enter_bank":
+        const checkoutBankOptions = {
+          1: "Other (enter manually)",
           2: "Bank Rakyat Indonesia (BRI)",
           3: "Bank Ekspor Indonesia",
           8: "Bank Mandiri",
@@ -1966,7 +2084,7 @@ for ${formatRupiah(totalPrice)}`;
           87: "Bank Ekonomi",
           89: "Bank Haga",
           93: "Bank IFI",
-          95: "Bank Century/Bank J Trust Indonesia",
+          95: "Bank Century / Bank J Trust Indonesia",
           97: "Bank Mayapada",
           110: "Bank BJB",
           111: "Bank DKI",
@@ -2034,96 +2152,54 @@ for ${formatRupiah(totalPrice)}`;
           947: "Bank Aladin Syariah",
         };
 
-        // Check if the input is a valid bank code
-        if (validBankCodes[text]) {
-          // If the user selected "1" for "Others"
-          if (text === "1") {
-            await customer.updateConversationState(
-              "checkout_payment_bank_other"
-            );
+        const chosenBankName = checkoutBankOptions[text.trim()];
+
+        if (chosenBankName) {
+          if (text.trim() === "1") {
+            customer.updateConversationState("checkout_enter_bank_manual");
             await sendWhatsAppMessage(
               phoneNumber,
               "Please enter the name of your bank:"
             );
-            break;
-          }
+          } else {
+            customer.contextData.bankName = chosenBankName;
+            await customer.save();
 
-          // Valid bank code - save bank information
-          const bankName = validBankCodes[text];
-          customer.contextData.bankName = bankName;
-          await customer.save();
-
-          // Confirm selection and proceed with order creation
-          await sendWhatsAppMessage(
-            phoneNumber,
-            `You selected: ${bankName} (Code: ${text}). Processing your order...`
-          );
-
-          // Create the order
-          const orderId = await createOrder(customer);
-
-          // Confirmation message
-          await customer.updateConversationState("order_confirmation");
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Your payment will be confirmed within 30 min\n" +
-              "Please call us or come back in 30 minutes for the confirmation.\n\n" +
-              `Your order id is #${orderId}. Keep it safe please, ${customer.name}.`
-          );
-
-          // Send final thank you message
-          setTimeout(async () => {
             await sendWhatsAppMessage(
               phoneNumber,
-              "Thank you for shopping with us! Don't forget to share your referral link and check out our discounts for more savings. Have a great day!"
+              `✅ Selected Bank: ${chosenBankName}\n🛒 Processing your order...`
             );
 
-            // Reset state to main menu
-            await sendMainMenu(phoneNumber, customer);
-          }, 3000);
+            const orderId = await createOrder(customer, phoneNumber);
+            if (orderId) {
+              await customer.updateConversationState("order_confirmation");
+              await processChatMessage(phoneNumber, "order_confirmation");
+            }
+          }
         } else {
-          // Invalid input - ask again
           await sendWhatsAppMessage(
             phoneNumber,
-            "Please enter a valid bank number from the list, or enter 1 for other banks not on the list."
+            "❌ Invalid input. Please enter a valid bank number from the list."
           );
         }
         break;
 
-      case "checkout_payment_bank_other":
-        // User has entered a custom bank name
-        customer.contextData.bankName = text;
+      case "checkout_enter_bank_manual":
+        customer.contextData.bankName = text.trim();
         await customer.save();
 
-        // Confirm selection and proceed with order creation
         await sendWhatsAppMessage(
           phoneNumber,
-          `You selected: ${text}. Processing your order...`
+          `✅ Bank: ${text.trim()}\n🛒 Processing your order...`
         );
 
-        // Create the order
-        const otherOrderId = await createOrder(customer);
-
-        // Confirmation message
-        await customer.updateConversationState("order_confirmation");
-        await sendWhatsAppMessage(
-          phoneNumber,
-          "Your payment will be confirmed within 30 min\n" +
-            "Please call us or come back in 30 minutes for the confirmation.\n\n" +
-            `Your order id is #${otherOrderId}. Keep it safe please, ${customer.name}.`
-        );
-
-        // Send final thank you message
-        setTimeout(async () => {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Thank you for shopping with us! Don't forget to share your referral link and check out our discounts for more savings. Have a great day!"
-          );
-
-          // Reset state to main menu
-          await sendMainMenu(phoneNumber, customer);
-        }, 3000);
+        const manualOrderId = await createOrder(customer, phoneNumber);
+        if (manualOrderId) {
+          await customer.updateConversationState("order_confirmation");
+          await processChatMessage(phoneNumber, "order_confirmation");
+        }
         break;
+
       // Add to processChatMessage function - Update the case "support" section
       case "support":
         // Handle support main menu selection
@@ -2551,7 +2627,7 @@ for ${formatRupiah(totalPrice)}`;
       // Modified account case to support the new menu structure
       case "profile":
         // Handle profile management
-        if (["1", "2", "3", "4", "5"].includes(text)) {
+        if (["1", "2", "3", "4", "5", "6"].includes(text)) {
           switch (text) {
             case "1":
               // Update name
@@ -2602,7 +2678,7 @@ for ${formatRupiah(totalPrice)}`;
               // Go to account menu - UPDATED with new structure
               await customer.updateConversationState("account_main");
               let accountMessage =
-                `💰 *My Account* 💰\n\n` +
+                ` *My Account* \n\n` +
                 `Please select an option:\n\n` +
                 `1. Funds\n` +
                 `2. Forman\n` +
@@ -2612,6 +2688,37 @@ for ${formatRupiah(totalPrice)}`;
               break;
 
             case "5":
+              // Manage bank accounts
+              await customer.updateConversationState("manage_bank_accounts");
+              let bankMsg = "*💳 Your Saved Bank Accounts:*\n\n";
+
+              if (
+                !customer.bankAccounts ||
+                customer.bankAccounts.length === 0
+              ) {
+                bankMsg += "_No bank accounts saved yet._\n\n";
+              } else {
+                customer.bankAccounts.forEach((bank, i) => {
+                  bankMsg += `${i + 1}. ${
+                    bank.bankName
+                  }\n   Account: ${bank.accountNumber.substring(0, 4)}xxxx (${
+                    bank.accountHolderName
+                  })\n`;
+                });
+                bankMsg += "\n";
+              }
+
+              bankMsg +=
+                "What would you like to do?\n\n" +
+                "1. Add a new bank account\n" +
+                "2. Edit an existing bank account\n" +
+                "3. Remove a bank account\n" +
+                "4. Return to Profile";
+
+              await sendWhatsAppMessage(phoneNumber, bankMsg);
+              break;
+
+            case "6":
               // Return to main menu
               await sendMainMenu(phoneNumber, customer);
               break;
@@ -2645,29 +2752,1270 @@ for ${formatRupiah(totalPrice)}`;
             `1. Update Name\n` +
             `2. Update Email\n` +
             `3. Manage Addresses\n` +
-            `4. My Account 💰\n` +
-            `5. Return to Main Menu`;
+            `4. My Account \n` +
+            `5. Manage Bank Accounts\n` +
+            `6. Return to Main Menu`;
 
           await sendWhatsAppMessage(phoneNumber, updatedProfileMessage);
         }
+        break;
+
+      // Bank Account Management Cases
+      case "manage_bank_accounts":
+        switch (text.trim()) {
+          case "1":
+            // Add new bank account - first step: ask for account holder name
+            customer.updateConversationState("add_bank_holder_name");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Please enter the account holder name:"
+            );
+            break;
+
+          case "2":
+            // Edit existing bank account
+            if (!customer.bankAccounts || customer.bankAccounts.length === 0) {
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "You don't have any saved bank accounts to edit. Would you like to add one?\n\n1. Add a new bank account\n2. Return to Profile"
+              );
+              break;
+            }
+
+            customer.updateConversationState("edit_bank_select");
+            let editMsg = "*Select a bank account to edit:*\n\n";
+
+            customer.bankAccounts.forEach((bank, i) => {
+              editMsg += `${i + 1}. ${bank.bankName} (${
+                bank.accountHolderName
+              })\n`;
+            });
+
+            await sendWhatsAppMessage(phoneNumber, editMsg);
+            break;
+
+          case "3":
+            // Remove bank account
+            if (!customer.bankAccounts || customer.bankAccounts.length === 0) {
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "You don't have any saved bank accounts to remove.\n\nReturning to bank accounts menu..."
+              );
+
+              setTimeout(async () => {
+                await customer.updateConversationState("manage_bank_accounts");
+                let bankMsg = "*💳 Your Saved Bank Accounts:*\n\n";
+                bankMsg += "_No bank accounts saved yet._\n\n";
+
+                bankMsg +=
+                  "What would you like to do?\n\n" +
+                  "1. Add a new bank account\n" +
+                  "2. Edit an existing bank account\n" +
+                  "3. Remove a bank account\n" +
+                  "4. Return to Profile";
+
+                await sendWhatsAppMessage(phoneNumber, bankMsg);
+              }, 1500);
+              break;
+            }
+
+            customer.updateConversationState("remove_bank_account");
+            let removeMsg = "*Select a bank account to remove:*\n\n";
+
+            customer.bankAccounts.forEach((bank, i) => {
+              removeMsg += `${i + 1}. ${
+                bank.bankName
+              } - Account: ${bank.accountNumber.substring(0, 4)}xxxx (${
+                bank.accountHolderName
+              })\n`;
+            });
+
+            await sendWhatsAppMessage(phoneNumber, removeMsg);
+            break;
+
+          case "4":
+            // Return to profile
+            customer.updateConversationState("profile");
+            await sendWhatsAppMessage(phoneNumber, "Returning to profile...");
+
+            // Return to profile with delay
+            setTimeout(async () => {
+              await customer.updateConversationState("profile");
+              let updatedProfileMessage =
+                `👤 *Your Profile* 👤\n\n` +
+                `Name: ${customer.name}\n` +
+                `📱 Master Number: ${cleanPhoneNumber(
+                  customer.phoneNumber?.[0] || ""
+                )}\n`;
+
+              if (customer.phoneNumber.length > 1) {
+                updatedProfileMessage += `🔗 Connected Numbers:\n`;
+                customer.phoneNumber.slice(1).forEach((num, index) => {
+                  updatedProfileMessage += `   ${index + 1}. ${cleanPhoneNumber(
+                    num
+                  )}\n`;
+                });
+              }
+
+              updatedProfileMessage +=
+                `Email: ${customer.contextData?.email || "Not provided"}\n\n` +
+                `Total Orders: ${customer.orderHistory.length}\n` +
+                `Referral Code: ${
+                  customer.referralCode ||
+                  "CM" + customer._id.toString().substring(0, 6)
+                }\n\n` +
+                `What would you like to do?\n\n` +
+                `1. Update Name\n` +
+                `2. Update Email\n` +
+                `3. Manage Addresses\n` +
+                `4. My Account \n` +
+                `5. Manage Bank Accounts\n` +
+                `6. Return to Main Menu`;
+
+              await sendWhatsAppMessage(phoneNumber, updatedProfileMessage);
+            }, 1500);
+            break;
+
+          default:
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Invalid input. Please choose 1, 2, 3 or 4."
+            );
+        }
+        break;
+
+      case "remove_bank_account":
+        const removeIndex = parseInt(text.trim()) - 1;
+
+        if (
+          isNaN(removeIndex) ||
+          removeIndex < 0 ||
+          !customer.bankAccounts ||
+          removeIndex >= customer.bankAccounts.length
+        ) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Invalid selection. Please enter a valid number from the list."
+          );
+          break;
+        }
+
+        const removedBank = customer.bankAccounts.splice(removeIndex, 1)[0];
+        customer.markModified("bankAccounts");
+
+        await customer.save();
+
+        await customer.updateConversationState("manage_bank_accounts");
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ Removed bank: *${removedBank.bankName}* (${removedBank.accountHolderName})`
+        );
+
+        // Then re-show the updated list (optional but recommended)
+        setTimeout(async () => {
+          let bankMsg = "*💳 Your Saved Bank Accounts:*\n\n";
+
+          if (!customer.bankAccounts || customer.bankAccounts.length === 0) {
+            bankMsg += "_No bank accounts saved yet._\n\n";
+          } else {
+            customer.bankAccounts.forEach((bank, i) => {
+              bankMsg += `${i + 1}. ${
+                bank.bankName
+              }\n   Account: ${bank.accountNumber.substring(0, 4)}xxxx (${
+                bank.accountHolderName
+              })\n`;
+            });
+            bankMsg += "\n";
+          }
+
+          bankMsg +=
+            "What would you like to do?\n\n" +
+            "1. Add a new bank account\n" +
+            "2. Edit an existing bank account\n" +
+            "3. Remove a bank account\n" +
+            "4. Return to Profile";
+
+          await sendWhatsAppMessage(phoneNumber, bankMsg);
+        }, 800);
+        break;
+
+      // Add bank account flow
+      case "add_bank_holder_name":
+        // Save the account holder name and proceed to bank selection
+        customer.contextData = customer.contextData || {};
+        customer.contextData.tempBankAccount =
+          customer.contextData.tempBankAccount || {};
+        customer.contextData.tempBankAccount.accountHolderName = text.trim();
+        customer.markModified("contextData");
+        await customer.save();
+
+        // Move to bank selection
+        customer.updateConversationState("add_bank_select");
+
+        // Show loading message
+        await sendWhatsAppMessage(phoneNumber, "*Loading bank list...*");
+
+        // Send the bank list after a short delay
+        setTimeout(async () => {
+          const bankListToSave = `
+*Select a bank:*
+
+2 - Bank Rakyat Indonesia (BRI)
+3 - Bank Ekspor Indonesia
+8 - Bank Mandiri
+9 - Bank Negara Indonesia (BNI)
+11 - Bank Danamon Indonesia
+13 - Bank Permata
+14 - Bank Central Asia (BCA)
+16 - Bank Maybank
+19 - Bank Panin
+20 - Bank Arta Niaga Kencana
+22 - Bank CIMB Niaga
+23 - Bank UOB Indonesia
+26 - Bank Lippo
+28 - Bank OCBC NISP
+30 - American Express Bank LTD
+31 - Citibank
+32 - JP. Morgan Chase Bank, N.A
+33 - Bank of America, N.A
+36 - Bank Multicor
+37 - Bank Artha Graha
+47 - Bank Pesona Perdania
+52 - Bank ABN Amro
+53 - Bank Keppel Tatlee Buana
+57 - Bank BNP Paribas Indonesia
+68 - Bank Woori Indonesia
+76 - Bank Bumi Arta
+87 - Bank Ekonomi
+89 - Bank Haga
+93 - Bank IFI
+95 - Bank Century/Bank J Trust Indonesia
+97 - Bank Mayapada
+110 - Bank BJB
+111 - Bank DKI
+112 - Bank BPD D.I.Y
+113 - Bank Jateng
+114 - Bank Jatim
+115 - Bank Jambi
+116 - Bank Aceh
+117 - Bank Sumut
+118 - Bank Sumbar
+119 - Bank Kepri
+120 - Bank Sumsel dan Babel
+121 - Bank Lampung
+122 - Bank Kalsel
+123 - Bank Kalbar
+124 - Bank Kaltim
+125 - Bank Kalteng
+126 - Bank Sulsel
+127 - Bank Sulut
+128 - Bank NTB
+129 - Bank Bali
+130 - Bank NTT
+131 - Bank Maluku
+132 - Bank Papua
+133 - Bank Bengkulu
+134 - Bank Sulteng
+135 - Bank Sultra
+137 - Bank Banten
+145 - Bank Nusantara Parahyangan
+146 - Bank Swadesi
+147 - Bank Muamalat
+151 - Bank Mestika
+152 - Bank Metro Express
+157 - Bank Maspion
+159 - Bank Hagakita
+161 - Bank Ganesha
+162 - Bank Windu Kentjana
+164 - Bank ICBC Indonesia
+166 - Bank Harmoni Internasional
+167 - Bank QNB
+200 - Bank Tabungan Negara (BTN)
+405 - Bank Swaguna
+425 - Bank BJB Syariah
+426 - Bank Mega
+441 - Bank Bukopin
+451 - Bank Syariah Indonesia (BSI)
+459 - Bank Bisnis Internasional
+466 - Bank Sri Partha
+484 - Bank KEB Hana Indonesia
+485 - Bank MNC Internasional
+490 - Bank Neo
+494 - Bank BNI Agro
+503 - Bank Nobu
+506 - Bank Mega Syariah
+513 - Bank Ina Perdana
+517 - Bank Panin Dubai Syariah
+521 - Bank Bukopin Syariah
+523 - Bank Sahabat Sampoerna
+535 - SeaBank
+536 - Bank BCA Syariah
+542 - Bank Jago
+547 - Bank BTPN Syariah
+553 - Bank Mayora
+555 - Bank Index Selindo
+947 - Bank Aladin Syariah
+
+1 - Other (enter manually)
+`;
+          await sendWhatsAppMessage(phoneNumber, bankListToSave);
+        }, 1000);
+        break;
+
+      case "add_bank_select":
+        const allBankOptions = {
+          2: "Bank Rakyat Indonesia (BRI)",
+          3: "Bank Ekspor Indonesia",
+          8: "Bank Mandiri",
+          9: "Bank Negara Indonesia (BNI)",
+          11: "Bank Danamon Indonesia",
+          13: "Bank Permata",
+          14: "Bank Central Asia (BCA)",
+          16: "Bank Maybank",
+          19: "Bank Panin",
+          20: "Bank Arta Niaga Kencana",
+          22: "Bank CIMB Niaga",
+          23: "Bank UOB Indonesia",
+          26: "Bank Lippo",
+          28: "Bank OCBC NISP",
+          30: "American Express Bank LTD",
+          31: "Citibank",
+          32: "JP. Morgan Chase Bank, N.A",
+          33: "Bank of America, N.A",
+          36: "Bank Multicor",
+          37: "Bank Artha Graha",
+          47: "Bank Pesona Perdania",
+          52: "Bank ABN Amro",
+          53: "Bank Keppel Tatlee Buana",
+          57: "Bank BNP Paribas Indonesia",
+          68: "Bank Woori Indonesia",
+          76: "Bank Bumi Arta",
+          87: "Bank Ekonomi",
+          89: "Bank Haga",
+          93: "Bank IFI",
+          95: "Bank Century/Bank J Trust Indonesia",
+          97: "Bank Mayapada",
+          110: "Bank BJB",
+          111: "Bank DKI",
+          112: "Bank BPD D.I.Y",
+          113: "Bank Jateng",
+          114: "Bank Jatim",
+          115: "Bank Jambi",
+          116: "Bank Aceh",
+          117: "Bank Sumut",
+          118: "Bank Sumbar",
+          119: "Bank Kepri",
+          120: "Bank Sumsel dan Babel",
+          121: "Bank Lampung",
+          122: "Bank Kalsel",
+          123: "Bank Kalbar",
+          124: "Bank Kaltim",
+          125: "Bank Kalteng",
+          126: "Bank Sulsel",
+          127: "Bank Sulut",
+          128: "Bank NTB",
+          129: "Bank Bali",
+          130: "Bank NTT",
+          131: "Bank Maluku",
+          132: "Bank Papua",
+          133: "Bank Bengkulu",
+          134: "Bank Sulteng",
+          135: "Bank Sultra",
+          137: "Bank Banten",
+          145: "Bank Nusantara Parahyangan",
+          146: "Bank Swadesi",
+          147: "Bank Muamalat",
+          151: "Bank Mestika",
+          152: "Bank Metro Express",
+          157: "Bank Maspion",
+          159: "Bank Hagakita",
+          161: "Bank Ganesha",
+          162: "Bank Windu Kentjana",
+          164: "Bank ICBC Indonesia",
+          166: "Bank Harmoni Internasional",
+          167: "Bank QNB",
+          200: "Bank Tabungan Negara (BTN)",
+          405: "Bank Swaguna",
+          425: "Bank BJB Syariah",
+          426: "Bank Mega",
+          441: "Bank Bukopin",
+          451: "Bank Syariah Indonesia (BSI)",
+          459: "Bank Bisnis Internasional",
+          466: "Bank Sri Partha",
+          484: "Bank KEB Hana Indonesia",
+          485: "Bank MNC Internasional",
+          490: "Bank Neo",
+          494: "Bank BNI Agro",
+          503: "Bank Nobu",
+          506: "Bank Mega Syariah",
+          513: "Bank Ina Perdana",
+          517: "Bank Panin Dubai Syariah",
+          521: "Bank Bukopin Syariah",
+          523: "Bank Sahabat Sampoerna",
+          535: "SeaBank",
+          536: "Bank BCA Syariah",
+          542: "Bank Jago",
+          547: "Bank BTPN Syariah",
+          553: "Bank Mayora",
+          555: "Bank Index Selindo",
+          947: "Bank Aladin Syariah",
+        };
+
+        if (text.trim() === "1") {
+          // User wants to enter custom bank name
+          customer.updateConversationState("add_bank_manual");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Please enter the custom bank name:"
+          );
+          break;
+        }
+
+        const selectedBank = allBankOptions[text.trim()];
+        if (selectedBank) {
+          // Save the selected bank name and proceed to account number
+          customer.contextData = customer.contextData || {};
+          customer.contextData.tempBankAccount =
+            customer.contextData.tempBankAccount || {};
+          customer.contextData.tempBankAccount.bankName = selectedBank;
+          customer.markModified("contextData");
+          await customer.save();
+
+          // Move to account number input
+          customer.updateConversationState("add_bank_account_number");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Please enter the account number:"
+          );
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Invalid selection. Please enter a valid number from the list."
+          );
+        }
+        break;
+
+      case "add_bank_manual":
+        // Save custom bank name and proceed to account number
+        customer.contextData = customer.contextData || {};
+        customer.contextData.tempBankAccount =
+          customer.contextData.tempBankAccount || {};
+        customer.contextData.tempBankAccount.bankName = text.trim();
+        customer.markModified("contextData");
+        await customer.save();
+
+        // Move to account number input
+        customer.updateConversationState("add_bank_account_number");
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "Please enter the account number:"
+        );
+        break;
+
+      case "add_bank_account_number":
+        // Save the account number and confirm all details
+        const accountNumber = text.trim();
+
+        // Simple validation for account number
+        if (!/^\d{5,20}$/.test(accountNumber)) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Invalid account number. Please enter a valid numeric account number (5-20 digits):"
+          );
+          break;
+        }
+
+        customer.contextData = customer.contextData || {};
+        customer.contextData.tempBankAccount =
+          customer.contextData.tempBankAccount || {};
+        customer.contextData.tempBankAccount.accountNumber = accountNumber;
+        customer.markModified("contextData");
+        await customer.save();
+
+        // Show confirmation of all details
+        const tempBank = customer.contextData.tempBankAccount;
+        customer.updateConversationState("add_bank_confirmation");
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `*Please confirm your bank details:*\n\n` +
+            `Account Holder: ${tempBank.accountHolderName}\n` +
+            `Bank: ${tempBank.bankName}\n` +
+            `Account Number: ${tempBank.accountNumber}\n\n` +
+            `Is this correct?\n` +
+            `1. Yes, save these details\n` +
+            `2. No, I need to make changes`
+        );
+        break;
+
+      case "add_bank_confirmation":
+        if (text.trim() === "1" || text.toLowerCase().includes("yes")) {
+          // Initialize bankAccounts array if it doesn't exist
+          if (!customer.bankAccounts) {
+            customer.bankAccounts = [];
+          }
+
+          // Add the new bank account
+          const newBankAccount = {
+            accountHolderName:
+              customer.contextData.tempBankAccount.accountHolderName,
+            bankName: customer.contextData.tempBankAccount.bankName,
+            accountNumber: customer.contextData.tempBankAccount.accountNumber,
+          };
+
+          customer.bankAccounts.push(newBankAccount);
+          customer.markModified("bankAccounts");
+
+          // Clear temporary data
+          delete customer.contextData.tempBankAccount;
+          customer.markModified("contextData");
+
+          await customer.save();
+
+          // Show success message
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "✅ Bank account added successfully!"
+          );
+
+          // Return to bank account management menu
+          customer.updateConversationState("manage_bank_accounts");
+
+          setTimeout(async () => {
+            let bankMsg = "*💳 Your Saved Bank Accounts:*\n\n";
+
+            customer.bankAccounts.forEach((bank, i) => {
+              bankMsg += `${i + 1}. ${
+                bank.bankName
+              }\n   Account: ${bank.accountNumber.substring(0, 4)}xxxx (${
+                bank.accountHolderName
+              })\n`;
+            });
+
+            bankMsg +=
+              "\nWhat would you like to do?\n\n" +
+              "1. Add a new bank account\n" +
+              "2. Edit an existing bank account\n" +
+              "3. Remove a bank account\n" +
+              "4. Return to Profile";
+
+            await sendWhatsAppMessage(phoneNumber, bankMsg);
+          }, 1000);
+        } else if (text.trim() === "2" || text.toLowerCase().includes("no")) {
+          // Ask which part they want to edit
+          customer.updateConversationState("add_bank_edit_choice");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Which information would you like to change?\n\n" +
+              "1. Account Holder Name\n" +
+              "2. Bank\n" +
+              "3. Account Number\n" +
+              "4. Cancel and return to bank management"
+          );
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Invalid input. Please enter 1 (Yes) or 2 (No)."
+          );
+        }
+        break;
+
+      case "add_bank_edit_choice":
+        switch (text.trim()) {
+          case "1":
+            // Edit account holder name
+            customer.updateConversationState("add_bank_holder_name");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Please enter the account holder name:"
+            );
+            break;
+
+          case "2":
+            // Edit bank name - show bank selection again
+            customer.updateConversationState("add_bank_select");
+            await sendWhatsAppMessage(phoneNumber, "*Loading bank list...*");
+
+            setTimeout(async () => {
+              const bankListToSave = `
+*Select a bank:*
+
+2 - Bank Rakyat Indonesia (BRI)
+3 - Bank Ekspor Indonesia
+8 - Bank Mandiri
+9 - Bank Negara Indonesia (BNI)
+11 - Bank Danamon Indonesia
+13 - Bank Permata
+14 - Bank Central Asia (BCA)
+16 - Bank Maybank
+19 - Bank Panin
+20 - Bank Arta Niaga Kencana
+22 - Bank CIMB Niaga
+23 - Bank UOB Indonesia
+26 - Bank Lippo
+28 - Bank OCBC NISP
+30 - American Express Bank LTD
+31 - Citibank
+32 - JP. Morgan Chase Bank, N.A
+33 - Bank of America, N.A
+36 - Bank Multicor
+37 - Bank Artha Graha
+47 - Bank Pesona Perdania
+52 - Bank ABN Amro
+53 - Bank Keppel Tatlee Buana
+57 - Bank BNP Paribas Indonesia
+68 - Bank Woori Indonesia
+76 - Bank Bumi Arta
+87 - Bank Ekonomi
+89 - Bank Haga
+93 - Bank IFI
+95 - Bank Century/Bank J Trust Indonesia
+97 - Bank Mayapada
+110 - Bank BJB
+111 - Bank DKI
+112 - Bank BPD D.I.Y
+113 - Bank Jateng
+114 - Bank Jatim
+115 - Bank Jambi
+116 - Bank Aceh
+117 - Bank Sumut
+118 - Bank Sumbar
+119 - Bank Kepri
+120 - Bank Sumsel dan Babel
+121 - Bank Lampung
+122 - Bank Kalsel
+123 - Bank Kalbar
+124 - Bank Kaltim
+125 - Bank Kalteng
+126 - Bank Sulsel
+127 - Bank Sulut
+128 - Bank NTB
+129 - Bank Bali
+130 - Bank NTT
+131 - Bank Maluku
+132 - Bank Papua
+133 - Bank Bengkulu
+134 - Bank Sulteng
+135 - Bank Sultra
+137 - Bank Banten
+145 - Bank Nusantara Parahyangan
+146 - Bank Swadesi
+147 - Bank Muamalat
+151 - Bank Mestika
+152 - Bank Metro Express
+157 - Bank Maspion
+159 - Bank Hagakita
+161 - Bank Ganesha
+162 - Bank Windu Kentjana
+164 - Bank ICBC Indonesia
+166 - Bank Harmoni Internasional
+167 - Bank QNB
+200 - Bank Tabungan Negara (BTN)
+405 - Bank Swaguna
+425 - Bank BJB Syariah
+426 - Bank Mega
+441 - Bank Bukopin
+451 - Bank Syariah Indonesia (BSI)
+459 - Bank Bisnis Internasional
+466 - Bank Sri Partha
+484 - Bank KEB Hana Indonesia
+485 - Bank MNC Internasional
+490 - Bank Neo
+494 - Bank BNI Agro
+503 - Bank Nobu
+506 - Bank Mega Syariah
+513 - Bank Ina Perdana
+517 - Bank Panin Dubai Syariah
+521 - Bank Bukopin Syariah
+523 - Bank Sahabat Sampoerna
+535 - SeaBank
+536 - Bank BCA Syariah
+542 - Bank Jago
+547 - Bank BTPN Syariah
+553 - Bank Mayora
+555 - Bank Index Selindo
+947 - Bank Aladin Syariah
+
+1 - Other (enter manually)
+`;
+              await sendWhatsAppMessage(phoneNumber, bankListToSave);
+            }, 1000);
+            break;
+
+          case "3":
+            // Edit account number
+            customer.updateConversationState("add_bank_account_number");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Please enter the account number:"
+            );
+            break;
+
+          case "4":
+            // Cancel and return to bank management
+            customer.updateConversationState("manage_bank_accounts");
+
+            // Clear temporary data
+            delete customer.contextData.tempBankAccount;
+            customer.markModified("contextData");
+            await customer.save();
+
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Bank account creation canceled. Returning to bank management..."
+            );
+
+            setTimeout(async () => {
+              let bankMsg = "*💳 Your Saved Bank Accounts:*\n\n";
+
+              if (
+                !customer.bankAccounts ||
+                customer.bankAccounts.length === 0
+              ) {
+                bankMsg += "_No bank accounts saved yet._\n\n";
+              } else {
+                customer.bankAccounts.forEach((bank, i) => {
+                  bankMsg += `${i + 1}. ${
+                    bank.bankName
+                  }\n   Account: ${bank.accountNumber.substring(0, 4)}xxxx (${
+                    bank.accountHolderName
+                  })\n`;
+                });
+                bankMsg += "\n";
+              }
+
+              bankMsg +=
+                "What would you like to do?\n\n" +
+                "1. Add a new bank account\n" +
+                "2. Edit an existing bank account\n" +
+                "3. Remove a bank account\n" +
+                "4. Return to Profile";
+
+              await sendWhatsAppMessage(phoneNumber, bankMsg);
+            }, 1000);
+            break;
+
+          default:
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Invalid input. Please choose 1, 2, 3, or 4."
+            );
+        }
+        break;
+
+      case "edit_bank_select":
+        const editIndex = parseInt(text.trim()) - 1;
+
+        if (
+          isNaN(editIndex) ||
+          editIndex < 0 ||
+          !customer.bankAccounts ||
+          editIndex >= customer.bankAccounts.length
+        ) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Invalid bank selection. Please enter a valid number from the list."
+          );
+          break;
+        }
+
+        // ✅ Store the selected index for use in next case
+        customer.contextData = customer.contextData || {};
+        customer.contextData.editBankIndex = editIndex;
+        customer.markModified("contextData");
+        await customer.save(); // 🔥 THIS is the missing piece
+
+        // ✅ Move to next step
+        customer.updateConversationState("edit_bank_field");
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `*Editing Bank Account:*\n` +
+            `${customer.bankAccounts[editIndex].bankName} - Account: ${customer.bankAccounts[editIndex].accountNumber} (${customer.bankAccounts[editIndex].accountHolderName})\n\n` +
+            `What would you like to edit?\n\n` +
+            `1. Account Holder Name\n` +
+            `2. Bank Name\n` +
+            `3. Account Number\n` +
+            `4. Cancel and return to bank management`
+        );
+        break;
+
+      case "edit_bank_field":
+        const editOption = text.trim();
+        const bankIndex = customer.contextData?.editBankIndex;
+
+        if (
+          bankIndex === null ||
+          typeof bankIndex === "undefined" ||
+          !customer.bankAccounts ||
+          bankIndex >= customer.bankAccounts.length
+        ) {
+          customer.updateConversationState("manage_bank_accounts");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Something went wrong. Returning to bank management."
+          );
+          break;
+        }
+
+        switch (editOption) {
+          case "1":
+            // Edit account holder name
+            customer.updateConversationState("edit_bank_account_holder");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Please enter the new account holder name:"
+            );
+            break;
+
+          case "2":
+            // Edit bank name - resend bank list
+            customer.updateConversationState("edit_bank_name");
+            await sendWhatsAppMessage(phoneNumber, "*Loading bank list...*");
+
+            setTimeout(async () => {
+              const bankListToSave = `
+        *Select a bank:*
+        
+        2 - Bank Rakyat Indonesia (BRI)
+        3 - Bank Ekspor Indonesia
+        8 - Bank Mandiri
+        9 - Bank Negara Indonesia (BNI)
+        11 - Bank Danamon Indonesia
+        13 - Bank Permata
+        14 - Bank Central Asia (BCA)
+        16 - Bank Maybank
+        19 - Bank Panin
+        22 - Bank CIMB Niaga
+        23 - Bank UOB Indonesia
+        30 - American Express Bank LTD
+        31 - Citibank
+        32 - JP. Morgan Chase Bank, N.A
+        33 - Bank of America, N.A
+        441 - Bank Bukopin
+        451 - Bank Syariah Indonesia (BSI)
+        503 - Bank Nobu
+        535 - SeaBank
+        536 - Bank BCA Syariah
+        542 - Bank Jago
+        547 - Bank BTPN Syariah
+        
+        1 - Other (enter manually)
+                `;
+              await sendWhatsAppMessage(phoneNumber, bankListToSave);
+            }, 1000);
+            break;
+
+          case "3":
+            // Edit account number
+            customer.updateConversationState("edit_bank_account_number");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Please enter the new account number:"
+            );
+            break;
+
+          case "4":
+            // Cancel and return to bank management
+            delete customer.contextData.editBankIndex;
+            customer.markModified("contextData");
+            await customer.save();
+
+            customer.updateConversationState("manage_bank_accounts");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Edit cancelled. Returning to bank management..."
+            );
+            break;
+
+          default:
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Invalid input. Please enter 1, 2, 3 or 4."
+            );
+        }
+        break;
+
+      case "edit_bank_account_holder":
+        const index = customer.contextData?.editBankIndex;
+
+        if (
+          index === null ||
+          typeof index === "undefined" ||
+          !customer.bankAccounts ||
+          index >= customer.bankAccounts.length
+        ) {
+          customer.updateConversationState("manage_bank_accounts");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Something went wrong. Returning to bank management."
+          );
+          break;
+        }
+
+        customer.bankAccounts[index].accountHolderName = text.trim();
+        customer.markModified("bankAccounts");
+
+        // Clear the temp index BEFORE saving
+        delete customer.contextData.editBankIndex;
+        customer.markModified("contextData");
+
+        // ✅ Only one save — await and done
+        await customer.save();
+
+        customer.updateConversationState("manage_bank_accounts"); // this saves too, but after prior save is done
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "✅ Account holder name updated successfully."
+        );
+        let updatedProfileMessage =
+          `👤 *Your Profile* 👤\n\n` +
+          `Name: ${customer.name}\n` +
+          `📱 Master Number: ${cleanPhoneNumber(
+            customer.phoneNumber?.[0] || ""
+          )}\n`;
+
+        if (customer.phoneNumber.length > 1) {
+          updatedProfileMessage += `🔗 Connected Numbers:\n`;
+          customer.phoneNumber.slice(1).forEach((num, index) => {
+            updatedProfileMessage += `   ${index + 1}. ${cleanPhoneNumber(
+              num
+            )}\n`;
+          });
+        }
+
+        updatedProfileMessage +=
+          `Email: ${customer.contextData?.email || "Not provided"}\n\n` +
+          `Total Orders: ${customer.orderHistory.length}\n` +
+          `Referral Code: ${
+            customer.referralCode ||
+            "CM" + customer._id.toString().substring(0, 6)
+          }\n\n` +
+          `What would you like to do?\n\n` +
+          `1. Update Name\n` +
+          `2. Update Email\n` +
+          `3. Manage Addresses\n` +
+          `4. My Account \n` +
+          `5. Manage Bank Accounts\n` +
+          `6. Return to Main Menu`;
+
+        await sendWhatsAppMessage(phoneNumber, updatedProfileMessage);
+        break;
+
+      case "edit_bank_name":
+        const allBanks = {
+          2: "Bank Rakyat Indonesia (BRI)",
+          3: "Bank Ekspor Indonesia",
+          8: "Bank Mandiri",
+          9: "Bank Negara Indonesia (BNI)",
+          11: "Bank Danamon Indonesia",
+          13: "Bank Permata",
+          14: "Bank Central Asia (BCA)",
+          16: "Bank Maybank",
+          19: "Bank Panin",
+          20: "Bank Arta Niaga Kencana",
+          22: "Bank CIMB Niaga",
+          23: "Bank UOB Indonesia",
+          26: "Bank Lippo",
+          28: "Bank OCBC NISP",
+          30: "American Express Bank LTD",
+          31: "Citibank",
+          32: "JP. Morgan Chase Bank, N.A",
+          33: "Bank of America, N.A",
+          36: "Bank Multicor",
+          37: "Bank Artha Graha",
+          47: "Bank Pesona Perdania",
+          52: "Bank ABN Amro",
+          53: "Bank Keppel Tatlee Buana",
+          57: "Bank BNP Paribas Indonesia",
+          68: "Bank Woori Indonesia",
+          76: "Bank Bumi Arta",
+          87: "Bank Ekonomi",
+          89: "Bank Haga",
+          93: "Bank IFI",
+          95: "Bank Century/Bank J Trust Indonesia",
+          97: "Bank Mayapada",
+          110: "Bank BJB",
+          111: "Bank DKI",
+          112: "Bank BPD D.I.Y",
+          113: "Bank Jateng",
+          114: "Bank Jatim",
+          115: "Bank Jambi",
+          116: "Bank Aceh",
+          117: "Bank Sumut",
+          118: "Bank Sumbar",
+          119: "Bank Kepri",
+          120: "Bank Sumsel dan Babel",
+          121: "Bank Lampung",
+          122: "Bank Kalsel",
+          123: "Bank Kalbar",
+          124: "Bank Kaltim",
+          125: "Bank Kalteng",
+          126: "Bank Sulsel",
+          127: "Bank Sulut",
+          128: "Bank NTB",
+          129: "Bank Bali",
+          130: "Bank NTT",
+          131: "Bank Maluku",
+          132: "Bank Papua",
+          133: "Bank Bengkulu",
+          134: "Bank Sulteng",
+          135: "Bank Sultra",
+          137: "Bank Banten",
+          145: "Bank Nusantara Parahyangan",
+          146: "Bank Swadesi",
+          147: "Bank Muamalat",
+          151: "Bank Mestika",
+          152: "Bank Metro Express",
+          157: "Bank Maspion",
+          159: "Bank Hagakita",
+          161: "Bank Ganesha",
+          162: "Bank Windu Kentjana",
+          164: "Bank ICBC Indonesia",
+          166: "Bank Harmoni Internasional",
+          167: "Bank QNB",
+          200: "Bank Tabungan Negara (BTN)",
+          405: "Bank Swaguna",
+          425: "Bank BJB Syariah",
+          426: "Bank Mega",
+          441: "Bank Bukopin",
+          451: "Bank Syariah Indonesia (BSI)",
+          459: "Bank Bisnis Internasional",
+          466: "Bank Sri Partha",
+          484: "Bank KEB Hana Indonesia",
+          485: "Bank MNC Internasional",
+          490: "Bank Neo",
+          494: "Bank BNI Agro",
+          503: "Bank Nobu",
+          506: "Bank Mega Syariah",
+          513: "Bank Ina Perdana",
+          517: "Bank Panin Dubai Syariah",
+          521: "Bank Bukopin Syariah",
+          523: "Bank Sahabat Sampoerna",
+          535: "SeaBank",
+          536: "Bank BCA Syariah",
+          542: "Bank Jago",
+          547: "Bank BTPN Syariah",
+          553: "Bank Mayora",
+          555: "Bank Index Selindo",
+          947: "Bank Aladin Syariah",
+          1: "Other (enter manually)",
+        };
+
+        const selectedBankName = allBanks[text.trim()];
+        const bankIndexToEdit = customer.contextData?.editBankIndex;
+
+        if (
+          bankIndexToEdit === null ||
+          typeof bankIndexToEdit === "undefined" ||
+          !customer.bankAccounts ||
+          bankIndexToEdit >= customer.bankAccounts.length
+        ) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Invalid session. Returning to bank management..."
+          );
+          customer.updateConversationState("manage_bank_accounts");
+          break;
+        }
+
+        if (text.trim() === "1") {
+          customer.updateConversationState("edit_bank_manual_entry");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Please enter the new bank name manually:"
+          );
+          break;
+        }
+
+        if (!selectedBankName) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Invalid selection. Please enter a valid number from the list."
+          );
+          break;
+        }
+
+        customer.bankAccounts[bankIndexToEdit].bankName = selectedBankName;
+        customer.markModified("bankAccounts");
+
+        delete customer.contextData.editBankIndex;
+        customer.markModified("contextData");
+
+        await customer.save();
+        customer.updateConversationState("manage_bank_accounts");
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "✅ Bank name updated successfully."
+        );
+        let ProfileMessage =
+          `👤 *Your Profile* 👤\n\n` +
+          `Name: ${customer.name}\n` +
+          `📱 Master Number: ${cleanPhoneNumber(
+            customer.phoneNumber?.[0] || ""
+          )}\n`;
+
+        if (customer.phoneNumber.length > 1) {
+          ProfileMessage += `🔗 Connected Numbers:\n`;
+          customer.phoneNumber.slice(1).forEach((num, index) => {
+            ProfileMessage += `   ${index + 1}. ${cleanPhoneNumber(num)}\n`;
+          });
+        }
+
+        ProfileMessage +=
+          `Email: ${customer.contextData?.email || "Not provided"}\n\n` +
+          `Total Orders: ${customer.orderHistory.length}\n` +
+          `Referral Code: ${
+            customer.referralCode ||
+            "CM" + customer._id.toString().substring(0, 6)
+          }\n\n` +
+          `What would you like to do?\n\n` +
+          `1. Update Name\n` +
+          `2. Update Email\n` +
+          `3. Manage Addresses\n` +
+          `4. My Account \n` +
+          `5. Manage Bank Accounts\n` +
+          `6. Return to Main Menu`;
+
+        await sendWhatsAppMessage(phoneNumber, ProfileMessage);
+        break;
+      case "edit_bank_manual_entry":
+        const manualBankIndex = customer.contextData?.editBankIndex;
+
+        if (
+          manualBankIndex === null ||
+          typeof manualBankIndex === "undefined" ||
+          !customer.bankAccounts ||
+          manualBankIndex >= customer.bankAccounts.length
+        ) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Invalid session. Returning to bank management..."
+          );
+          customer.updateConversationState("manage_bank_accounts");
+          break;
+        }
+
+        const manualBankName = text.trim();
+
+        if (!manualBankName || manualBankName.length < 3) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Please enter a valid bank name (at least 3 characters)."
+          );
+          break;
+        }
+
+        customer.bankAccounts[manualBankIndex].bankName = manualBankName;
+        customer.markModified("bankAccounts");
+
+        delete customer.contextData.editBankIndex;
+        customer.markModified("contextData");
+
+        await customer.save();
+        customer.updateConversationState("manage_bank_accounts");
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ Bank name updated to *${manualBankName}* successfully.`
+        );
+        break;
+
+      case "edit_bank_account_number":
+        const editIdx = customer.contextData?.editBankIndex;
+
+        if (
+          editIdx === null ||
+          typeof editIdx === "undefined" ||
+          !customer.bankAccounts ||
+          editIdx >= customer.bankAccounts.length
+        ) {
+          customer.updateConversationState("manage_bank_accounts");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Something went wrong. Returning to bank management."
+          );
+          break;
+        }
+
+        const newAccountNumber = text.trim();
+
+        if (!/^\d{5,20}$/.test(newAccountNumber)) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Invalid account number. Please enter a numeric account number (5–20 digits)."
+          );
+          break;
+        }
+
+        customer.bankAccounts[editIdx].accountNumber = newAccountNumber;
+        customer.markModified("bankAccounts");
+
+        // Clean up index
+        delete customer.contextData.editBankIndex;
+        customer.markModified("contextData");
+
+        // ✅ Only call .save() ONCE here, then await it before doing anything else
+        await customer.save();
+
+        // ✅ AFTER save, update state
+        await customer.updateConversationState("manage_bank_accounts");
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "✅ Account number updated successfully."
+        );
+        let Message =
+          `👤 *Your Profile* 👤\n\n` +
+          `Name: ${customer.name}\n` +
+          `📱 Master Number: ${cleanPhoneNumber(
+            customer.phoneNumber?.[0] || ""
+          )}\n`;
+
+        if (customer.phoneNumber.length > 1) {
+          Message += `🔗 Connected Numbers:\n`;
+          customer.phoneNumber.slice(1).forEach((num, index) => {
+            Message += `   ${index + 1}. ${cleanPhoneNumber(num)}\n`;
+          });
+        }
+
+        Message +=
+          `Email: ${customer.contextData?.email || "Not provided"}\n\n` +
+          `Total Orders: ${customer.orderHistory.length}\n` +
+          `Referral Code: ${
+            customer.referralCode ||
+            "CM" + customer._id.toString().substring(0, 6)
+          }\n\n` +
+          `What would you like to do?\n\n` +
+          `1. Update Name\n` +
+          `2. Update Email\n` +
+          `3. Manage Addresses\n` +
+          `4. My Account \n` +
+          `5. Manage Bank Accounts\n` +
+          `6. Return to Main Menu`;
+
+        await sendWhatsAppMessage(phoneNumber, Message);
         break;
 
       // New main account menu
       case "account_main":
         switch (text) {
           case "1":
-            // Funds submenu
+            // Go straight to funds summary
             await customer.updateConversationState("account_funds");
             await sendWhatsAppMessage(
               phoneNumber,
-              `💰 *My Funds* 💰\n\n` +
-                `Please select an option:\n\n` +
-                `1. My earnings (forman)\n` +
-                `2. My refunds\n` +
-                `3. Total funds available\n` +
-                `4. Return to Account Menu`
+              ` *My Funds* \n\n` +
+                ` *My Earnings (Forman)*: Rs. 5,200.00\n` +
+                ` *My Refunds*: Rs. 1,000.00\n` +
+                ` *Total Funds Available*: Rs. 6,200.00\n\n` +
+                `With these funds, you can buy anything you want from our shop — cement, bricks, paint, pipes... even dreams  \n\n` +
+                `4. Return to Main Menu`
             );
             break;
+
           case "2":
             // Forman submenu
             await customer.updateConversationState("account_forman");
@@ -2702,7 +4050,8 @@ for ${formatRupiah(totalPrice)}`;
               )}${label}\n`;
             });
 
-            switchListMsg += `\nReply with the  index of the number  you want to replace.`;
+            switchListMsg += `\nReply with the  index of the number  you want to replace.\n\n ----------------------------------------------------\nAll the information related to this number will be switched to the new number and the account and information will no longer be available to you on this number
+`;
 
             await sendWhatsAppMessage(phoneNumber, switchListMsg);
             break;
@@ -2744,8 +4093,9 @@ for ${formatRupiah(totalPrice)}`;
                 `1. Update Name\n` +
                 `2. Update Email\n` +
                 `3. Manage Addresses\n` +
-                `4. My Account 💰\n` +
-                `5. Return to Main Menu`;
+                `4. My Account \n` +
+                `5. Manage Bank Accounts\n` +
+                `6. Return to Main Menu`;
 
               await sendWhatsAppMessage(phoneNumber, updatedProfileMessage);
             }, 500);
@@ -2760,65 +4110,17 @@ for ${formatRupiah(totalPrice)}`;
         break;
 
       // Funds submenu handling
+      // Funds submenu handling - simplified to show all details at once
       case "account_funds":
-        switch (text) {
-          case "1":
-            // My earnings
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `💵 *My Earnings (Forman)* 💵\n\n` +
-                `Current earnings: Rs. 0.00\n\n` +
-                `You don't have any earnings yet.\n\n` +
-                `Type any key to return to Funds menu.`
-            );
-            break;
-          case "2":
-            // My refunds
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `🔄 *My Refunds* 🔄\n\n` +
-                `Pending refunds: Rs. 0.00\n` +
-                `Processed refunds: Rs. 0.00\n\n` +
-                `You don't have any refunds.\n\n` +
-                `Type any key to return to Funds menu.`
-            );
-            break;
-          case "3":
-            // Total funds available
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `💰 *Total Funds Available* 💰\n\n` +
-                `Available balance: Rs. 0.00\n\n` +
-                `You don't have any funds available.\n\n` +
-                `Type any key to return to Funds menu.`
-            );
-            break;
-          case "4":
-            // Return to Account Menu
-            await customer.updateConversationState("account_main");
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `💰 *My Account* 💰\n\n` +
-                `Please select an option:\n\n` +
-                `1. Funds\n` +
-                `2. Forman\n` +
-                `3. Switch my number\n` +
-                `4. Return to Profile`
-            );
-            break;
-          default:
-            // Return to funds menu
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `💰 *My Funds* 💰\n\n` +
-                `Please select an option:\n\n` +
-                `1. My earnings (forman)\n` +
-                `2. My refunds\n` +
-                `3. Total funds available\n` +
-                `4. Return to Account Menu`
-            );
-            break;
-        }
+        await sendWhatsAppMessage(
+          phoneNumber,
+          ` *My Funds* \n\n` +
+            ` *My Earnings (Forman)*: Rs. 5,200.00\n` +
+            ` *My Refunds*: Rs. 1,000.00\n` +
+            ` *Total Funds Available*: Rs. 6,200.00\n\n` +
+            `With these funds, you can buy anything you want from our shop — cement, bricks, paint, pipes... even dreams \n\n` +
+            `4. Return to Main Menu`
+        );
         break;
 
       // Forman submenu handling
@@ -2851,10 +4153,10 @@ for ${formatRupiah(totalPrice)}`;
             await customer.updateConversationState("account_main");
             await sendWhatsAppMessage(
               phoneNumber,
-              `💰 *My Account* 💰\n\n` +
+              ` *My Account* \n\n` +
                 `Please select an option:\n\n` +
                 `1. Funds\n` +
-                `2. Forman\n` +
+                `2. Forman( eligibility)\n` +
                 `3. Switch my number\n` +
                 `4. Return to Profile`
             );
@@ -2865,8 +4167,8 @@ for ${formatRupiah(totalPrice)}`;
               phoneNumber,
               `👨‍💼 *Forman Details* 👨‍💼\n\n` +
                 `Please select an option:\n\n` +
-                `1. Forman status\n` +
-                `2. Commission details\n` +
+                `1. Forman (eligibility)\n` +
+                `2. Commission ( eligibility)\n` +
                 `3. Return to Account Menu`
             );
             break;
@@ -2897,7 +4199,7 @@ for ${formatRupiah(totalPrice)}`;
           return;
         }
 
-        // ✅ Correctly initialize AND save the index
+        // Initialize AND save the index
         customer.set("contextData.numberSwitchIndex", selectedIndex);
         customer.markModified("contextData");
         customer.conversationState = "universal_number_switch_input";
@@ -2907,15 +4209,21 @@ for ${formatRupiah(totalPrice)}`;
 
         await sendWhatsAppMessage(
           phoneNumber,
-          `✅ Got it! Now send the *new number* you'd like to use instead.`
+          `✅ Got it! Now send the *new number* (starting with country code e.g 62 without any spaces and + symbol) you'd like to use instead.`
         );
         break;
       }
+
+      // In your Customer schema, add this field:
+      // tempNumberToSwitch: { type: String, default: null },
+
+      // Then modify these case handlers:
 
       case "universal_number_switch_input": {
         console.log("📦 Loaded contextData:", customer.contextData);
 
         const switchIdx = customer.contextData?.numberSwitchIndex;
+        console.log("Switch index from contextData:", switchIdx);
 
         if (
           switchIdx === undefined ||
@@ -2933,6 +4241,7 @@ for ${formatRupiah(totalPrice)}`;
 
         const newRaw = text.trim().replace(/[^0-9]/g, "");
         const newFormatted = `${newRaw}@c.us`;
+        console.log("New formatted number:", newFormatted);
 
         if (!/^\d{10,15}$/.test(newRaw)) {
           await sendWhatsAppMessage(
@@ -2942,36 +4251,306 @@ for ${formatRupiah(totalPrice)}`;
           return;
         }
 
-        const oldNumber = customer.phoneNumber[switchIdx];
-        customer.phoneNumber[switchIdx] = newFormatted;
+        // Store the new number in a dedicated field
+        customer.tempNumberToSwitch = newFormatted;
+        console.log("Saving tempNumberToSwitch:", newFormatted);
+        customer.conversationState = "universal_number_switch_confirm";
+        await customer.save();
 
+        // Verify the data was saved correctly
+        console.log(
+          "After save - tempNumberToSwitch:",
+          customer.tempNumberToSwitch
+        );
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `📱 Is this number correct? *${cleanPhoneNumber(
+            newFormatted
+          )}*\n\n1. Yes, continue\n2. No, I want to edit it`
+        );
+        break;
+      }
+
+      case "universal_number_switch_confirm": {
+        console.log("Processing confirmation with input:", text);
+        console.log("Current tempNumberToSwitch:", customer.tempNumberToSwitch);
+
+        const answer = text.trim().toLowerCase();
+
+        if (answer === "2" || answer === "no") {
+          // User wants to edit the number
+          customer.conversationState = "universal_number_switch_input";
+          await customer.save();
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `Please enter the *new number* again (starting with country code e.g 62 without any spaces and + symbol):`
+          );
+          return;
+        }
+
+        if (answer !== "1" && answer !== "yes") {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `Please reply with *1* (Yes) or *2* (No).`
+          );
+          return;
+        }
+
+        // User confirmed the number, now check if it exists in the database
+        const switchIdx = customer.contextData?.numberSwitchIndex;
+        const newNumber = customer.tempNumberToSwitch;
+
+        console.log("Retrieved switch index:", switchIdx);
+        console.log("Retrieved new number:", newNumber);
+
+        if (switchIdx === undefined || switchIdx === null) {
+          console.error("Missing switch index in contextData");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `❌ Switch failed. Missing index information. Please start again from the switch menu.`
+          );
+          await customer.updateConversationState("account_main");
+          return;
+        }
+
+        if (!newNumber) {
+          console.error("Missing new number in tempNumberToSwitch");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `❌ Switch failed. Missing new number information. Please start again from the switch menu.`
+          );
+          await customer.updateConversationState("account_main");
+          return;
+        }
+
+        try {
+          // Check if the number already exists in another account
+          const existingCustomer = await Customer.findOne({
+            phoneNumber: newNumber,
+            _id: { $ne: customer._id }, // Exclude current customer
+          });
+
+          if (existingCustomer) {
+            console.log("Number already exists in another account");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `❌ This number is already associated with another account. Please try a different number.`
+            );
+            customer.conversationState = "universal_number_switch_input";
+            await customer.save();
+            return;
+          }
+
+          // Final warning about account transfer
+          customer.conversationState = "universal_number_switch_final_confirm";
+          await customer.save();
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `⚠️ *Warning*: All your account progress will be switched to ${cleanPhoneNumber(
+              newNumber
+            )}. Are you sure?\n\n1. Yes, switch my number\n2. No, cancel\n ------------------------------------------------------------------\nAll the information related to this number will be switched to the new number and the account and information will no longer be available to you on this number
+`
+          );
+        } catch (error) {
+          console.error("Error during number existence check:", error);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `❌ An error occurred during the switch process. Please try again later.`
+          );
+          await customer.updateConversationState("account_main");
+        }
+        break;
+      }
+
+      case "universal_number_switch_final_confirm": {
+        const answer = text.trim().toLowerCase();
+
+        if (answer === "2" || answer === "no") {
+          // User canceled the operation
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `✅ Number switch canceled. Returning to Account menu.`
+          );
+          await customer.updateConversationState("account_main");
+          return;
+        }
+
+        if (answer !== "1" && answer !== "yes") {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `Please reply with *1* (Yes) or *2* (No).`
+          );
+          return;
+        }
+
+        // User gave final confirmation, proceed with the switch
+        const switchIdx = customer.contextData?.numberSwitchIndex;
+        const newNumber = customer.tempNumberToSwitch;
+
+        if (
+          switchIdx === undefined ||
+          switchIdx < 0 ||
+          switchIdx >= customer.phoneNumber.length ||
+          !newNumber
+        ) {
+          console.error("❌ Invalid data for switch:", {
+            switchIdx,
+            newNumber,
+          });
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `❌ Switch failed. Please start again from the switch menu.`
+          );
+          await customer.updateConversationState("account_main");
+          return;
+        }
+
+        const oldNumber = customer.phoneNumber[switchIdx];
+        customer.phoneNumber[switchIdx] = newNumber;
+
+        // Add to history
         customer.numberLinkedHistory = customer.numberLinkedHistory || [];
         customer.numberLinkedHistory.push({
           number: oldNumber,
-          replacedWith: newFormatted,
+          replacedWith: newNumber,
           replacedAt: new Date(),
         });
 
-        customer.markModified("contextData");
+        // Clear the temporary data
+        customer.tempNumberToSwitch = null;
         await customer.updateConversationState("account_main");
         await customer.save();
 
+        // Send notifications as in original code
         await sendWhatsAppMessage(
           phoneNumber,
           `✅ Replaced *${cleanPhoneNumber(
             oldNumber
-          )}* with *${cleanPhoneNumber(newFormatted)}* successfully.`
+          )}* with *${cleanPhoneNumber(newNumber)}* successfully.`
+        );
+        await sendWhatsAppMessage(
+          phoneNumber,
+          ` All your progress has been shifted to the new number.`
+        );
+        await sendWhatsAppMessage(
+          phoneNumber,
+          ` You can start shopping as a new customer with a 'hi' massage with this number !!! .`
         );
 
         await sendWhatsAppMessage(
-          newFormatted,
-          `🎉 Your account of  Construction Materials Hub! 🏗️ has been swicthed to this number successfully `
+          newNumber,
+          `🎉  hi ${customer.name} , Your account of  Construction Materials Hub! 🏗️ has been swicthed to this number `
         );
         await sendWhatsAppMessage(
-          newFormatted,
-          `You can continue ordering now from your new number with the same progress  `
+          newNumber,
+          `You can continue ordering here with your new  number with the same saved  progress  `
         );
-        await sendWhatsAppMessage(newFormatted, `Happy Shopping 😊 `);
+        // Store the old number for verification purpose
+        customer.pendingVerificationOldNumber = oldNumber;
+        customer.tempVerificationTries = 0;
+        await customer.save();
+
+        await sendWhatsAppMessage(
+          newNumber,
+          `📩 To verify your account, please enter the number (with country code, no + or spaces) from which you switched to this number.`
+        );
+
+        await Customer.updateOne(
+          { _id: customer._id },
+          { conversationState: "verify_switched_number" }
+        );
+
+        break;
+      }
+
+      case "verify_switched_number": {
+        const input = text.trim().replace(/[^0-9]/g, "") + "@c.us";
+
+        if (!customer.pendingVerificationOldNumber) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Something went wrong. Please try again later."
+          );
+          await customer.updateConversationState("account_main");
+          return;
+        }
+
+        if (input === customer.pendingVerificationOldNumber) {
+          // SUCCESS ✅
+          customer.conversationState = "account_main";
+          customer.tempVerificationTries = 0;
+          customer.pendingVerificationOldNumber = null;
+          await customer.save();
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `✅ Verified successfully! You can now continue shopping with this number.`
+          );
+          await sendMainMenu(phoneNumber, customer);
+          return;
+        }
+
+        customer.tempVerificationTries += 1;
+
+        if (customer.tempVerificationTries >= 3) {
+          // FAILURE ❌ — Revert the switch
+          const currentIndex = customer.phoneNumber.findIndex(
+            (num) => num === phoneNumber
+          );
+
+          if (currentIndex === -1 || !customer.pendingVerificationOldNumber) {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `❌ Verification failed and we couldn't revert the switch. Please contact support.`
+            );
+            await customer.updateConversationState("account_main");
+            return;
+          }
+
+          const failedNumber = customer.phoneNumber[currentIndex];
+          const revertNumber = customer.pendingVerificationOldNumber;
+
+          // Replace new number back with old
+          customer.phoneNumber[currentIndex] = revertNumber;
+
+          customer.numberLinkedHistory.push({
+            number: failedNumber,
+            revertedBackTo: revertNumber,
+            revertedAt: new Date(),
+          });
+
+          customer.tempVerificationTries = 0;
+          customer.pendingVerificationOldNumber = null;
+          await customer.save();
+
+          // Notify NEW number (failed one)
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `❌ Verification failed. You have been switched back to your original number.`
+          );
+
+          // Notify OLD number (restored one)
+          await sendWhatsAppMessage(
+            revertNumber,
+            `⚠️ Verification to switch your number to *${cleanPhoneNumber(
+              failedNumber
+            )}* failed. You can continue shopping here as usual.`
+          );
+
+          await sendMainMenu(revertNumber, customer);
+        } else {
+          // Try again
+          const triesLeft = 3 - customer.tempVerificationTries;
+          await customer.save();
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `❌ Incorrect number. You have ${triesLeft} attempt(s) remaining.\n\nPlease enter the number you switched *from*.`
+          );
+        }
         break;
       }
 
@@ -3016,8 +4595,9 @@ for ${formatRupiah(totalPrice)}`;
             `1. Update Name\n` +
             `2. Update Email\n` +
             `3. Manage Addresses\n` +
-            `4. My Account 💰\n` +
-            `5. Return to Main Menu`;
+            `4. My Account \n` +
+            `5. Manage Bank Accounts\n` +
+            `6. Return to Main Menu`;
 
           await sendWhatsAppMessage(phoneNumber, updatedProfileMessage);
         }, 1500);
@@ -3067,8 +4647,9 @@ for ${formatRupiah(totalPrice)}`;
               `1. Update Name\n` +
               `2. Update Email\n` +
               `3. Manage Addresses\n` +
-              `4. My Account 💰\n` +
-              `5. Return to Main Menu`;
+              `4. My Account \n` +
+              `5. Manage Bank Accounts\n` +
+              `6. Return to Main Menu`;
 
             await sendWhatsAppMessage(phoneNumber, updatedProfileMessage);
           }, 1500);
@@ -3161,11 +4742,11 @@ for ${formatRupiah(totalPrice)}`;
                 `1. Update Name\n` +
                 `2. Update Email\n` +
                 `3. Manage Addresses\n` +
-                `4. My Account 💰\n` +
-                `5. Return to Main Menu`;
+                `4. My Account \n` +
+                `5. Manage Bank Accounts\n` +
+                `6. Return to Main Menu`;
 
               await sendWhatsAppMessage(phoneNumber, updatedProfileMessage);
-
               break;
 
             case "4":
@@ -3979,7 +5560,7 @@ for ${formatRupiah(totalPrice)}`;
             // Payment info with emoji indicators
             const paymentEmojis = {
               pending: "⏳",
-              paid: "💰",
+              paid: "",
               failed: "❌",
             };
             orderDetails += `Payment Status: ${
@@ -4066,51 +5647,69 @@ for ${formatRupiah(totalPrice)}`;
           await sendMainMenu(phoneNumber, customer);
         }
         break;
-      case "order_confirmation":
-        // Confirmation message
+      case "order_confirmation": {
         await customer.updateConversationState("order_confirmation");
 
-        // Get the latest order
         const latestOrder =
           customer.orderHistory[customer.orderHistory.length - 1];
 
-        // Basic confirmation
+        // Save order ID to context in case we need to reference it later
+        customer.contextData.latestOrderId = latestOrder.orderId;
+        await customer.save();
+
+        // Basic confirmation message
         await sendWhatsAppMessage(
           phoneNumber,
-          "Your payment will be confirmed within 30 min\n" +
-            "Please call us or come back in 30 minutes for the confirmation.\n\n" +
-            `Your order id is #${latestOrder.orderId}. Keep it safe please, ${customer.name}.`
+          `Your order is in progress and will be confirmed once payment is verified\n` +
+            `🧾 Order ID: *#${latestOrder.orderId}*\n` +
+            `Keep it safe please, ${customer.name}.`
         );
 
-        // Add pickup timing info if applicable
+        // 🚨 Self Pickup logic (regardless of amount)
         if (latestOrder.deliveryOption === "Self Pickup") {
-          let pickupMessage = "Your order will be ready in:\n\n";
-
-          if (latestOrder.totalAmount < 2000000) {
-            pickupMessage +=
-              "if smaller than 2million straight away just come and picket up";
-          } else if (latestOrder.totalAmount > 25000000) {
-            pickupMessage +=
-              "if order is larger then 25 million: in 1 hours time you can pickup";
+          if (latestOrder.totalAmount >= 25000000) {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "🕐 Your order will be ready in 1 hour for pickup!"
+            );
+          } else if (latestOrder.totalAmount < 2000000) {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "🛍️ Your order is ready for pickup immediately!"
+            );
           } else {
-            pickupMessage +=
-              "We'll notify you when your order is ready for pickup.";
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "📦 Your order will be prepared for pickup shortly!"
+            );
           }
 
-          await sendWhatsAppMessage(phoneNumber, pickupMessage);
+          // ⏳ Ask for pickup day — this is now universal
+          await customer.updateConversationState("pickup_date_main");
+          const msg =
+            "📅 *When are you planning to pick up?*\n" +
+            "--------------------------------------------\n" +
+            "1. Today\n" +
+            "2. Tomorrow\n" +
+            "3. Later (choose a custom date within the next 13 days)";
+
+          await sendWhatsAppMessage(phoneNumber, msg);
+          return; // Do NOT proceed to main menu yet — wait for pickup info
         }
 
-        // Send final thank you message
+        // 🧾 For non-pickup orders: thank you message + main menu
         setTimeout(async () => {
           await sendWhatsAppMessage(
             phoneNumber,
             "Thank you for shopping with us! Don't forget to share your referral link and check out our discounts for more savings. Have a great day!"
           );
 
-          // Reset state to main menu
+          await customer.updateConversationState("main_menu");
           await sendMainMenu(phoneNumber, customer);
         }, 3000);
+
         break;
+      }
 
       case "referral":
         if (text === "0") {

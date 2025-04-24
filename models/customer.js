@@ -97,11 +97,26 @@ const customerSchema = new mongoose.Schema(
     currentDiscountProductPrice: Number,
     currentDiscountProductOriginalPrice: Number,
     currentDiscountCategory: String,
+    pickupPlan: {
+      date: { type: String, default: null }, // e.g., "2025-04-20"
+      timeSlot: { type: String, default: null }, // e.g., "12 PM – 3 PM"
+      reminderSent: { type: Boolean, default: false },
+    },
+
+    tempVerificationTries: { type: Number, default: 0 }, // counter for the new number
+    pendingVerificationOldNumber: { type: String, default: null }, // stores old number to verify against
+
+    tempNumberToSwitch: { type: String, default: null },
     // Add this field to the cart sub-schema in the customer schema
     ecoDeliveryDiscount: {
       type: Number,
       default: 0,
     },
+    pickupDateList: {
+      type: [String],
+      default: [],
+    },
+
     // ✅ Now this is valid
     supportTickets: [supportTicketSchema],
 
@@ -120,6 +135,22 @@ const customerSchema = new mongoose.Schema(
 
       editAddressIndex: Number, // <-- Add this field to fix the issue
       editAddressField: String, // <-- Also add this field for completeness
+      editBankIndex: {
+        type: Number,
+        default: null,
+      },
+      tempBankAccount: {
+        type: {
+          accountHolderName: { type: String, default: "" },
+          bankName: { type: String, default: "" },
+          accountNumber: { type: String, default: "" },
+        },
+        default: () => ({
+          accountHolderName: "",
+          bankName: "",
+          accountNumber: "",
+        }),
+      },
 
       // Modify tempAddress to have a default empty object
       tempAddress: {
@@ -145,6 +176,23 @@ const customerSchema = new mongoose.Schema(
       transactionId: String,
       temporaryItemDetails: Object, // For temporary storage during shopping process
     },
+
+    bankAccounts: [
+      {
+        accountHolderName: { type: String },
+        bankName: { type: String },
+        accountNumber: { type: String },
+      },
+    ],
+    payerNames: {
+      type: [String],
+      default: [],
+    },
+    bankNames: {
+      type: [String],
+      default: [],
+    },
+
     lastInteraction: {
       type: Date,
       default: Date.now,
