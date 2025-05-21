@@ -6,11 +6,13 @@ const path = require("path");
 const dotenv = require("dotenv");
 const { router: adminAuthRouter } = require("./routes/adminAuth");
 const Admin = require("./models/admin");
+const ordersRouter = require("./routes/orders");
 const employeeRoutes = require("./routes/employeeRoutes");
 const supplierRoutes = require("./routes/supplierRoutes");
 const productRoutes = require("./routes/productRoutes");
 const categoryRoutes = require("./routes/categoryRoutes");
-// Import routes
+const customersRouter = require("./routes/customers");
+
 const chatbotRouter = require("./routes/chatbot-router");
 
 // Load environment variables
@@ -70,6 +72,8 @@ app.use("/api/suppliers", supplierRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/chatbot", chatbotRouter);
 app.use("/api/categories", categoryRoutes);
+app.use("/api", ordersRouter);
+app.use("/api", customersRouter);
 
 // Serve static assets in production
 if (process.env.NODE_ENV === "production") {

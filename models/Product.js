@@ -1,215 +1,139 @@
 const mongoose = require("mongoose");
+const { Schema } = mongoose;
 
-const specificationSchema = new mongoose.Schema({
-  height: String,
-  length: String,
-  width: String,
-  depth: String,
-  colours: String,
-  unit: String,
-  id: Number,
-});
+// Specification sub-schema
+const specificationSchema = new Schema(
+  {
+    height: { type: Number },
+    length: { type: Number },
+    width: { type: Number },
+    depth: { type: Number },
+    weight: { type: Number }, // weight in kg or unit
+    colours: { type: String },
+    id: { type: Number },
+  },
+  { _id: false }
+);
 
-const productSchema = new mongoose.Schema({
-  // Reference to Supplier model
-  supplierReference: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "Supplier",
-  },
-  safetyDaysStock: String,
-  noReorder: { type: Boolean, default: false },
-  useStockAmount: { type: Boolean, default: false },
-  useSafetyDays: { type: Boolean, default: false },
-
-  // Basic information
-  productId: {
-    type: String,
-    unique: true,
-  },
-  productType: {
-    type: String,
-    enum: ["Parent", "Child", "Normal"],
-    required: true,
-  },
-  productName: {
-    type: String,
-    required: function () {
-      return this.productType === "Parent" || this.productType === "Normal";
-    },
-  },
-  subtitle: String,
-  brand: {
-    type: String,
-    required: function () {
-      return this.productType === "Parent" || this.productType === "Normal";
-    },
-  },
-  description: {
-    type: String,
-    required: function () {
-      return this.productType === "Parent" || this.productType === "Normal";
-    },
-  },
-
-  // Child product specific fields
-  parentProduct: {
-    type: String,
-    required: function () {
-      return this.productType === "Child";
-    },
-  },
-  globalTradeItemNumber: String,
-  k3lNumber: String,
-  sniNumber: String,
-  varianceName: {
-    type: String,
-    required: function () {
-      return this.productType === "Child";
-    },
-  },
-  subtitleDescription: {
-    type: String,
-    required: function () {
-      return this.productType === "Child";
-    },
-  },
-
-  // Dimensions and specifications
-  heightCm: String,
-  widthCm: String,
-  depthCm: String,
-  weightKg: String,
-  specifications: [specificationSchema],
-
-  // Inventory details
-  stock: {
-    type: Number,
-    default: 0,
-  },
-  minimumOrder: {
-    type: Number,
-    default: 1,
-  },
-  highestValue: String,
-  normalShelvesCount: String,
-  highShelvesCount: String,
-  deliveryTime: String,
-
-  // Reorder settings
-  reOrderSetting: {
-    type: String,
-    default: "2 days average",
-  },
-  inventoryInDays: {
-    type: String,
-    default: "5days",
-  },
-  deliveryPeriod: {
-    type: String,
-    default: "1 days",
-  },
-  orderTimeBackupInventory: String,
-  stockAmount: String, // Added field for stock amount
-  safetyDays: String, // Added field for safety days
-  deliveryDays: String, // Added field for delivery days
-
-  // Supplier information
-  alternateSupplier: String,
-  supplierInformation: String,
-  supplierWebsite: String,
-  supplierContact: String,
-  supplierName: String,
-  supplierAddress: String,
-  supplierEmail: String,
-
-  // Pricing information
-  anyDiscount: String,
-  priceAfterDiscount: String,
-  suggestedRetailPrice: String,
-
-  // Product visibility and categorization
-  visibility: {
-    type: String,
-    enum: ["Public", "Private"],
-    default: "Public",
-  },
-  tags: [String],
-  categories: [
-    {
+// Main Product schema
+const productSchema = new Schema(
+  {
+    productId: { type: String, unique: true },
+    productType: {
       type: String,
+      enum: ["Parent", "Child", "Normal"],
       required: true,
     },
-  ],
-  subCategories: [
-    {
-      type: String,
-      required: true,
+    productName: { type: String, required: true },
+    subtitle: String,
+    brand: String,
+    description: String,
+
+    // Child-only
+    parentProduct: String,
+    varianceName: String,
+    subtitleDescription: String,
+
+    // Identifiers
+    globalTradeItemNumber: String,
+    k3lNumber: String,
+    sniNumber: String,
+
+    // Specs
+    specifications: [specificationSchema],
+
+    // Inventory
+    stock: { type: Number, default: 0 },
+    minimumOrder: { type: Number, default: 1 },
+    highestValue: String,
+    normalShelvesCount: Number,
+    highShelvesCount: Number,
+
+    useStockAmount: { type: Boolean, default: false },
+    useSafetyDays: { type: Boolean, default: false },
+    noReorder: { type: Boolean, default: false },
+    stockAmount: Number,
+    safetyDays: Number,
+    safetyDaysStock: Number,
+    deliveryDays: Number,
+    deliveryTime: String,
+    reOrderSetting: String,
+    inventoryInDays: String,
+    deliveryPeriod: String,
+    orderTimeBackupInventory: String,
+
+    // Supplier info
+    alternateSupplier: String,
+    supplierName: String,
+    supplierContact: String,
+    supplierAddress: String,
+    supplierEmail: String,
+    supplierWebsite: String,
+    supplierInformation: String,
+
+    anyDiscount: {
+      type: Number,
+      default: null,
     },
-  ], // Added subcategories field
-  noReorder: { type: Boolean, default: false },
-  useStockAmount: { type: Boolean, default: false },
-  useSafetyDays: { type: Boolean, default: false },
-  notes: String,
+    priceAfterDiscount: {
+      type: Number,
+      default: null,
+    },
+    // Flags & visibility
+    visibility: {
+      type: String,
+      enum: ["Public", "Private"],
+      default: "Public",
+    },
+    onceShare: { type: Boolean, default: false },
+    noChildHideParent: { type: Boolean, default: false },
 
-  // Option for visibility control
-  onceShare: Boolean, // Added field for "once there is less than 2 days" option
-  noChildHideParent: Boolean, // Added field for "if no child, then parent hidden" option
+    // Categorization
+    categories: String,
+    subCategories: String,
+    tags: [String],
+    notes: String,
 
-  // Image paths
-  masterImage: {
-    type: String,
+    // Images
+    masterImage: {
+      data: Buffer,
+      contentType: String,
+    },
+    moreImages: [
+      {
+        data: Buffer,
+        contentType: String,
+      },
+    ],
   },
-  moreImages: [String],
+  { timestamps: true }
+);
 
-  // System fields
-  createdAt: {
-    type: Date,
-    default: Date.now,
-  },
-  updatedAt: {
-    type: Date,
-    default: Date.now,
-  },
-});
-
-// Auto-generate product ID before saving
+// Auto-generate productId if missing
 productSchema.pre("save", async function (next) {
-  try {
-    if (!this.productId) {
-      const prefix =
-        this.productType === "Parent"
-          ? "P"
-          : this.productType === "Child"
-          ? "C"
-          : "N";
+  if (!this.productId) {
+    const prefix =
+      this.productType === "Parent"
+        ? "P"
+        : this.productType === "Child"
+        ? "C"
+        : "N";
 
-      // Find the highest existing ID with this prefix
-      const highestProduct = await this.constructor
-        .findOne({
-          productId: new RegExp(`^${prefix}`),
-        })
-        .sort({ productId: -1 });
+    // Find the highest existing ID with this prefix
+    const highest = await this.constructor
+      .findOne({ productId: new RegExp(`^${prefix}`) })
+      .sort({ productId: -1 })
+      .lean();
 
-      let nextId = 1;
-      if (highestProduct && highestProduct.productId) {
-        // Extract the number part and increment
-        const idNumber = parseInt(highestProduct.productId.substring(1));
-        if (!isNaN(idNumber)) {
-          nextId = idNumber + 1;
-        }
-      }
-
-      // Pad with zeros to ensure consistent format
-      this.productId = `${prefix}${nextId.toString().padStart(4, "0")}`;
+    let nextNum = 1;
+    if (highest && highest.productId) {
+      const num = parseInt(highest.productId.slice(1), 10);
+      if (!isNaN(num)) nextNum = num + 1;
     }
 
-    // Update the updatedAt timestamp
-    this.updatedAt = Date.now();
-
-    next();
-  } catch (error) {
-    next(error);
+    this.productId = `${prefix}${String(nextNum).padStart(4, "0")}`;
   }
+  next();
 });
 
 module.exports = mongoose.model("Product", productSchema);

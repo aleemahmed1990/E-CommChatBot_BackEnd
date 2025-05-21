@@ -59,7 +59,7 @@ const uploadFields = upload.fields([
 // @access  Private
 router.post("/", uploadFields, async (req, res) => {
   try {
-    // Parse the contacts array from the request
+    console.log("Request body:", req.body); // Log the incoming body for debugging
     let contacts = [];
     if (req.body.contacts) {
       try {
@@ -72,6 +72,16 @@ router.post("/", uploadFields, async (req, res) => {
       }
     }
 
+    // Ensure contacts have name and relation before proceeding
+    for (let contact of contacts) {
+      if (!contact.name || !contact.relation) {
+        return res.status(400).json({
+          success: false,
+          message: "Contact name and relation are required",
+        });
+      }
+    }
+
     const employeeData = {
       name: req.body.name,
       email: req.body.email,
@@ -79,10 +89,11 @@ router.post("/", uploadFields, async (req, res) => {
       address: req.body.address,
       homeLocation: req.body.homeLocation,
       emergencyContact: req.body.emergencyContact,
-      contacts: contacts,
+      contacts: contacts, // Use the parsed contacts array
       roles: req.body.roles ? JSON.parse(req.body.roles) : [],
       addedOn: req.body.addedOn || Date.now(),
       isActivated: req.body.isActivated === "true",
+      employeeCategory: req.body.employeeCategory,
       isBlocked: req.body.isBlocked === "true",
     };
 

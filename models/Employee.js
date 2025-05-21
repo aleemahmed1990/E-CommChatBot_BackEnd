@@ -38,14 +38,13 @@ const EmployeeSchema = new mongoose.Schema(
       type: String,
       required: [true, "Emergency contact is required"],
     },
-    contactName: {
-      type: String,
-      required: [true, "Contact name is required"],
-    },
-    contactRelation: {
-      type: String,
-      required: [true, "Contact relation is required"],
-    },
+    contacts: [
+      {
+        name: { type: String, required: true },
+        relation: { type: String, required: true },
+        phoneNumber: { type: String, required: true },
+      },
+    ],
     roles: {
       type: [String],
       default: [],
@@ -53,6 +52,11 @@ const EmployeeSchema = new mongoose.Schema(
     profilePicture: {
       type: String,
       default: null,
+    },
+    employeeCategory: {
+      type: String,
+      enum: ["Driver", "Order Manager"], // Restricting the category to these two options
+      required: [true, "Employee category is required"],
     },
     idCardFront: {
       type: String,

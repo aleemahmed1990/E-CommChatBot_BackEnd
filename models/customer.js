@@ -26,6 +26,25 @@ const supportTicketSchema = new mongoose.Schema(
   { _id: false }
 ); // no need for _id on sub-documents unless you want it
 
+// 15 statuses pulled straight from your AllOrders component
+const ORDER_STATUSES = [
+  "cart-not-paid",
+  "order-made-not-paid",
+  "pay-not-confirmed",
+  "order-confirmed",
+  "order not picked",
+  "issue-customer",
+  "customer-confirmed",
+  "order-refunded",
+  "picking-order",
+  "allocated-driver",
+  "on-way",
+  "driver-confirmed",
+  "issue-driver",
+  "parcel-returned",
+  "order-complete",
+];
+
 const customerSchema = new mongoose.Schema(
   {
     phoneNumber: {
@@ -35,6 +54,18 @@ const customerSchema = new mongoose.Schema(
       validate: [arrayLimit, "{PATH} must have at least one phone number"],
     },
 
+    // Track “where” the customer is in the order flow
+    currentOrderStatus: {
+      type: String,
+      enum: ORDER_STATUSES,
+      default: "cart-not-paid",
+    },
+    // **NEW**: remember which order we last created/updated
+    latestOrderId: {
+      type: String,
+      default: null,
+      index: true, // (optional) makes lookups by latestOrderId faster
+    },
     // ✅ Optional metadata to track linked/migrated numbers
     numberLinkedHistory: [
       {
@@ -52,6 +83,7 @@ const customerSchema = new mongoose.Schema(
       type: String,
       default: "new", // Tracks where they are in the conversation flow
     },
+
     // Add these new fields for referrals
     referralCode: {
       type: String,
@@ -133,6 +165,11 @@ const customerSchema = new mongoose.Schema(
       deliveryOption: String,
       numberSwitchIndex: Number,
 
+      categoryList: { type: [String], default: [] },
+      subcategoryList: { type: [String], default: [] },
+      productList: { type: [String], default: [] },
+      weightOptions: { type: [String], default: [] },
+
       editAddressIndex: Number, // <-- Add this field to fix the issue
       editAddressField: String, // <-- Also add this field for completeness
       editBankIndex: {
@@ -145,6 +182,8 @@ const customerSchema = new mongoose.Schema(
           bankName: { type: String, default: "" },
           accountNumber: { type: String, default: "" },
         },
+
+        adminReason: String,
         default: () => ({
           accountHolderName: "",
           bankName: "",
@@ -225,19 +264,47 @@ const customerSchema = new mongoose.Schema(
           type: Date,
           default: Date.now,
         },
+        receiptImage: {
+          data: String, // Store the base64 string directly
+          contentType: String, // MIME type (e.g., image/jpeg)
+        },
+
+        receiptImageMetadata: {
+          mimetype: String,
+          timestamp: Date,
+        },
+        accountHolderName: {
+          type: String,
+          default: "",
+        },
+        paidBankName: {
+          type: String,
+          default: "",
+        },
         status: {
           type: String,
-          enum: [
-            "pending",
-            "confirmed",
-            "processing",
-            "shipped",
-            "delivered",
-            "cancelled",
-          ],
-          default: "pending",
+          enum: ORDER_STATUSES,
+          default: "cart-not-paid",
         },
+
         deliveryDate: Date,
+        // Newly added fields
+        timeSlot: { type: String, default: null },
+        driver1: { type: String, default: null }, // Store driver ID or name
+        driver2: { type: String, default: null }, // Store driver ID or name
+        pickupType: {
+          type: String,
+          enum: [
+            "heavy-pickup",
+            "medium-pickup",
+            "light-pickup",
+            "three-wheeler",
+            "scooter-heavy-delivery",
+            "scooter",
+          ],
+          default: "heavy-pickup",
+        },
+        truckOnDeliver: { type: Boolean, default: false },
       },
     ],
     cart: {
@@ -262,12 +329,36 @@ const customerSchema = new mongoose.Schema(
         type: String,
         default: "Normal Delivery",
       },
+      // ADD THESE NEW FIELDS:
+      deliveryType: {
+        type: String,
+        enum: ["truck", "scooter", "self_pickup"],
+        default: "truck",
+      },
+      deliverySpeed: {
+        type: String,
+        enum: ["normal", "speed", "early_morning", "eco"],
+        default: "normal",
+      },
       deliveryLocation: String,
+      // ADD THIS STRUCTURED OBJECT FOR DELIVERY ADDRESS:
+      deliveryAddress: {
+        nickname: String,
+        area: String,
+        fullAddress: String,
+        googleMapLink: String,
+      },
       deliveryCharge: {
         type: Number,
         default: 0,
       },
+      // For eco delivery discount:
+      ecoDeliveryDiscount: {
+        type: Number,
+        default: 0,
+      },
     },
+
     chatHistory: [
       {
         message: String,

@@ -6,11 +6,60 @@ const qrcode = require("qrcode-terminal");
 const path = require("path");
 const fs = require("fs");
 const moment = require("moment");
+const Category = require("../models/Category");
+const Product = require("../models/Product");
 const mkdirp = require("mkdirp"); // You might need to install this: npm install mkdirp
 
 // At the top of your file, add:
 const referralImagesDir = path.join(__dirname, "../referral_images");
 mkdirp.sync(referralImagesDir);
+
+const Counter = mongoose.model(
+  "Counter",
+  new mongoose.Schema({
+    name: { type: String, required: true, unique: true },
+    seq: { type: Number, default: 0 },
+  })
+);
+
+async function getNextSequence(name) {
+  const counter = await Counter.findOneAndUpdate(
+    { name },
+    { $inc: { seq: 1 } },
+    { new: true, upsert: true }
+  );
+  return counter.seq;
+}
+
+// ─── When someone adds to cart, push a single "cart-not-paid" order ────────────
+async function recordCartOrder(customer) {
+  const seq = await getNextSequence("orderId");
+  const orderId = "ORD" + (10000 + seq);
+
+  // snapshot of cart
+  const total = customer.cart.items.reduce((sum, i) => sum + i.totalPrice, 0);
+
+  const cartOrder = {
+    orderId,
+    items: [...customer.cart.items],
+    totalAmount: total,
+    deliveryOption: customer.cart.deliveryOption,
+    deliveryLocation: customer.cart.deliveryLocation,
+    deliveryCharge: customer.cart.deliveryCharge,
+    paymentStatus: "pending",
+    status: "cart-not-paid",
+    orderDate: new Date(),
+    deliveryDate: null,
+  };
+
+  customer.orderHistory.push(cartOrder);
+
+  // ← NEW
+  customer.latestOrderId = orderId;
+  customer.currentOrderStatus = "cart-not-paid";
+
+  await customer.save();
+}
 
 // Import Customer model
 const Customer = require("../models/customer");
@@ -45,303 +94,6 @@ client.on("authenticated", () => {
 client.on("auth_failure", (error) => {
   console.error("Authentication failure:", error);
 });
-
-// Product database (In a real application, this would come from MongoDB)
-const productDatabase = {
-  categories: [
-    {
-      id: "screws",
-      name: "Screws",
-      subCategories: [
-        {
-          id: "wood_screws",
-          name: "Wood Screws",
-          products: [
-            {
-              id: "wood_screw_1",
-              name: "Wood Screw Type A",
-              price: 500,
-              details:
-                "Material: Stainless Steel\nBrand: BuildRight\nSize: 2 inches\nItem dimensions: 2 x 0.3 x 0.3 inches\nFinish: Polished\nAbout this item:\n• Perfect for woodworking projects\n• Anti-rust coating for long durability\n• Hardened steel for better penetration",
-              weights: ["100g pack", "500g pack", "1kg pack"],
-              imageUrl: "/images/wood_screw.png",
-            },
-            {
-              id: "wood_screw_2",
-              name: "Wood Screw Type B",
-              price: 700,
-              details:
-                "Material: Stainless Steel\nBrand: CraftMaster\nSize: 3 inches\nItem dimensions: 3 x 0.4 x 0.4 inches\nFinish: Galvanized\nAbout this item:\n• Heavy-duty for structural woodworking\n• Deep threading for stronger hold\n• Weather resistant for outdoor use",
-              weights: ["100g pack", "500g pack", "1kg pack"],
-              imageUrl: "/images/wood_screw2.png",
-            },
-          ],
-        },
-        {
-          id: "metal_screws",
-          name: "Metal Screws",
-          products: [
-            {
-              id: "metal_screw_1",
-              name: "Self-Tapping Metal Screw",
-              price: 600,
-              details:
-                "Material: Hardened Steel\nBrand: MetalPro\nSize: 1.5 inches\nItem dimensions: 1.5 x 0.25 x 0.25 inches\nFinish: Black Oxide\nAbout this item:\n• Self-tapping for easy installation\n• No pre-drilling required\n• Heat treated for maximum strength",
-              weights: ["100g pack", "500g pack", "1kg pack"],
-              imageUrl: "/images/metal_screw.png",
-            },
-          ],
-        },
-      ],
-    },
-    {
-      id: "cement",
-      name: "Cement",
-      subCategories: [
-        {
-          id: "pool_cement",
-          name: "Pool Cement",
-          products: [
-            {
-              id: "pool_cement_1",
-              name: "Ultra Water Resistant Pool Cement",
-              price: 1200,
-              details:
-                "Material: Special Blend Cement\nBrand: AquaBuild\nColor: Gray\nItem weight: Available in multiple weights\nAbout this item:\n• Specially formulated for underwater applications\n• Highly water-resistant\n• Fast setting even in wet conditions\n• Prevents water seepage and leakage",
-              weights: ["1kg bag", "5kg bag", "10kg bag"],
-              imageUrl: "/images/pool_cement.png",
-            },
-          ],
-        },
-        {
-          id: "large_cement",
-          name: "Larger Cement Products for Construction",
-          products: [
-            {
-              id: "ultra_cement",
-              name: "Ultra Tech Cement",
-              price: 1220,
-              details:
-                "Material: Portland Cement\nBrand: UltraTech\nColor: Gray\nItem weight: Available in multiple weights\nStrength grade: 53 grade\nAbout this item:\n• High-strength cement for all structural applications\n• Superior quality and durability\n• Sets in one hour, dries in 15 minutes\n• Safe, permanent and easy to use",
-              weights: ["1kg bag", "5kg bag", "10kg bag"],
-              imageUrl: "/images/ultra_cement.png",
-            },
-            {
-              id: "rocket_cement",
-              name: "Rocket Cement",
-              price: 1400,
-              details:
-                "Material: Adhesive, Sealant\nBrand: H.B. Fuller\nColor: No Color\nItem dimensions: L x W x H4 x 0.68 x 0.68 inches\nExterior Finish: Steel\nAbout this item:\n• SAVE YOUR BACK: Quick, lightweight patent pending technology replaces 80-100lbs of concrete\n• FAST & SECURE: Ready to build in 15 minutes, and mixes in seconds\n• NO WATER, NO MESS!\n• THIS BAG REPLACES 2 BAGS OF CONCRETE!",
-              weights: ["1kg bag", "5kg bag", "10kg bag"],
-              imageUrl: "/images/rocket_cement.png",
-            },
-            {
-              id: "fast_cement",
-              name: "Fast Cement",
-              price: 1400,
-              details:
-                "Material: Adhesive, Sealant\nBrand: H.B. Fuller\nColor: No Color\nItem dimensions: L x W x H4 x 0.68 x 0.68 inches\nExterior Finish: Steel\nAbout this item:\n• SAVE YOUR BACK: Quick, lightweight patent pending technology replaces 80-100lbs of concrete with a lightweight bag that does not require messy mixing with water that requires cleanup & preparation for filling post holes\n• FAST & SECURE: Ready to build in 15 minutes, and mixes in seconds in place and in the bag\n• PRO TECHNOLOGY: It's the same technology used to set utility poles by the professionals\n• EXPANDING COMPOSITE TECHNOLOGY: Uses an expanding composite technology which is stronger than traditional concrete\n• HYDROPHOBIC TO PREVENT ROT: Unlike concrete which absorbs water, this product is waterproof and hydrophobic which prevents water damage",
-              weights: ["1kg bag", "5kg bag", "10kg bag"],
-              imageUrl: "/images/fast_cement.png",
-            },
-            {
-              id: "white_cement",
-              name: "White Cement",
-              price: 1500,
-              details:
-                "Material: White Portland Cement\nBrand: SnowCrete\nColor: Pure White\nItem weight: Available in multiple weights\nAbout this item:\n• Premium quality white cement for decorative finishes\n• Perfect for terrazzo, tiles and ornamental work\n• Superior whiteness and consistency\n• Easy workability and smooth finish",
-              weights: ["1kg bag", "5kg bag", "10kg bag"],
-              imageUrl: "/images/white_cement.png",
-            },
-            {
-              id: "abc_cement",
-              name: "ABC Cement",
-              price: 1300,
-              details:
-                "Material: Adhesive, Sealant\nBrand: H.B. Fuller\nColor: No Color\nItem dimensions: L x W x H4 x 0.68 x 0.68 inches\nExterior Finish: Steel\nAbout this item:\n• SAVE YOUR BACK: Quick, lightweight patent pending technology replaces 80-100lbs of concrete with a lightweight bag\n• Fast setting and high strength formula\n• Excellent for general construction and repairs",
-              weights: ["1kg bag", "5kg bag", "10kg bag"],
-              imageUrl: "/images/abc_cement.png",
-            },
-          ],
-        },
-        {
-          id: "sika_cement",
-          name: "Sika Cement",
-          products: [
-            {
-              id: "sikacryl",
-              name: "SikaCryl Ready-Mix Concrete Patch",
-              price: 950,
-              details:
-                "Material: Acrylic Polymer\nBrand: Sika\nColor: Gray\nNet volume: 32 FL. OZ. 1 Quart (0.95 L)\nAbout this item:\n• Perfect for concrete repairs and patching\n• Ready to use, no mixing required\n• Excellent adhesion to concrete surfaces\n• Waterproof and durable finish",
-              weights: ["1 Quart (0.95 L)", "1 Gallon (3.8 L)"],
-              imageUrl: "/images/sikacryl.png",
-            },
-          ],
-        },
-        {
-          id: "colored_cement",
-          name: "Colored Cement",
-          products: [
-            {
-              id: "red_cement",
-              name: "Red Colored Cement",
-              price: 1700,
-              details:
-                "Material: Portland Cement with Pigment\nBrand: ChromaCrete\nColor: Red\nItem weight: Available in multiple weights\nAbout this item:\n• Permanent color that won't fade with time\n• Perfect for decorative concrete applications\n• Color consistent throughout the mix\n• Easy to work with and finish",
-              weights: ["1kg bag", "5kg bag", "10kg bag"],
-              imageUrl: "/images/red_cement.png",
-            },
-          ],
-        },
-      ],
-    },
-    {
-      id: "bricks",
-      name: "Bricks",
-      subCategories: [
-        {
-          id: "clay_bricks",
-          name: "Clay Bricks",
-          products: [
-            {
-              id: "clay_brick_standard",
-              name: "Standard Clay Brick",
-              price: 500,
-              details:
-                "Material: Clay\nBrand: ClayMaster\nColor: Terracotta\nDimensions: 230 x 110 x 75mm\nAbout this item:\n• Traditional clay brick for all construction needs\n• High durability and compression strength\n• Thermal and sound insulation properties\n• Naturally fire resistant",
-              weights: ["Single brick", "Pack of 50", "Pack of 100"],
-              imageUrl: "/images/clay_brick.png",
-            },
-          ],
-        },
-        {
-          id: "concrete_bricks",
-          name: "Concrete Bricks",
-          products: [
-            {
-              id: "concrete_brick_standard",
-              name: "Standard Concrete Brick",
-              price: 450,
-              details:
-                "Material: Concrete\nBrand: BuildBlock\nColor: Gray\nDimensions: 220 x 100 x 70mm\nAbout this item:\n• Versatile concrete brick for all construction projects\n• Excellent load-bearing capacity\n• Uniform size and shape for easy construction\n• Resistant to weather and pests",
-              weights: ["Single brick", "Pack of 50", "Pack of 100"],
-              imageUrl: "/images/concrete_brick.png",
-            },
-          ],
-        },
-      ],
-    },
-    {
-      id: "steel_rods",
-      name: "Steel Rods",
-      subCategories: [
-        {
-          id: "reinforcement_rods",
-          name: "Reinforcement Rods",
-          products: [
-            {
-              id: "rebar_8mm",
-              name: "8mm Reinforcement Bar (Rebar)",
-              price: 650,
-              details:
-                "Material: High-tensile Steel\nBrand: SteelPro\nDiameter: 8mm\nLength: 12m\nGrade: Fe500\nAbout this item:\n• High tensile strength for reinforced concrete structures\n• Corrosion resistant coating\n• Ribbed surface for better concrete bonding\n• Meets international quality standards",
-              weights: ["Single 12m rod", "Bundle of 5", "Bundle of 10"],
-              imageUrl: "/images/rebar.png",
-            },
-          ],
-        },
-        {
-          id: "smooth_rods",
-          name: "Smooth Steel Rods",
-          products: [
-            {
-              id: "smooth_rod_10mm",
-              name: "10mm Smooth Steel Rod",
-              price: 700,
-              details:
-                "Material: Mild Steel\nBrand: MetalCraft\nDiameter: 10mm\nLength: 6m\nFinish: Galvanized\nAbout this item:\n• General purpose steel rod for various applications\n• Smooth surface for easy handling\n• Rust resistant galvanized coating\n• Can be easily cut and bent to required shape",
-              weights: ["Single 6m rod", "Bundle of 5", "Bundle of 10"],
-              imageUrl: "/images/smooth_rod.png",
-            },
-          ],
-        },
-      ],
-    },
-    {
-      id: "sand_aggregates",
-      name: "Sand and Aggregates",
-      subCategories: [
-        {
-          id: "sand",
-          name: "Sand",
-          products: [
-            {
-              id: "river_sand",
-              name: "River Sand",
-              price: 350,
-              details:
-                "Type: Natural River Sand\nColor: Light brown\nGrain size: Medium\nAbout this item:\n• Washed and screened for construction use\n• Free from impurities and organic matter\n• Ideal for concrete, mortar and plaster mixes\n• Provides excellent workability and finish",
-              weights: ["25kg bag", "50kg bag", "100kg bag"],
-              imageUrl: "/images/river_sand.png",
-            },
-          ],
-        },
-        {
-          id: "gravel",
-          name: "Gravel",
-          products: [
-            {
-              id: "construction_gravel",
-              name: "Construction Gravel",
-              price: 400,
-              details:
-                "Type: Crushed stone\nSize: 20mm\nColor: Mixed gray\nAbout this item:\n• High quality crushed stone aggregate\n• Ideal for concrete mixing and foundations\n• Provides excellent strength and durability to concrete\n• Well-graded for optimal performance",
-              weights: ["25kg bag", "50kg bag", "100kg bag"],
-              imageUrl: "/images/gravel.png",
-            },
-          ],
-        },
-      ],
-    },
-    {
-      id: "others",
-      name: "Others",
-      subCategories: [
-        {
-          id: "tools",
-          name: "Construction Tools",
-          products: [
-            {
-              id: "trowel",
-              name: "Professional Plastering Trowel",
-              price: 250,
-              details:
-                "Material: Stainless Steel with Wooden Handle\nBrand: ToolMaster\nSize: 11 inches\nWeight: 350g\nAbout this item:\n• Professional grade plastering trowel\n• Ergonomic wooden handle for comfortable grip\n• High quality stainless steel blade\n• Perfect for applying and smoothing plaster, mortar and concrete",
-              weights: ["Standard"],
-              imageUrl: "/images/trowel.png",
-            },
-          ],
-        },
-        {
-          id: "safety_equipment",
-          name: "Safety Equipment",
-          products: [
-            {
-              id: "safety_helmet",
-              name: "Construction Safety Helmet",
-              price: 180,
-              details:
-                "Material: High-density polyethylene\nBrand: SafeGuard\nColor: Yellow\nCertification: ANSI Z89.1\nAbout this item:\n• Impact resistant construction helmet\n• Adjustable harness for comfortable fit\n• Ventilated design for air circulation\n• Meets international safety standards",
-              weights: ["Standard"],
-              imageUrl: "/images/safety_helmet.png",
-            },
-          ],
-        },
-      ],
-    },
-  ],
-};
 
 client.on("message", async (message) => {
   try {
@@ -601,6 +353,57 @@ async function sendSequentialMessages(
     setTimeout(() => sendWhatsAppMessage(phoneNumber, message2), delayMs);
   }
 }
+
+// ─── Categories Menu ────────────────────────────────────────────────────────────
+async function sendCategoriesList(phoneNumber, customer) {
+  const categories = await Category.find({});
+  let msg = "What are you looking for? This is the main shopping list\n\n";
+
+  // store IDs for later mapping
+  customer.contextData = customer.contextData || {};
+  customer.contextData.categoryList = categories.map((c) => c._id.toString());
+
+  categories.forEach((cat, idx) => {
+    msg += `${idx + 1}. ${cat.name}\n`;
+  });
+
+  msg +=
+    `\nPlease enter the category name or number to view its details.` +
+    `\nType 0 to return to main menu or type "View cart" to view your cart`;
+
+  await sendWhatsAppMessage(phoneNumber, msg);
+  await customer.save();
+}
+
+// ─── Subcategories Menu ────────────────────────────────────────────────────────
+async function sendSubcategoriesList(phoneNumber, customer, category) {
+  const subcats = Array.isArray(category.subcategories)
+    ? category.subcategories
+    : [];
+
+  customer.contextData.subcategoryList = subcats;
+  await customer.save();
+
+  // if no subcats, jump straight to products
+  if (subcats.length === 0) {
+    await customer.updateConversationState("product_list");
+    return sendProductsList(phoneNumber, customer, category.name);
+  }
+
+  let msg = `You selected category: ${category.name}\n\n`;
+  msg += `This is the product divisions under category ${category.name}\n\n`;
+
+  subcats.forEach((sub, idx) => {
+    msg += `${idx + 1}. ${sub}\n`;
+  });
+
+  msg +=
+    `\nPlease enter the subcategory number to view its products.` +
+    `\nType 0 to return to main menu or type "View cart" to view your cart`;
+
+  await sendWhatsAppMessage(phoneNumber, msg);
+}
+
 // Helper function to find category by ID
 function findCategoryById(categoryId) {
   return productDatabase.categories.find((cat) => cat.id === categoryId);
@@ -624,8 +427,25 @@ client.on("ready", () => {
   console.log("WhatsApp client is ready!");
 });
 
+const sharp = require("sharp");
+
+// Function to convert image into the required format (e.g., JPEG or PNG)
+const convertImage = async (imageBuffer) => {
+  try {
+    const convertedImage = await sharp(imageBuffer)
+      .resize({ width: 800 }) // Optional: Resize image if needed
+      .toFormat("jpeg") // Convert image to JPEG format
+      .toBuffer(); // Convert to buffer
+    return convertedImage;
+  } catch (error) {
+    console.error("Error converting image:", error);
+    throw new Error("Error converting image");
+  }
+};
+// ─── At final checkout, bump to "order-made-not-paid" ─────────────────────────
 async function createOrder(customer) {
-  const orderId = "ORD" + Date.now().toString().slice(-8);
+  const seq = await getNextSequence("orderId");
+  const orderId = "ORD" + (10000 + seq);
 
   const totalWithDiscounts =
     customer.cart.totalAmount +
@@ -634,7 +454,7 @@ async function createOrder(customer) {
     (customer.cart.ecoDeliveryDiscount || 0);
 
   const newOrder = {
-    orderId: orderId,
+    orderId,
     items: [...customer.cart.items],
     totalAmount: totalWithDiscounts,
     deliveryOption: customer.cart.deliveryOption,
@@ -643,7 +463,7 @@ async function createOrder(customer) {
     firstOrderDiscount: customer.cart.firstOrderDiscount || 0,
     ecoDeliveryDiscount: customer.cart.ecoDeliveryDiscount || 0,
     paymentStatus: "pending",
-    status: "confirmed",
+    status: "order-made-not-paid",
     paymentMethod: "Bank Transfer",
     transactionId: customer.contextData.transactionId || "Pending verification",
     orderDate: new Date(),
@@ -655,7 +475,7 @@ async function createOrder(customer) {
           ? 5
           : customer.cart.deliveryOption === "Eco Delivery"
           ? 10
-          : 5) *
+          : /* fallback: */ 5) *
           24 *
           60 *
           60 *
@@ -663,10 +483,13 @@ async function createOrder(customer) {
     ),
   };
 
-  // Push to order history
   customer.orderHistory.push(newOrder);
 
-  // Clear cart and context
+  // ← NEW
+  customer.latestOrderId = orderId;
+  customer.currentOrderStatus = "order-made-not-paid";
+
+  // clear customer.cart & context
   customer.cart = {
     items: [],
     totalAmount: 0,
@@ -676,10 +499,9 @@ async function createOrder(customer) {
     firstOrderDiscount: 0,
     ecoDeliveryDiscount: 0,
   };
-
   customer.contextData = {};
-  await customer.save();
 
+  await customer.save();
   return orderId;
 }
 
@@ -950,281 +772,247 @@ async function processChatMessage(phoneNumber, text, message) {
         break;
 
       case "shopping_categories":
-        // Process category selection
-        const categoryIndex = parseInt(text) - 1;
-        if (
-          categoryIndex >= 0 &&
-          categoryIndex < productDatabase.categories.length
-        ) {
-          const selectedCategory = productDatabase.categories[categoryIndex];
-          customer.contextData = {
-            ...customer.contextData,
-            categoryId: selectedCategory.id,
-            categoryName: selectedCategory.name,
-          };
-          await customer.save();
-
-          await customer.updateConversationState("shopping_subcategories");
-          await sendSubcategoriesList(phoneNumber, customer, selectedCategory);
-        } else if (text.toLowerCase() === "view cart") {
-          await goToCart(phoneNumber, customer);
+        // if first time in this state, we have no categoryList yet
+        if (!customer.contextData.categoryList) {
+          await sendCategoriesList(phoneNumber, customer);
         } else {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Please select a valid category number from the list, type 'view cart' to see your cart, or type 0 to return to the main menu."
-          );
+          const idx = parseInt(text, 10) - 1;
+          const ids = customer.contextData.categoryList;
+          if (idx >= 0 && idx < ids.length) {
+            const selId = ids[idx];
+            const category = await Category.findById(selId);
+            customer.contextData.categoryId = selId;
+            customer.contextData.categoryName = category.name;
+            await customer.save();
+
+            await customer.updateConversationState("shopping_subcategories");
+            await sendSubcategoriesList(phoneNumber, customer, category);
+          } else if (text.toLowerCase() === "view cart") {
+            return goToCart(phoneNumber, customer);
+          } else {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Please select a valid category number, 'view cart', or 0 for main menu."
+            );
+          }
         }
         break;
 
       case "shopping_subcategories":
-        const category = findCategoryById(customer.contextData.categoryId);
-        if (!category) {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Something went wrong. Let's start over."
-          );
-          await sendMainMenu(phoneNumber, customer);
-          break;
-        }
-
-        const subcategoryIndex = parseInt(text) - 1;
-        if (
-          subcategoryIndex >= 0 &&
-          subcategoryIndex < category.subCategories.length
-        ) {
-          const selectedSubcategory = category.subCategories[subcategoryIndex];
-          customer.contextData = {
-            ...customer.contextData,
-            subCategoryId: selectedSubcategory.id,
-            subCategoryName: selectedSubcategory.name,
-          };
+        const idxSub = parseInt(text) - 1;
+        const subList = customer.contextData.subcategoryList || [];
+        if (idxSub >= 0 && idxSub < subList.length) {
+          const selSub = subList[idxSub];
+          customer.contextData.subCategoryName = selSub;
           await customer.save();
-
           await customer.updateConversationState("product_list");
-          await sendProductsList(phoneNumber, customer, selectedSubcategory);
+          await sendProductsList(phoneNumber, customer, selSub);
         } else if (text.toLowerCase() === "view cart") {
           await goToCart(phoneNumber, customer);
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Please select a valid subcategory number from the list, type 'view cart' to see your cart, or type 0 to return to the main menu."
+            "Please select a valid subcategory number, type 'view cart' or 0 for main menu."
           );
         }
         break;
 
       case "product_list":
-        const subCategory = findSubCategoryById(
-          customer.contextData.categoryId,
-          customer.contextData.subCategoryId
-        );
-
-        if (!subCategory) {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Something went wrong. Let's start over."
-          );
-          await sendMainMenu(phoneNumber, customer);
-          break;
-        }
-
-        // Handle product selection - simple numbering from 1 to N
-        const productIndex = parseInt(text) - 1;
-        if (productIndex >= 0 && productIndex < subCategory.products.length) {
-          const selectedProduct = subCategory.products[productIndex];
-          customer.contextData = {
-            ...customer.contextData,
-            productId: selectedProduct.id,
-            productName: selectedProduct.name,
-          };
+        const idxProd = parseInt(text) - 1;
+        const prodList = customer.contextData.productList || [];
+        if (idxProd >= 0 && idxProd < prodList.length) {
+          const selProdId = prodList[idxProd];
+          const product = await Product.findById(selProdId);
+          customer.contextData.productId = selProdId;
+          customer.contextData.productName = product.productName;
           await customer.save();
-
           await customer.updateConversationState("product_details");
-          await sendProductDetails(phoneNumber, customer, selectedProduct);
+          await sendProductDetails(phoneNumber, customer, product);
         } else if (text.toLowerCase() === "view cart") {
           await goToCart(phoneNumber, customer);
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Please select a valid product number from the list, type 'view cart' to see your cart, or type 0 to return to the main menu."
+            "Please select a valid product number, type 'view cart' or 0 for main menu."
           );
         }
         break;
       case "product_details":
-        // Handle buy options
+        // user answered “1- Add to cart”
         if (text === "1") {
-          // Yes, add to cart
-          await customer.updateConversationState("select_weight");
-
-          const product = findProductById(customer.contextData.productId);
+          // fetch the real product
+          const product = await Product.findById(
+            customer.contextData.productId
+          );
           if (!product) {
             await sendWhatsAppMessage(
               phoneNumber,
-              "Product not found. Let's return to the main menu."
+              "Oops, I can’t find that product right now. Let’s start over."
             );
-            await sendMainMenu(phoneNumber, customer);
-            break;
+            return sendMainMenu(phoneNumber, customer);
           }
-          // In the "product_details" case when user selects option "1" (Yes, add to cart)
-          let weightMessage = "Please select the weight option:\n\n";
-          product.weights.forEach((weight, index) => {
-            // Calculate price for this weight option (assuming base price is for smallest weight)
-            // For simplicity, let's say larger weights cost proportionally more
-            let weightPrice = product.price;
-            if (weight.includes("5kg")) {
-              weightPrice = product.price * 4.5; // 5kg costs 4.5 times more than 1kg
-            } else if (weight.includes("10kg")) {
-              weightPrice = product.price * 9; // 10kg costs 9 times more than 1kg
-            } else if (weight.includes("50kg") || weight.includes("500g")) {
-              weightPrice = product.price * 0.5; // Half kg costs half the price
-            } else if (weight.includes("100kg") || weight.includes("100g")) {
-              weightPrice = product.price * 0.2; // 100g costs 20% of the base price
-            }
 
-            weightMessage += `${index + 1}- ${weight} - ${formatRupiah(
-              weightPrice
-            )}\n`;
-          });
+          // if it’s a Child product, go ask for weight
+          if (product.productType === "Child") {
+            // build weight options from all child variants under the same parent
+            const siblingVariants = await Product.find(
+              {
+                parentProduct: product.parentProduct,
+                productType: "Child",
+                visibility: "Public",
+              },
+              "varianceName priceAfterDiscount specifications.weight"
+            );
 
-          await sendWhatsAppMessage(phoneNumber, weightMessage);
-        } else if (text === "2") {
-          // No, return to category list
-          await customer.updateConversationState("shopping_subcategories");
-          const category = findCategoryById(customer.contextData.categoryId);
-          await sendSubcategoriesList(phoneNumber, customer, category);
-        } else if (text === "3") {
-          // Return to main shopping list
-          await customer.updateConversationState("shopping_categories");
-          await sendCategoriesList(phoneNumber, customer);
-        } else {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Please select a valid option (1, 2, or 3), or type 0 to return to the main menu."
-          );
-        }
-        break;
+            let weightMsg = `Please pick the weight option :\n\n`;
+            siblingVariants.forEach((v, i) => {
+              const w = v.specifications?.[0]?.weight ?? "N/A";
+              const price = v.priceAfterDiscount ?? "N/A";
+              weightMsg += `${i + 1}. ${w}kg    -${price}rp\n`;
+            });
 
-      case "select_weight":
-        const productForWeight = findProductById(
-          customer.contextData.productId
-        );
-        if (!productForWeight) {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Product not found. Let's return to the main menu."
-          );
-          await sendMainMenu(phoneNumber, customer);
-          break;
-        }
+            customer.contextData.weightOptions = siblingVariants.map((v) =>
+              v._id.toString()
+            );
+            await customer.save();
+            await customer.updateConversationState("select_weight");
+            return sendWhatsAppMessage(phoneNumber, weightMsg);
+          }
 
-        const weightIndex = parseInt(text) - 1;
-        if (weightIndex >= 0 && weightIndex < productForWeight.weights.length) {
-          // Save selected weight
-          customer.contextData.selectedWeight =
-            productForWeight.weights[weightIndex];
-          await customer.save();
-
-          // Send confirmation message about the weight they've chosen
-          await sendWhatsAppMessage(
-            phoneNumber,
-            `You have chosen ${productForWeight.weights[weightIndex]}. Great choice!`
-          );
-
-          // Small delay before asking for quantity
-          await new Promise((resolve) => setTimeout(resolve, 500));
-
-          // Ask for quantity
+          // otherwise it’s a Normal (no‐weight) product: straight to quantity
           await customer.updateConversationState("select_quantity");
           await sendWhatsAppMessage(
             phoneNumber,
-            "How many bags would you like to order? Enter only in digits."
+            `How many *${product.productName}* would you like? (Enter a number)`
           );
-        } else {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            `Please select a valid weight option (1 to ${productForWeight.weights.length}), or type 0 to return to the main menu.`
-          );
+          return;
         }
-        break;
 
-      case "select_quantity":
-        const quantity = parseInt(text);
-        if (!isNaN(quantity) && quantity > 0) {
-          // Save quantity
-          customer.contextData.quantity = quantity;
+        // user wants to go back…
+        if (text === "2") {
+          await customer.updateConversationState("shopping_subcategories");
+          const cat = await Category.findById(customer.contextData.categoryId);
+          return sendSubcategoriesList(phoneNumber, customer, cat);
+        }
+        if (text === "3") {
+          await customer.updateConversationState("shopping_categories");
+          return sendCategoriesList(phoneNumber, customer);
+        }
+
+        // invalid input
+        return sendWhatsAppMessage(
+          phoneNumber,
+          "Invalid choice. Reply 1 to add to cart, 2 for subcategories, 3 for categories, or 0 for main menu."
+        );
+
+      case "select_weight": {
+        const idxW = parseInt(text, 10) - 1;
+        const weights = customer.contextData.weightOptions || [];
+
+        // On valid choice, show the same menu style
+        if (idxW >= 0 && idxW < weights.length) {
+          const chosenId = weights[idxW];
+          const chosenVar = await Product.findById(chosenId);
+
+          customer.contextData.productId = chosenId;
+          customer.contextData.selectedWeight = chosenVar.varianceName;
           await customer.save();
 
-          // Add to cart
-          const product = findProductById(customer.contextData.productId);
-          if (!product) {
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Product not found. Let's return to the main menu."
-            );
-            await sendMainMenu(phoneNumber, customer);
-            break;
-          }
+          // Echo back exactly as in your screenshot
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `You have chosen ${chosenVar.varianceName} pack. Great choice!`
+          );
+          await customer.updateConversationState("select_quantity");
+          return sendWhatsAppMessage(
+            phoneNumber,
+            "How many bags would you like to order? Enter only in digits."
+          );
+        }
 
-          // Calculate weight-specific price
-          let weightPrice = product.price;
-          const selectedWeight = customer.contextData.selectedWeight;
+        if (text === "0") {
+          // cancel weight, back to product details
+          await customer.updateConversationState("product_details");
+          const prod = await Product.findById(customer.contextData.productId);
+          return sendProductDetails(phoneNumber, customer, prod);
+        }
 
-          // Apply price adjustment based on weight
-          if (selectedWeight.includes("5kg")) {
-            weightPrice = product.price * 4.5; // 5kg costs 4.5 times more than 1kg
-          } else if (selectedWeight.includes("10kg")) {
-            weightPrice = product.price * 9; // 10kg costs 9 times more than 1kg
-          } else if (
-            selectedWeight.includes("50kg") ||
-            selectedWeight.includes("500g")
-          ) {
-            weightPrice = product.price * 0.5; // Half kg costs half the price
-          } else if (selectedWeight.includes("100g")) {
-            weightPrice = product.price * 0.2; // 100g costs 20% of the base price
-          }
+        // Build the exact same weight menu you showed
+        let msg = "Please select the weight option:\n\n";
+        const siblingVariants = await Product.find({
+          parentProduct: customer.contextData.parentProduct,
+          productType: "Child",
+          visibility: "Public",
+        });
+        siblingVariants.forEach((v, i) => {
+          const w = v.specifications?.[0]?.weight ?? "";
+          const p = v.priceAfterDiscount ?? 0;
+          msg += `${i + 1}- ${w} pack - Rp ${p}\n`;
+        });
 
-          // Calculate total price for this item using the weight-specific price
-          const totalPrice = weightPrice * quantity;
+        return sendWhatsAppMessage(
+          phoneNumber,
+          msg.trim() // remove trailing newline
+        );
+      }
 
-          // Actually add to cart using the method defined in the customer model
-          await customer.cart.items.push({
-            productId: product.id,
-            productName: product.name,
-            category: customer.contextData.categoryName,
-            subCategory: customer.contextData.subCategoryName,
-            weight: customer.contextData.selectedWeight,
-            quantity: quantity,
-            price: weightPrice, // Store the weight-specific price, not the base price
-            totalPrice: totalPrice,
-            imageUrl: product.imageUrl,
+      case "select_quantity": {
+        const buyQty = parseInt(text, 10);
+        if (Number.isInteger(buyQty) && buyQty > 0) {
+          const finalProd = await Product.findById(
+            customer.contextData.productId
+          );
+          const unitPrice = finalProd.priceAfterDiscount || 0;
+          const totalLine = unitPrice * buyQty;
+
+          // 1) Push item into cart
+          const weightLabel = customer.contextData.selectedWeight || "";
+          customer.cart.items.push({
+            productId: finalProd._id.toString(),
+            productName: finalProd.productName,
+            weight: weightLabel,
+            quantity: buyQty,
+            price: unitPrice,
+            totalPrice: totalLine,
+            imageUrl: finalProd.masterImage,
           });
-
-          // Update cart total
           customer.cart.totalAmount = customer.cart.items.reduce(
-            (total, item) => total + item.totalPrice,
+            (sum, i) => sum + i.totalPrice,
             0
           );
           await customer.save();
 
-          // Confirm addition to cart
-          await customer.updateConversationState("post_add_to_cart");
-          const message = `added to your cart:
-${product.name}
-${quantity} bags (${customer.contextData.selectedWeight}) 
-for ${formatRupiah(totalPrice)}`;
+          // 2) Record a new “cart-not-paid” order immediately
+          await recordCartOrder(customer);
 
-          await sendWhatsAppMessage(phoneNumber, message);
-          // In the post_add_to_cart case, update the second sendWhatsAppMessage call
-          await sendWhatsAppMessage(
+          // 3) Move to post_add_to_cart state
+          await customer.updateConversationState("post_add_to_cart");
+
+          // 4) Confirmation message
+          const addedMsg =
+            `added to your cart:\n` +
+            `${finalProd.productName}\n` +
+            `${buyQty} bags\n` +
+            `for ${formatRupiah(totalLine)}`;
+          await sendWhatsAppMessage(phoneNumber, addedMsg);
+
+          // 5) Next menu
+          return sendWhatsAppMessage(
             phoneNumber,
-            "\n\nWhat do you want to do next?\n\n1- View cart\n2- Proceed to pay\n3- I want to shop more (Return to shopping list)\n0- Return to main menu"
-          );
-        } else {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Please enter a valid quantity as a positive number, or type 0 to return to the main menu."
+            "\nWhat do you want to do next?\n" +
+              "1- View cart\n" +
+              "2- Proceed to pay\n" +
+              "3- Shop more (return to shopping list)\n" +
+              "0- Main menu"
           );
         }
-        break;
+
+        return sendWhatsAppMessage(
+          phoneNumber,
+          "Please enter a valid quantity (a positive number), or 0 for main menu."
+        );
+      }
+
       case "post_add_to_cart":
         switch (text) {
           case "1":
@@ -1574,13 +1362,15 @@ for ${formatRupiah(totalPrice)}`;
 
       case "checkout_delivery":
         // Handle delivery option selection
-        if (["1", "2", "3", "4", "5"].includes(text)) {
+        if (["1", "2", "3", "4", "5", "6", "7"].includes(text)) {
           const deliveryOptions = {
             1: "Normal Delivery",
             2: "Speed Delivery",
             3: "Early Morning Delivery",
             4: "Eco Delivery",
             5: "Self Pickup",
+            6: "Normal Scooter Delivery",
+            7: "Direct Speed Scooter Delivery",
           };
 
           const deliveryCharges = {
@@ -1589,32 +1379,103 @@ for ${formatRupiah(totalPrice)}`;
             3: 50,
             4: 0, // Eco delivery - no charge but has discount instead
             5: 0, // Self pickup - no charge
+            6: 20, // Normal scooter delivery
+            7: 40, // Direct speed scooter delivery
           };
 
-          // Save delivery option
+          // Configure delivery type and speed based on selection
+          let deliveryType, deliverySpeed;
+
+          switch (text) {
+            case "1": // Normal Delivery
+              deliveryType = "truck";
+              deliverySpeed = "normal";
+              break;
+            case "2": // Speed Delivery
+              deliveryType = "truck";
+              deliverySpeed = "speed";
+              break;
+            case "3": // Early Morning Delivery
+              deliveryType = "truck";
+              deliverySpeed = "early_morning";
+              break;
+            case "4": // Eco Delivery
+              deliveryType = "truck";
+              deliverySpeed = "eco";
+              break;
+            case "5": // Self Pickup
+              deliveryType = "self_pickup";
+              deliverySpeed = "normal";
+              break;
+            case "6": // Normal Scooter Delivery
+              deliveryType = "scooter";
+              deliverySpeed = "normal";
+              break;
+            case "7": // Direct Speed Scooter Delivery
+              deliveryType = "scooter";
+              deliverySpeed = "speed";
+              break;
+          }
+
+          // Save delivery option with type and speed
           customer.cart.deliveryOption = deliveryOptions[text];
           customer.cart.deliveryCharge = deliveryCharges[text];
+          customer.cart.deliveryType = deliveryType;
+          customer.cart.deliverySpeed = deliverySpeed;
+
+          // Calculate eco delivery discount if applicable
+          if (text === "4") {
+            customer.cart.ecoDeliveryDiscount =
+              customer.cart.totalAmount * 0.05;
+          } else {
+            customer.cart.ecoDeliveryDiscount = 0;
+          }
+
           await customer.save();
 
-          // Confirm delivery option
+          // Confirm delivery option selection
           if (text === "2" || text === "3") {
             await sendWhatsAppMessage(
               phoneNumber,
-              `You've chosen ${deliveryOptions[text]}. A ${deliveryCharges[text]} charge will be added to your total.`
+              `You've chosen ${deliveryOptions[text]}. A ${formatRupiah(
+                deliveryCharges[text]
+              )} charge will be added to your total.`
             );
           } else if (text === "4") {
             await sendWhatsAppMessage(
               phoneNumber,
               `You've chosen ${deliveryOptions[text]}. A 5% discount will be applied to your total bill! Your order will be delivered in 8-10 days.`
             );
+
+            // Ask for eco delivery date
+            await customer.updateConversationState(
+              "checkout_eco_delivery_date"
+            );
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Please select a delivery date for your Eco Delivery (8-10 days from now).\n\nFormat: YYYY-MM-DD"
+            );
+            return; // Exit early since we've changed the state
+          } else if (text === "6" || text === "7") {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `You've chosen ${deliveryOptions[text]}. A ${formatRupiah(
+                deliveryCharges[text]
+              )} delivery charge will be added to your total.`
+            );
+          } else {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `You've chosen ${deliveryOptions[text]}.`
+            );
           }
 
-          // If self-pickup, skip location selection
+          // For self-pickup (text === "5"), proceed to checkout_summary
           if (text === "5") {
             await customer.updateConversationState("checkout_summary");
-            await sendOrderSummary(phoneNumber, customer);
-          } else {
-            // Ask for delivery location, with option for saved addresses if available
+          } else if (text !== "4") {
+            // Skip this for eco delivery as we've already changed state
+            // For all other deliveries (truck or scooter), ask for delivery location
             await customer.updateConversationState("checkout_location");
 
             if (customer.addresses && customer.addresses.length > 0) {
@@ -1644,10 +1505,11 @@ for ${formatRupiah(totalPrice)}`;
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Please select a valid delivery option (1, 2, 3, 4, or 5), or type 0 to return to the main menu."
+            "Please select a valid delivery option (1-7), or type 0 to return to the main menu."
           );
         }
         break;
+
       // Modify the checkout_location case to include saved addresses option
       case "checkout_location":
         // First check if the customer has saved addresses
@@ -1846,357 +1708,909 @@ for ${formatRupiah(totalPrice)}`;
         await customer.updateConversationState("checkout_summary");
         await sendOrderSummary(phoneNumber, customer);
         break;
+      // Modified checkout_map_location case to properly save Google Maps link
       case "checkout_map_location":
-        // Save Google Map location (no validation here for simplicity)
+        // Basic validation for Google Maps link
+        if (
+          !text.includes("maps.google") &&
+          !text.includes("goo.gl") &&
+          !text.startsWith("https://maps")
+        ) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Please send a valid Google Maps link. It should include 'maps.google' or similar."
+          );
+          return;
+        }
+
+        // First, save to contextData for backward compatibility
         customer.contextData.locationDetails = text;
+
+        // Check if customer has active delivery address in cart
+        if (!customer.cart.deliveryAddress) {
+          // Initialize deliveryAddress object if it doesn't exist
+          customer.cart.deliveryAddress = {
+            nickname: "Current Address",
+            area: customer.cart.deliveryLocation || "",
+            fullAddress: "",
+            googleMapLink: text,
+          };
+        } else {
+          // Update the existing deliveryAddress with the Google Maps link
+          customer.cart.deliveryAddress.googleMapLink = text;
+        }
+
+        // Also update the corresponding saved address if it matches the current delivery location
+        if (
+          customer.addresses &&
+          customer.addresses.length > 0 &&
+          customer.cart.deliveryLocation
+        ) {
+          const matchingAddressIndex = customer.addresses.findIndex(
+            (addr) =>
+              addr.area &&
+              addr.area.toLowerCase() ===
+                customer.cart.deliveryLocation.toLowerCase()
+          );
+
+          if (matchingAddressIndex >= 0) {
+            customer.addresses[matchingAddressIndex].googleMapLink = text;
+          }
+        }
+
         await customer.save();
+
+        // Confirm the Google Maps link was saved
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "Thank you! Your location has been saved."
+        );
 
         // Proceed to order summary
         await customer.updateConversationState("checkout_summary");
         await sendOrderSummary(phoneNumber, customer);
         break;
-
+      // ─── CASE: checkout_summary ─────────────────────────────────
       case "checkout_summary":
-        await customer.updateConversationState("checkout_wait_receipt");
+        {
+          // Move into the "waiting for receipt" step
+          await customer.updateConversationState("checkout_wait_receipt");
 
-        await sendWhatsAppMessage(
-          phoneNumber,
-          "📸 Please send a screenshot of your payment transfer receipt to continue."
-        );
-        await sendWhatsAppMessage(
-          phoneNumber,
-          "💡 Make sure the *bank name*, *account holder*, and *amount paid* are clearly visible."
-        );
+          // Prompt for the screenshot
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "📸 Please send a screenshot of your payment transfer receipt to continue."
+          );
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "💡 Make sure the *bank name*, *account holder*, and *amount paid* are clearly visible."
+          );
+        }
         break;
-
       case "checkout_wait_receipt":
-        if (message.type !== "image") {
+        {
+          // Ensure the received message is an image
+          if (message.type !== "image") {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❗ You must send a screenshot of your payment receipt to proceed."
+            );
+            break;
+          }
+
+          // Acknowledge receipt of the image
           await sendWhatsAppMessage(
             phoneNumber,
-            "❗ You must send a screenshot of your payment receipt to proceed."
+            "✅ Receipt received, processing your payment..."
           );
-          break;
-        }
 
-        // Receipt received
-        await sendWhatsAppMessage(phoneNumber, "✅ Receipt received.");
+          try {
+            // For WhatsApp Web, we need to download the image data first
+            const media = await message.downloadMedia();
 
-        if (customer.bankAccounts && customer.bankAccounts.length > 0) {
-          customer.updateConversationState("checkout_select_saved_bank");
+            if (!media || !media.data) {
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "❌ Error: Could not download your receipt image. Please try again."
+              );
+              break;
+            }
 
-          let msg = "*🏦 Select your saved bank account for payment:*\n\n";
-          customer.bankAccounts.forEach((bank, i) => {
-            msg += `${i + 1}. ${
-              bank.bankName
-            } - Account: ${bank.accountNumber.substring(0, 4)}xxxx (${
-              bank.accountHolderName
-            })\n`;
-          });
-          msg += `${customer.bankAccounts.length + 1}. Other Bank\n\n`;
-          msg += `ℹ️ To manage your saved bank accounts, visit your *Profile* from the Main Menu.`;
+            // Convert the buffer to a base64 string and format it
+            const base64Image = `data:${
+              media.mimetype
+            };base64,${media.data.toString("base64")}`;
 
-          await sendWhatsAppMessage(phoneNumber, msg);
-        } else {
-          customer.updateConversationState("checkout_enter_name");
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "👤 What is the full name of the account you are paying from?"
-          );
+            // Check if we have a valid order ID, if not, find the most recent order
+            if (
+              !customer.contextData.latestOrderId &&
+              customer.orderHistory.length > 0
+            ) {
+              const recentOrders = [...customer.orderHistory].sort(
+                (a, b) => new Date(b.orderDate) - new Date(a.orderDate)
+              );
+
+              if (recentOrders.length > 0) {
+                customer.contextData.latestOrderId = recentOrders[0].orderId;
+                console.log(
+                  `Found most recent order: ${customer.contextData.latestOrderId}`
+                );
+              }
+            }
+
+            // Try to find the order with the ID
+            const idxPay = customer.orderHistory.findIndex(
+              (o) => o.orderId === customer.contextData.latestOrderId
+            );
+
+            if (idxPay >= 0) {
+              // Store the image in base64 format directly
+              customer.orderHistory[idxPay].receiptImage = {
+                data: base64Image, // Base64 encoded data from WhatsApp
+                contentType: media.mimetype, // Use the mimetype provided by WhatsApp
+              };
+
+              // Store receipt image metadata
+              customer.orderHistory[idxPay].receiptImageMetadata = {
+                mimetype: media.mimetype,
+                filename:
+                  media.filename ||
+                  `receipt-${Date.now()}.${
+                    media.mimetype.split("/")[1] || "jpeg"
+                  }`,
+                timestamp: new Date(),
+              };
+
+              // Store the media ID for reference if necessary
+              customer.orderHistory[idxPay].receiptImageId =
+                message.id._serialized;
+
+              // Update order status to 'pay-not-confirmed'
+              customer.orderHistory[idxPay].status = "pay-not-confirmed";
+              customer.currentOrderStatus = "pay-not-confirmed";
+
+              // Save the updated customer document
+              await customer.save();
+
+              console.log(
+                `Successfully saved receipt for order: ${customer.contextData.latestOrderId}`
+              );
+            } else {
+              console.log(
+                `Order not found: ${customer.contextData.latestOrderId}`
+              );
+
+              // Create new order if none exists
+              if (customer.cart.items && customer.cart.items.length > 0) {
+                const newOrderId = await customer.createOrder();
+                customer.contextData.latestOrderId = newOrderId;
+                customer.latestOrderId = newOrderId;
+                await customer.save();
+
+                const newIdxPay = customer.orderHistory.findIndex(
+                  (o) => o.orderId === newOrderId
+                );
+                if (newIdxPay >= 0) {
+                  // Store the image in base64 format directly
+                  customer.orderHistory[newIdxPay].receiptImage = {
+                    data: base64Image, // Base64 encoded data from WhatsApp
+                    contentType: media.mimetype, // Use the mimetype provided by WhatsApp
+                  };
+
+                  // Store receipt image metadata
+                  customer.orderHistory[newIdxPay].receiptImageMetadata = {
+                    mimetype: media.mimetype,
+                    filename:
+                      media.filename ||
+                      `receipt-${Date.now()}.${
+                        media.mimetype.split("/")[1] || "jpeg"
+                      }`,
+                    timestamp: new Date(),
+                  };
+
+                  customer.orderHistory[newIdxPay].receiptImageId =
+                    message.id._serialized;
+                  customer.orderHistory[newIdxPay].status = "pay-not-confirmed";
+                  customer.currentOrderStatus = "pay-not-confirmed";
+
+                  await customer.save();
+                  console.log(
+                    `Successfully saved receipt for new order: ${newOrderId}`
+                  );
+                }
+              } else {
+                await sendWhatsAppMessage(
+                  phoneNumber,
+                  "❌ Error: No items found in your cart. Please contact support."
+                );
+                break;
+              }
+            }
+
+            // Proceed to the next step (bank selection or other details)
+            if (customer.bankAccounts?.length) {
+              await customer.updateConversationState(
+                "checkout_select_saved_bank"
+              );
+              let msg = "*🏦 Select your saved bank account for payment:*\n\n";
+              customer.bankAccounts.forEach((b, i) => {
+                msg += `${i + 1}. ${
+                  b.bankName
+                } - Account: ${b.accountNumber.slice(0, 4)}xxxx (${
+                  b.accountHolderName
+                })\n`;
+              });
+              msg += `${
+                customer.bankAccounts.length + 1
+              }. Other Bank\n\nℹ️ To manage your saved bank accounts, visit your *Profile* from the Main Menu.`;
+              await sendWhatsAppMessage(phoneNumber, msg);
+            } else {
+              await customer.updateConversationState("checkout_enter_name");
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "👤 What is the full name of the account you are paying from?"
+              );
+            }
+          } catch (error) {
+            console.error("Error processing payment receipt:", error);
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Error: Unable to process your receipt. Please try again or contact support if the issue persists."
+            );
+          }
         }
         break;
 
+      // ─── CASE: checkout_select_saved_bank ──────────────────────────
       case "checkout_select_saved_bank":
-        const selectedIdx = parseInt(text.trim()) - 1;
+        {
+          const selectedIdx = parseInt(text.trim(), 10) - 1;
 
-        if (
-          !isNaN(selectedIdx) &&
-          selectedIdx >= 0 &&
-          selectedIdx < customer.bankAccounts.length
-        ) {
-          const selected = customer.bankAccounts[selectedIdx];
-          customer.contextData.accountHolderName = selected.accountHolderName;
-          customer.contextData.bankName = selected.bankName;
-          customer.markModified("contextData");
-          await customer.save();
+          if (
+            !isNaN(selectedIdx) &&
+            selectedIdx >= 0 &&
+            selectedIdx < customer.bankAccounts.length
+          ) {
+            const selected = customer.bankAccounts[selectedIdx];
 
-          await sendWhatsAppMessage(
-            phoneNumber,
-            `✅ Selected: ${selected.bankName} - (${selected.accountHolderName})\n\n🛒 Processing your order...`
-          );
+            // Save into contextData
+            customer.contextData.accountHolderName = selected.accountHolderName;
+            customer.contextData.bankName = selected.bankName;
 
-          const orderId = await createOrder(customer, phoneNumber);
-          if (orderId) {
+            // Verify we have a valid order ID to update
+            if (!customer.contextData.latestOrderId) {
+              console.error("No latestOrderId found when selecting saved bank");
+
+              // Try to find the latest order from orderHistory
+              if (customer.orderHistory.length > 0) {
+                const recentOrders = [...customer.orderHistory].sort(
+                  (a, b) => new Date(b.orderDate) - new Date(a.orderDate)
+                );
+
+                if (recentOrders.length > 0) {
+                  customer.contextData.latestOrderId = recentOrders[0].orderId;
+                  customer.latestOrderId = recentOrders[0].orderId;
+                  console.log(
+                    `Found and using latest order: ${customer.contextData.latestOrderId}`
+                  );
+                }
+              }
+            }
+
+            // Save the account holder name and bank name to the orderHistory entry
+            const idx = customer.orderHistory.findIndex(
+              (o) => o.orderId === customer.contextData.latestOrderId
+            );
+            if (idx >= 0) {
+              customer.orderHistory[idx].accountHolderName =
+                selected.accountHolderName;
+              customer.orderHistory[idx].paidBankName = selected.bankName;
+
+              // Add to tracking arrays for future reference
+              if (!customer.payerNames.includes(selected.accountHolderName)) {
+                customer.payerNames.push(selected.accountHolderName);
+              }
+              if (!customer.bankNames.includes(selected.bankName)) {
+                customer.bankNames.push(selected.bankName);
+              }
+            } else {
+              console.error(
+                `Order not found in checkout_select_saved_bank: ${customer.contextData.latestOrderId}`
+              );
+              // Create a new order if no order exists
+              if (customer.cart.items && customer.cart.items.length > 0) {
+                console.log("Creating new order with selected bank details");
+                const newOrderId = await customer.createOrder();
+                customer.contextData.latestOrderId = newOrderId;
+                customer.latestOrderId = newOrderId;
+
+                // Now update the new order with the bank details
+                const newIdx = customer.orderHistory.findIndex(
+                  (o) => o.orderId === newOrderId
+                );
+                if (newIdx >= 0) {
+                  customer.orderHistory[newIdx].accountHolderName =
+                    selected.accountHolderName;
+                  customer.orderHistory[newIdx].paidBankName =
+                    selected.bankName;
+                }
+              }
+            }
+
+            await customer.save();
+
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `✅ Selected: ${selected.bankName} - (${selected.accountHolderName})\n\n🛒 Processing your order...`
+            );
+
+            // Now proceed to confirmation
             await customer.updateConversationState("order_confirmation");
             await processChatMessage(phoneNumber, "order_confirmation");
+          } else if (text.trim() === `${customer.bankAccounts.length + 1}`) {
+            await customer.updateConversationState("checkout_enter_name");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "👤 What is the full name of the account you are paying from?"
+            );
+          } else {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Invalid selection. Please choose a valid option."
+            );
           }
-        } else if (text.trim() === `${customer.bankAccounts.length + 1}`) {
-          customer.updateConversationState("checkout_enter_name");
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "👤 What is the full name of the account you are paying from?"
-          );
-        } else {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "❌ Invalid selection. Please choose a valid option."
-          );
         }
         break;
 
+      // ─── CASE: checkout_enter_name ────────────────────────────────
+      // ─── CASE: checkout_enter_name ────────────────────────────────
       case "checkout_enter_name":
-        customer.contextData.accountHolderName = text.trim();
-        await customer.save();
+        {
+          const name = text.trim();
+          customer.contextData.accountHolderName = name;
 
-        customer.updateConversationState("checkout_enter_bank");
+          // First check if we have a valid latestOrderId
+          if (
+            !customer.contextData.latestOrderId &&
+            customer.orderHistory.length > 0
+          ) {
+            // Try to find the most recent order
+            const recentOrders = [...customer.orderHistory].sort(
+              (a, b) => new Date(b.orderDate) - new Date(a.orderDate)
+            );
 
-        const formattedBankList = `*Select a bank:*
-        --------------------------------
-        1 - Other (enter manually)
-        --------------------------------
-        2 - Bank Rakyat Indonesia (BRI)
-        3 - Bank Ekspor Indonesia
-        8 - Bank Mandiri
-        9 - Bank Negara Indonesia (BNI)
-        11 - Bank Danamon Indonesia
-        13 - Bank Permata
-        14 - Bank Central Asia (BCA)
-        16 - Bank Maybank
-        19 - Bank Panin
-        20 - Bank Arta Niaga Kencana
-        22 - Bank CIMB Niaga
-        23 - Bank UOB Indonesia
-        26 - Bank Lippo
-        28 - Bank OCBC NISP
-        30 - American Express Bank LTD
-        31 - Citibank
-        32 - JP. Morgan Chase Bank, N.A
-        33 - Bank of America, N.A
-        36 - Bank Multicor
-        37 - Bank Artha Graha
-        47 - Bank Pesona Perdania
-        52 - Bank ABN Amro
-        53 - Bank Keppel Tatlee Buana
-        57 - Bank BNP Paribas Indonesia
-        68 - Bank Woori Indonesia
-        76 - Bank Bumi Arta
-        87 - Bank Ekonomi
-        89 - Bank Haga
-        93 - Bank IFI
-        95 - Bank Century / Bank J Trust Indonesia
-        97 - Bank Mayapada
-        110 - Bank BJB
-        111 - Bank DKI
-        112 - Bank BPD D.I.Y
-        113 - Bank Jateng
-        114 - Bank Jatim
-        115 - Bank Jambi
-        116 - Bank Aceh
-        117 - Bank Sumut
-        118 - Bank Sumbar
-        119 - Bank Kepri
-        120 - Bank Sumsel dan Babel
-        121 - Bank Lampung
-        122 - Bank Kalsel
-        123 - Bank Kalbar
-        124 - Bank Kaltim
-        125 - Bank Kalteng
-        126 - Bank Sulsel
-        127 - Bank Sulut
-        128 - Bank NTB
-        129 - Bank Bali
-        130 - Bank NTT
-        131 - Bank Maluku
-        132 - Bank Papua
-        133 - Bank Bengkulu
-        134 - Bank Sulteng
-        135 - Bank Sultra
-        137 - Bank Banten
-        145 - Bank Nusantara Parahyangan
-        146 - Bank Swadesi
-        147 - Bank Muamalat
-        151 - Bank Mestika
-        152 - Bank Metro Express
-        157 - Bank Maspion
-        159 - Bank Hagakita
-        161 - Bank Ganesha
-        162 - Bank Windu Kentjana
-        164 - Bank ICBC Indonesia
-        166 - Bank Harmoni Internasional
-        167 - Bank QNB
-        200 - Bank Tabungan Negara (BTN)
-        405 - Bank Swaguna
-        425 - Bank BJB Syariah
-        426 - Bank Mega
-        441 - Bank Bukopin
-        451 - Bank Syariah Indonesia (BSI)
-        459 - Bank Bisnis Internasional
-        466 - Bank Sri Partha
-        484 - Bank KEB Hana Indonesia
-        485 - Bank MNC Internasional
-        490 - Bank Neo
-        494 - Bank BNI Agro
-        503 - Bank Nobu
-        506 - Bank Mega Syariah
-        513 - Bank Ina Perdana
-        517 - Bank Panin Dubai Syariah
-        521 - Bank Bukopin Syariah
-        523 - Bank Sahabat Sampoerna
-        535 - SeaBank
-        536 - Bank BCA Syariah
-        542 - Bank Jago
-        547 - Bank BTPN Syariah
-        553 - Bank Mayora
-        555 - Bank Index Selindo
-        947 - Bank Aladin Syariah`;
+            if (recentOrders.length > 0) {
+              customer.contextData.latestOrderId = recentOrders[0].orderId;
+              customer.latestOrderId = recentOrders[0].orderId; // Update top-level field too
+              console.log(
+                `Found most recent order for name update: ${customer.contextData.latestOrderId}`
+              );
+            }
+          }
 
-        await sendWhatsAppMessage(phoneNumber, formattedBankList);
+          // Now find the order with the ID
+          const idx = customer.orderHistory.findIndex(
+            (o) => o.orderId === customer.contextData.latestOrderId
+          );
+
+          if (idx >= 0) {
+            // Save the account holder name to the orderHistory entry
+            customer.orderHistory[idx].accountHolderName = name;
+
+            // Track this name for future reference
+            if (!customer.payerNames.includes(name)) {
+              customer.payerNames.push(name);
+            }
+
+            await customer.save();
+            console.log(
+              `Successfully saved account holder name "${name}" to order: ${customer.contextData.latestOrderId}`
+            );
+
+            // Proceed to bank selection
+            await customer.updateConversationState("checkout_enter_bank");
+
+            // prompt bank list
+            const formattedBankList = `*Select a bank:*
+--------------------------------
+1 - Other (enter manually)
+--------------------------------
+2 - Bank Rakyat Indonesia (BRI)
+3 - Bank Ekspor Indonesia
+8 - Bank Mandiri
+9 - Bank Negara Indonesia (BNI)
+11 - Bank Danamon Indonesia
+13 - Bank Permata
+14 - Bank Central Asia (BCA)
+16 - Bank Maybank
+19 - Bank Panin
+20 - Bank Arta Niaga Kencana
+22 - Bank CIMB Niaga
+23 - Bank UOB Indonesia
+26 - Bank Lippo
+28 - Bank OCBC NISP
+30 - American Express Bank LTD
+31 - Citibank
+32 - JP. Morgan Chase Bank, N.A
+33 - Bank of America, N.A
+36 - Bank Multicor
+37 - Bank Artha Graha
+47 - Bank Pesona Perdania
+52 - Bank ABN Amro
+53 - Bank Keppel Tatlee Buana
+57 - Bank BNP Paribas Indonesia
+68 - Bank Woori Indonesia
+76 - Bank Bumi Arta
+87 - Bank Ekonomi
+89 - Bank Haga
+93 - Bank IFI
+95 - Bank Century / Bank J Trust Indonesia
+97 - Bank Mayapada
+110 - Bank BJB
+111 - Bank DKI
+112 - Bank BPD D.I.Y
+113 - Bank Jateng
+114 - Bank Jatim
+115 - Bank Jambi
+116 - Bank Aceh
+117 - Bank Sumut
+118 - Bank Sumbar
+119 - Bank Kepri
+120 - Bank Sumsel dan Babel
+121 - Bank Lampung
+122 - Bank Kalsel
+123 - Bank Kalbar
+124 - Bank Kaltim
+125 - Bank Kalteng
+126 - Bank Sulsel
+127 - Bank Sulut
+128 - Bank NTB
+129 - Bank Bali
+130 - Bank NTT
+131 - Bank Maluku
+132 - Bank Papua
+133 - Bank Bengkulu
+134 - Bank Sulteng
+135 - Bank Sultra
+137 - Bank Banten
+145 - Bank Nusantara Parahyangan
+146 - Bank Swadesi
+147 - Bank Muamalat
+151 - Bank Mestika
+152 - Bank Metro Express
+157 - Bank Maspion
+159 - Bank Hagakita
+161 - Bank Ganesha
+162 - Bank Windu Kentjana
+164 - Bank ICBC Indonesia
+166 - Bank Harmoni Internasional
+167 - Bank QNB
+200 - Bank Tabungan Negara (BTN)
+405 - Bank Swaguna
+425 - Bank BJB Syariah
+426 - Bank Mega
+441 - Bank Bukopin
+451 - Bank Syariah Indonesia (BSI)
+459 - Bank Bisnis Internasional
+466 - Bank Sri Partha
+484 - Bank KEB Hana Indonesia
+485 - Bank MNC Internasional
+490 - Bank Neo
+494 - Bank BNI Agro
+503 - Bank Nobu
+506 - Bank Mega Syariah
+513 - Bank Ina Perdana
+517 - Bank Panin Dubai Syariah
+521 - Bank Bukopin Syariah
+523 - Bank Sahabat Sampoerna
+535 - SeaBank
+536 - Bank BCA Syariah
+542 - Bank Jago
+547 - Bank BTPN Syariah
+553 - Bank Mayora
+555 - Bank Index Selindo
+947 - Bank Aladin Syariah`;
+
+            await sendWhatsAppMessage(phoneNumber, formattedBankList);
+          } else {
+            console.error(
+              `No valid order found when trying to save account holder name.`
+            );
+
+            // Create new order if none exists
+            if (customer.cart.items && customer.cart.items.length > 0) {
+              console.log("Creating new order to save account holder name");
+              const newOrderId = await customer.createOrder();
+              customer.contextData.latestOrderId = newOrderId;
+              customer.latestOrderId = newOrderId;
+
+              // Find the new order index
+              const newIdx = customer.orderHistory.findIndex(
+                (o) => o.orderId === newOrderId
+              );
+              if (newIdx >= 0) {
+                // Save the account holder name
+                customer.orderHistory[newIdx].accountHolderName = name;
+
+                // Track this name for future reference
+                if (!customer.payerNames.includes(name)) {
+                  customer.payerNames.push(name);
+                }
+
+                await customer.save();
+                console.log(
+                  `Created new order ${newOrderId} and saved account holder name "${name}"`
+                );
+
+                // Proceed to bank selection
+                await customer.updateConversationState("checkout_enter_bank");
+                await sendWhatsAppMessage(phoneNumber, formattedBankList);
+              } else {
+                throw new Error(
+                  `Failed to find newly created order ${newOrderId}`
+                );
+              }
+            } else {
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "❌ Your cart is empty. Please add items to your cart before checkout."
+              );
+              await customer.updateConversationState("main_menu");
+              await processChatMessage(phoneNumber, "main_menu");
+            }
+          }
+        }
         break;
 
+      // ─── CASE: checkout_enter_bank ─────────────────────────────────
       case "checkout_enter_bank":
-        const checkoutBankOptions = {
-          1: "Other (enter manually)",
-          2: "Bank Rakyat Indonesia (BRI)",
-          3: "Bank Ekspor Indonesia",
-          8: "Bank Mandiri",
-          9: "Bank Negara Indonesia (BNI)",
-          11: "Bank Danamon Indonesia",
-          13: "Bank Permata",
-          14: "Bank Central Asia (BCA)",
-          16: "Bank Maybank",
-          19: "Bank Panin",
-          20: "Bank Arta Niaga Kencana",
-          22: "Bank CIMB Niaga",
-          23: "Bank UOB Indonesia",
-          26: "Bank Lippo",
-          28: "Bank OCBC NISP",
-          30: "American Express Bank LTD",
-          31: "Citibank",
-          32: "JP. Morgan Chase Bank, N.A",
-          33: "Bank of America, N.A",
-          36: "Bank Multicor",
-          37: "Bank Artha Graha",
-          47: "Bank Pesona Perdania",
-          52: "Bank ABN Amro",
-          53: "Bank Keppel Tatlee Buana",
-          57: "Bank BNP Paribas Indonesia",
-          68: "Bank Woori Indonesia",
-          76: "Bank Bumi Arta",
-          87: "Bank Ekonomi",
-          89: "Bank Haga",
-          93: "Bank IFI",
-          95: "Bank Century / Bank J Trust Indonesia",
-          97: "Bank Mayapada",
-          110: "Bank BJB",
-          111: "Bank DKI",
-          112: "Bank BPD D.I.Y",
-          113: "Bank Jateng",
-          114: "Bank Jatim",
-          115: "Bank Jambi",
-          116: "Bank Aceh",
-          117: "Bank Sumut",
-          118: "Bank Sumbar",
-          119: "Bank Kepri",
-          120: "Bank Sumsel dan Babel",
-          121: "Bank Lampung",
-          122: "Bank Kalsel",
-          123: "Bank Kalbar",
-          124: "Bank Kaltim",
-          125: "Bank Kalteng",
-          126: "Bank Sulsel",
-          127: "Bank Sulut",
-          128: "Bank NTB",
-          129: "Bank Bali",
-          130: "Bank NTT",
-          131: "Bank Maluku",
-          132: "Bank Papua",
-          133: "Bank Bengkulu",
-          134: "Bank Sulteng",
-          135: "Bank Sultra",
-          137: "Bank Banten",
-          145: "Bank Nusantara Parahyangan",
-          146: "Bank Swadesi",
-          147: "Bank Muamalat",
-          151: "Bank Mestika",
-          152: "Bank Metro Express",
-          157: "Bank Maspion",
-          159: "Bank Hagakita",
-          161: "Bank Ganesha",
-          162: "Bank Windu Kentjana",
-          164: "Bank ICBC Indonesia",
-          166: "Bank Harmoni Internasional",
-          167: "Bank QNB",
-          200: "Bank Tabungan Negara (BTN)",
-          405: "Bank Swaguna",
-          425: "Bank BJB Syariah",
-          426: "Bank Mega",
-          441: "Bank Bukopin",
-          451: "Bank Syariah Indonesia (BSI)",
-          459: "Bank Bisnis Internasional",
-          466: "Bank Sri Partha",
-          484: "Bank KEB Hana Indonesia",
-          485: "Bank MNC Internasional",
-          490: "Bank Neo",
-          494: "Bank BNI Agro",
-          503: "Bank Nobu",
-          506: "Bank Mega Syariah",
-          513: "Bank Ina Perdana",
-          517: "Bank Panin Dubai Syariah",
-          521: "Bank Bukopin Syariah",
-          523: "Bank Sahabat Sampoerna",
-          535: "SeaBank",
-          536: "Bank BCA Syariah",
-          542: "Bank Jago",
-          547: "Bank BTPN Syariah",
-          553: "Bank Mayora",
-          555: "Bank Index Selindo",
-          947: "Bank Aladin Syariah",
-        };
+        {
+          const checkoutBankOptions = {
+            1: "Other (enter manually)",
+            2: "Bank Rakyat Indonesia (BRI)",
+            3: "Bank Ekspor Indonesia",
+            8: "Bank Mandiri",
+            9: "Bank Negara Indonesia (BNI)",
+            11: "Bank Danamon Indonesia",
+            13: "Bank Permata",
+            14: "Bank Central Asia (BCA)",
+            16: "Bank Maybank",
+            19: "Bank Panin",
+            20: "Bank Arta Niaga Kencana",
+            22: "Bank CIMB Niaga",
+            23: "Bank UOB Indonesia",
+            26: "Bank Lippo",
+            28: "Bank OCBC NISP",
+            30: "American Express Bank LTD",
+            31: "Citibank",
+            32: "JP. Morgan Chase Bank, N.A",
+            33: "Bank of America, N.A",
+            36: "Bank Multicor",
+            37: "Bank Artha Graha",
+            47: "Bank Pesona Perdania",
+            52: "Bank ABN Amro",
+            53: "Bank Keppel Tatlee Buana",
+            57: "Bank BNP Paribas Indonesia",
+            68: "Bank Woori Indonesia",
+            76: "Bank Bumi Arta",
+            87: "Bank Ekonomi",
+            89: "Bank Haga",
+            93: "Bank IFI",
+            95: "Bank Century / Bank J Trust Indonesia",
+            97: "Bank Mayapada",
+            110: "Bank BJB",
+            111: "Bank DKI",
+            112: "Bank BPD D.I.Y",
+            113: "Bank Jateng",
+            114: "Bank Jatim",
+            115: "Bank Jambi",
+            116: "Bank Aceh",
+            117: "Bank Sumut",
+            118: "Bank Sumbar",
+            119: "Bank Kepri",
+            120: "Bank Sumsel dan Babel",
+            121: "Bank Lampung",
+            122: "Bank Kalsel",
+            123: "Bank Kalbar",
+            124: "Bank Kaltim",
+            125: "Bank Kalteng",
+            126: "Bank Sulsel",
+            127: "Bank Sulut",
+            128: "Bank NTB",
+            129: "Bank Bali",
+            130: "Bank NTT",
+            131: "Bank Maluku",
+            132: "Bank Papua",
+            133: "Bank Bengkulu",
+            134: "Bank Sulteng",
+            135: "Bank Sultra",
+            137: "Bank Banten",
+            145: "Bank Nusantara Parahyangan",
+            146: "Bank Swadesi",
+            147: "Bank Muamalat",
+            151: "Bank Mestika",
+            152: "Bank Metro Express",
+            157: "Bank Maspion",
+            159: "Bank Hagakita",
+            161: "Bank Ganesha",
+            162: "Bank Windu Kentjana",
+            164: "Bank ICBC Indonesia",
+            166: "Bank Harmoni Internasional",
+            167: "Bank QNB",
+            200: "Bank Tabungan Negara (BTN)",
+            405: "Bank Swaguna",
+            425: "Bank BJB Syariah",
+            426: "Bank Mega",
+            441: "Bank Bukopin",
+            451: "Bank Syariah Indonesia (BSI)",
+            459: "Bank Bisnis Internasional",
+            466: "Bank Sri Partha",
+            484: "Bank KEB Hana Indonesia",
+            485: "Bank MNC Internasional",
+            490: "Bank Neo",
+            494: "Bank BNI Agro",
+            503: "Bank Nobu",
+            506: "Bank Mega Syariah",
+            513: "Bank Ina Perdana",
+            517: "Bank Panin Dubai Syariah",
+            521: "Bank Bukopin Syariah",
+            523: "Bank Sahabat Sampoerna",
+            535: "SeaBank",
+            536: "Bank BCA Syariah",
+            542: "Bank Jago",
+            547: "Bank BTPN Syariah",
+            553: "Bank Mayora",
+            555: "Bank Index Selindo",
+            947: "Bank Aladin Syariah",
+          };
 
-        const chosenBankName = checkoutBankOptions[text.trim()];
+          const choice = text.trim();
+          const chosenBankName = checkoutBankOptions[choice];
 
-        if (chosenBankName) {
-          if (text.trim() === "1") {
-            customer.updateConversationState("checkout_enter_bank_manual");
+          if (!chosenBankName) {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Invalid input. Please enter a valid bank number from the list."
+            );
+            break;
+          }
+
+          if (choice === "1") {
+            // manual‐entry path
+            await customer.updateConversationState(
+              "checkout_enter_bank_manual"
+            );
             await sendWhatsAppMessage(
               phoneNumber,
               "Please enter the name of your bank:"
             );
-          } else {
-            customer.contextData.bankName = chosenBankName;
+            break;
+          }
+
+          // Verify we have a valid order ID before proceeding
+          if (
+            !customer.contextData.latestOrderId &&
+            customer.orderHistory.length > 0
+          ) {
+            // Try to find the most recent order
+            const recentOrders = [...customer.orderHistory].sort(
+              (a, b) => new Date(b.orderDate) - new Date(a.orderDate)
+            );
+
+            if (recentOrders.length > 0) {
+              customer.contextData.latestOrderId = recentOrders[0].orderId;
+              customer.latestOrderId = recentOrders[0].orderId; // Update top-level field too
+              console.log(
+                `Found most recent order for bank selection: ${customer.contextData.latestOrderId}`
+              );
+            }
+          }
+
+          // save into contextData
+          customer.contextData.bankName = chosenBankName;
+
+          // also persist onto the orderHistory entry
+          const idx2 = customer.orderHistory.findIndex(
+            (o) => o.orderId === customer.contextData.latestOrderId
+          );
+
+          if (idx2 >= 0) {
+            customer.orderHistory[idx2].paidBankName = chosenBankName;
+
+            // Track this bank for future reference
+            if (!customer.bankNames.includes(chosenBankName)) {
+              customer.bankNames.push(chosenBankName);
+            }
+
             await customer.save();
+            console.log(
+              `Successfully saved bank "${chosenBankName}" to order: ${customer.contextData.latestOrderId}`
+            );
 
             await sendWhatsAppMessage(
               phoneNumber,
               `✅ Selected Bank: ${chosenBankName}\n🛒 Processing your order...`
             );
 
-            const orderId = await createOrder(customer, phoneNumber);
-            if (orderId) {
-              await customer.updateConversationState("order_confirmation");
-              await processChatMessage(phoneNumber, "order_confirmation");
+            await customer.updateConversationState("order_confirmation");
+            return processChatMessage(
+              phoneNumber,
+              "order_confirmation",
+              message
+            );
+          } else {
+            console.error(
+              `Order not found when selecting bank: ${customer.contextData.latestOrderId}`
+            );
+
+            // Create a new order if no order exists
+            if (customer.cart.items && customer.cart.items.length > 0) {
+              console.log("Creating new order for bank selection");
+              const newOrderId = await customer.createOrder();
+              customer.contextData.latestOrderId = newOrderId;
+              customer.latestOrderId = newOrderId;
+
+              // Now update the new order with the bank details
+              const newIdx = customer.orderHistory.findIndex(
+                (o) => o.orderId === newOrderId
+              );
+
+              if (newIdx >= 0) {
+                // Use the previously stored account holder name if available
+                if (customer.contextData.accountHolderName) {
+                  customer.orderHistory[newIdx].accountHolderName =
+                    customer.contextData.accountHolderName;
+                }
+
+                customer.orderHistory[newIdx].paidBankName = chosenBankName;
+
+                // Track this bank for future reference
+                if (!customer.bankNames.includes(chosenBankName)) {
+                  customer.bankNames.push(chosenBankName);
+                }
+
+                await customer.save();
+                console.log(
+                  `Created new order ${newOrderId} and saved bank "${chosenBankName}"`
+                );
+
+                await sendWhatsAppMessage(
+                  phoneNumber,
+                  `✅ Selected Bank: ${chosenBankName}\n🛒 Processing your order...`
+                );
+
+                await customer.updateConversationState("order_confirmation");
+                return processChatMessage(
+                  phoneNumber,
+                  "order_confirmation",
+                  message
+                );
+              } else {
+                throw new Error(
+                  `Failed to find newly created order ${newOrderId}`
+                );
+              }
+            } else {
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "❌ Your cart is empty. Please add items to your cart before checkout."
+              );
+              await customer.updateConversationState("main_menu");
+              await processChatMessage(phoneNumber, "main_menu");
             }
           }
-        } else {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "❌ Invalid input. Please enter a valid bank number from the list."
-          );
         }
         break;
 
+      // ─── CASE: checkout_enter_bank_manual ──────────────────────────
       case "checkout_enter_bank_manual":
-        customer.contextData.bankName = text.trim();
-        await customer.save();
+        {
+          const manualBankName = text.trim();
 
-        await sendWhatsAppMessage(
-          phoneNumber,
-          `✅ Bank: ${text.trim()}\n🛒 Processing your order...`
-        );
+          // Verify we have a valid order ID before proceeding
+          if (
+            !customer.contextData.latestOrderId &&
+            customer.orderHistory.length > 0
+          ) {
+            // Try to find the most recent order
+            const recentOrders = [...customer.orderHistory].sort(
+              (a, b) => new Date(b.orderDate) - new Date(a.orderDate)
+            );
 
-        const manualOrderId = await createOrder(customer, phoneNumber);
-        if (manualOrderId) {
-          await customer.updateConversationState("order_confirmation");
-          await processChatMessage(phoneNumber, "order_confirmation");
+            if (recentOrders.length > 0) {
+              customer.contextData.latestOrderId = recentOrders[0].orderId;
+              customer.latestOrderId = recentOrders[0].orderId; // Update top-level field too
+              console.log(
+                `Found most recent order for manual bank entry: ${customer.contextData.latestOrderId}`
+              );
+            }
+          }
+
+          // Save into contextData
+          customer.contextData.bankName = manualBankName;
+
+          // Find the order to update
+          const idx3 = customer.orderHistory.findIndex(
+            (o) => o.orderId === customer.contextData.latestOrderId
+          );
+
+          if (idx3 >= 0) {
+            customer.orderHistory[idx3].paidBankName = manualBankName;
+
+            // Track this bank for future reference
+            if (!customer.bankNames.includes(manualBankName)) {
+              customer.bankNames.push(manualBankName);
+            }
+
+            await customer.save();
+            console.log(
+              `Successfully saved manual bank "${manualBankName}" to order: ${customer.contextData.latestOrderId}`
+            );
+
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `✅ Bank: ${manualBankName}\n🛒 Processing your order...`
+            );
+
+            await customer.updateConversationState("order_confirmation");
+            return processChatMessage(phoneNumber, "order_confirmation");
+          } else {
+            console.error(
+              `Order not found when entering manual bank: ${customer.contextData.latestOrderId}`
+            );
+
+            // Create a new order if no order exists
+            if (customer.cart.items && customer.cart.items.length > 0) {
+              console.log("Creating new order for manual bank entry");
+              const newOrderId = await customer.createOrder();
+              customer.contextData.latestOrderId = newOrderId;
+              customer.latestOrderId = newOrderId;
+
+              // Now update the new order with the bank details
+              const newIdx = customer.orderHistory.findIndex(
+                (o) => o.orderId === newOrderId
+              );
+
+              if (newIdx >= 0) {
+                // Use the previously stored account holder name if available
+                if (customer.contextData.accountHolderName) {
+                  customer.orderHistory[newIdx].accountHolderName =
+                    customer.contextData.accountHolderName;
+                }
+
+                customer.orderHistory[newIdx].paidBankName = manualBankName;
+
+                // Track this bank for future reference
+                if (!customer.bankNames.includes(manualBankName)) {
+                  customer.bankNames.push(manualBankName);
+                }
+
+                await customer.save();
+                console.log(
+                  `Created new order ${newOrderId} and saved manual bank "${manualBankName}"`
+                );
+
+                await sendWhatsAppMessage(
+                  phoneNumber,
+                  `✅ Bank: ${manualBankName}\n🛒 Processing your order...`
+                );
+
+                await customer.updateConversationState("order_confirmation");
+                return processChatMessage(phoneNumber, "order_confirmation");
+              } else {
+                throw new Error(
+                  `Failed to find newly created order ${newOrderId}`
+                );
+              }
+            } else {
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "❌ Your cart is empty. Please add items to your cart before checkout."
+              );
+              await customer.updateConversationState("main_menu");
+              await processChatMessage(phoneNumber, "main_menu");
+            }
+          }
         }
         break;
 
@@ -2228,6 +2642,13 @@ for ${formatRupiah(totalPrice)}`;
 
           case "2":
             // Report an issue with my order
+
+            // after you capture their issue and create a support ticket…
+            // **SET** “issue-customer”
+            const idxIssue = customer.orderHistory.length - 1;
+            customer.orderHistory[idxIssue].status = "issue-customer";
+            customer.currentOrderStatus = "issue-customer";
+            await customer.save();
             await customer.updateConversationState("support_report_issue");
             await sendWhatsAppMessage(
               phoneNumber,
@@ -5648,31 +6069,49 @@ for ${formatRupiah(totalPrice)}`;
         }
         break;
       case "order_confirmation": {
+        // 1) figure out which order we're updating
+        let idx = -1;
+        const latestId = customer.contextData.latestOrderId;
+        if (latestId) {
+          idx = customer.orderHistory.findIndex((o) => o.orderId === latestId);
+        }
+        // fallback to the last order if that lookup failed
+        if (idx < 0 && customer.orderHistory.length > 0) {
+          idx = customer.orderHistory.length - 1;
+        }
+
+        // if we've found an order, update its status
+        if (idx >= 0) {
+          customer.orderHistory[idx].status = "pay-not-confirmed";
+          customer.currentOrderStatus = "pay-not-confirmed";
+          await customer.save();
+        } else {
+          // defensive: nothing to update
+          console.error("No order to confirm for", customer.phoneNumber);
+        }
+
+        // 2) advance the conversation
         await customer.updateConversationState("order_confirmation");
 
-        const latestOrder =
-          customer.orderHistory[customer.orderHistory.length - 1];
+        // 3) notify the user
+        const latestOrder = customer.orderHistory[idx];
+        if (latestOrder) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `Your order is in progress and will be confirmed once payment is verified\n` +
+              `🧾 Order ID: *#${latestOrder.orderId}*\n` +
+              `Keep it safe please, ${customer.name}.`
+          );
+        }
 
-        // Save order ID to context in case we need to reference it later
-        customer.contextData.latestOrderId = latestOrder.orderId;
-        await customer.save();
-
-        // Basic confirmation message
-        await sendWhatsAppMessage(
-          phoneNumber,
-          `Your order is in progress and will be confirmed once payment is verified\n` +
-            `🧾 Order ID: *#${latestOrder.orderId}*\n` +
-            `Keep it safe please, ${customer.name}.`
-        );
-
-        // 🚨 Self Pickup logic (regardless of amount)
-        if (latestOrder.deliveryOption === "Self Pickup") {
-          if (latestOrder.totalAmount >= 25000000) {
+        // 4) self-pickup branch
+        if (latestOrder?.deliveryOption === "Self Pickup") {
+          if (latestOrder.totalAmount >= 25_000_000) {
             await sendWhatsAppMessage(
               phoneNumber,
               "🕐 Your order will be ready in 1 hour for pickup!"
             );
-          } else if (latestOrder.totalAmount < 2000000) {
+          } else if (latestOrder.totalAmount < 2_000_000) {
             await sendWhatsAppMessage(
               phoneNumber,
               "🛍️ Your order is ready for pickup immediately!"
@@ -5684,26 +6123,24 @@ for ${formatRupiah(totalPrice)}`;
             );
           }
 
-          // ⏳ Ask for pickup day — this is now universal
           await customer.updateConversationState("pickup_date_main");
-          const msg =
+          await sendWhatsAppMessage(
+            phoneNumber,
             "📅 *When are you planning to pick up?*\n" +
-            "--------------------------------------------\n" +
-            "1. Today\n" +
-            "2. Tomorrow\n" +
-            "3. Later (choose a custom date within the next 13 days)";
-
-          await sendWhatsAppMessage(phoneNumber, msg);
-          return; // Do NOT proceed to main menu yet — wait for pickup info
+              "1. Today\n" +
+              "2. Tomorrow\n" +
+              "3. Later (choose a custom date within the next 13 days)"
+          );
+          return; // wait for their reply
         }
 
-        // 🧾 For non-pickup orders: thank you message + main menu
+        // 5) non-pickup: wrap up & return to main menu
         setTimeout(async () => {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Thank you for shopping with us! Don't forget to share your referral link and check out our discounts for more savings. Have a great day!"
+            "Thank you for shopping with us! 😊\n" +
+              "Don't forget to share your referral link and check out our discounts for more savings."
           );
-
           await customer.updateConversationState("main_menu");
           await sendMainMenu(phoneNumber, customer);
         }, 3000);
@@ -6875,24 +7312,6 @@ function getDiscountProductByNumber(number) {
   }
 }
 
-// Helper function to send categories list
-async function sendCategoriesList(phoneNumber, customer) {
-  let message = "What are you looking for? This is the main shopping list\n\n";
-
-  productDatabase.categories.forEach((category, index) => {
-    message += `${index + 1}. ${category.name}\n`;
-  });
-
-  // Also show cart view option
-  message +=
-    "\nPlease enter the category name or number to view its details.\n";
-  message +=
-    'Type 0 to return to main menu or type "View cart" to view your cart';
-
-  await sendWhatsAppMessage(phoneNumber, message);
-  await customer.addToChatHistory(message, "bot");
-}
-
 async function sendReferralToContact(referrerCustomer, referralImage, contact) {
   try {
     // Ensure the contact has a proper WhatsApp format
@@ -6972,99 +7391,66 @@ async function sendReferralToContact(referrerCustomer, referralImage, contact) {
     );
   }
 }
-// Helper function to send subcategories list
-async function sendSubcategoriesList(phoneNumber, customer, category) {
-  let message = `You selected category: ${category.name}\n\n`;
-  message +=
-    "This is the product divisions under category " + category.name + "\n\n";
 
-  category.subCategories.forEach((subCategory, index) => {
-    message += `${index + 1}. ${subCategory.name}\n`;
+// ─── Products List ─────────────────────────────────────────────────────────────
+async function sendProductsList(phoneNumber, customer, subCategoryName) {
+  const products = await Product.find({
+    subCategories: subCategoryName,
+    productType: { $in: ["Child", "Normal"] },
+    visibility: "Public",
   });
 
-  message += "\nPlease enter the subcategory number to view its products.\n";
-  message +=
-    'Type 0 to return to main menu or type "View cart" to view your cart';
+  let msg = `You selected: ${subCategoryName}\n\n`;
+  msg += `Available products:\n\n`;
 
-  await sendWhatsAppMessage(phoneNumber, message);
-  await customer.addToChatHistory(message, "bot");
-}
+  customer.contextData.productList = products.map((p) => p._id.toString());
 
-// Helper function to send products list
-async function sendProductsList(phoneNumber, customer, subCategory) {
-  let message = `You selected: ${subCategory.name}\n\n`;
-  message += "Available products:\n\n";
-
-  // To this:
-  subCategory.products.forEach((product, index) => {
-    message += `${index + 1}. ${product.name} - ${formatRupiah(
-      product.price
-    )}\n`;
+  products.forEach((prod, idx) => {
+    const price = prod.priceAfterDiscount ?? prod.suggestedRetailPrice ?? 0;
+    msg += `${idx + 1}. ${prod.productName} - Rp ${price}\n`;
   });
 
-  message += "\nPlease enter the product number to view its details.\n";
-  message +=
-    'Type 0 to return to main menu or type "View cart" to view your cart';
+  msg +=
+    `\nPlease enter the product number to view its details.` +
+    `\nType 0 to return to main menu or type "View cart" to view your cart`;
 
-  await sendWhatsAppMessage(phoneNumber, message);
-  await customer.addToChatHistory(message, "bot");
+  await sendWhatsAppMessage(phoneNumber, msg);
+  await customer.save();
 }
 
-// Modified helper function to send product details with discount information
-async function sendProductDetails(
-  phoneNumber,
-  customer,
-  product,
-  askToBuy = true,
-  originalPrice = null // New parameter to show discount
-) {
-  // Format product details
-  let detailsMessage = `Details\n`;
+async function sendProductDetails(to, customer, product) {
+  // Determine price
+  const price =
+    product.finalPrice != null
+      ? product.finalPrice
+      : product.priceAfterDiscount || product.suggestedRetailPrice;
 
-  // Add discount information if applicable
-  if (originalPrice !== null) {
-    const discountPercentage = Math.round(
-      (1 - product.price / originalPrice) * 100
+  // Build the prompt exactly as before
+  const caption =
+    `*${product.productName}*\n` +
+    `${product.description || ""}\n\n` +
+    `💰 Price: Rp ${price}\n\n` +
+    `1- Yes I want to buy this add it to my cart\n` +
+    `2- No return to previous menu\n` +
+    `3- Return to main menu`;
+
+  // If we have an image buffer, send it with the caption
+  if (product.masterImage && product.masterImage.data) {
+    const buf = Buffer.isBuffer(product.masterImage.data)
+      ? product.masterImage.data
+      : product.masterImage.data.buffer;
+    const base64 = buf.toString("base64");
+    const media = new MessageMedia(
+      product.masterImage.contentType || "image/png",
+      base64
     );
-    detailsMessage += `SPECIAL DISCOUNT: ${discountPercentage}% OFF! Was ${formatRupiah(
-      originalPrice
-    )}, now only ${formatRupiah(product.price)}\n\n`;
+    return client.sendMessage(to, media, { caption });
   }
 
-  detailsMessage += product.details.replace(/\n• /g, "\n• "); // Ensure bullet points have spaces
-
-  // Try to send product image first, then details
-  try {
-    const imagePath = path.join(__dirname, "..", product.imageUrl);
-    const defaultImagePath = path.join(__dirname, "..", "/images/product1.png");
-
-    try {
-      await sendImageWithCaption(phoneNumber, imagePath, detailsMessage);
-    } catch (err) {
-      await sendImageWithCaption(phoneNumber, defaultImagePath, detailsMessage);
-    }
-  } catch (error) {
-    console.error("Error sending product image:", error);
-    // Fallback to text-only
-    await sendWhatsAppMessage(phoneNumber, detailsMessage);
-  }
-
-  await customer.addToChatHistory(detailsMessage, "bot");
-
-  // If asking to buy, send a separate message with buy options
-  if (askToBuy) {
-    await new Promise((resolve) => setTimeout(resolve, 500)); // Small delay between messages
-
-    const buyOptionsMessage =
-      "Do you want to buy this?\n\n" +
-      "1- Yes I want to buy this add it to my cart\n" +
-      "2- No return to previous menu\n" +
-      "3- Return to main menu";
-
-    await sendWhatsAppMessage(phoneNumber, buyOptionsMessage);
-    await customer.addToChatHistory(buyOptionsMessage, "bot");
-  }
+  // Otherwise fallback to text only
+  await sendWhatsAppMessage(to, caption);
 }
+
 // Update the goToCart function to always show the number of items and total value
 async function goToCart(phoneNumber, customer) {
   if (
@@ -7172,150 +7558,104 @@ async function proceedToCheckout(phoneNumber, customer) {
   await customer.updateConversationState("checkout_delivery");
   await sendWhatsAppMessage(
     phoneNumber,
-    "Please choose your delivery option\n\n" +
-      "1. Normal Delivery - Arrives in 3-5 days\n" +
-      "2. Speed delivery - Arrives within 24-48 hours (+$50 extra)\n" +
-      "3. Early Morning delivery- 4:00 AM-9:00 AM (+$50 extra)\n" +
-      "4. ⏰🔖 Eco Delivery - 8-10 days from now (5% discount on your total bill!)\n" +
-      "5. I will pickup on my own"
+    `Please choose your delivery option
+  
+  🚚 -- Truck Delivery ------------------------
+  1. Normal Delivery - Arrives in 3-5 days
+  2. Speed Delivery - Arrives within 24-48 hours (+$50 extra)
+  3. Early Morning Delivery - 4:00 AM–9:00 AM (+$50 extra)
+  4. ⏰🔖 Eco Delivery - 8-10 days from now (5% discount on your total bill!)
+  5. I will pickup on my own
+  
+  🛵 -- Scooter Delivery (Right Now) ---------------
+  6. Normal Scooter Delivery - 20k delivery within 2.5 hours
+  7. Direct Speed Scooter Delivery - 40k delivery within 30min–1 hour`
   );
 
   await customer.addToChatHistory(
-    "Please choose your delivery option:\n1. Normal Delivery\n2. Speed delivery\n3. Early Morning delivery\n4. Eco Delivery (5% discount)\n5. I will pickup on my own",
+    "Please choose your delivery option:\n1. Normal Delivery\n2. Speed delivery\n3. Early Morning delivery\n4. Eco Delivery (5% discount)\n5. I will pickup on my own\n6. Normal Scooter Delivery\n7. Direct Speed Scooter Delivery",
     "bot"
   );
 }
 
 async function sendOrderSummary(phoneNumber, customer) {
+  // 1) flip the existing "cart-not-paid" into "order-made-not-paid"
+  const idx = customer.orderHistory.findIndex(
+    (o) => o.orderId === customer.latestOrderId
+  );
+  if (idx >= 0) {
+    customer.orderHistory[idx].status = "order-made-not-paid";
+    customer.currentOrderStatus = "order-made-not-paid";
+    await customer.save();
+  }
+
+  // 2) build the exact same summary + menu as before
   let message = "Your total bill will be\n\n";
 
-  // List each item
-  customer.cart.items.forEach((item, index) => {
-    // Remove "DISCOUNTED" from display
-    const productName = item.productName.replace(" (DISCOUNTED)", "");
-
-    // Fix weight display format
-    const weightDisplay = item.weight.replace("1kg", "1 kg");
-
-    message += `${index + 1}. ${productName}: ${formatRupiah(
-      item.totalPrice
-    )} (${item.quantity} ${weightDisplay})\n`;
+  // line-items
+  customer.cart.items.forEach((item, i) => {
+    const name = (item.productName || "").replace(" (DISCOUNTED)", "");
+    const weight = item.weight ? item.weight.replace("1kg", "1 kg") : "";
+    message +=
+      `${i + 1}. ${name}: ${formatRupiah(item.totalPrice)}` +
+      ` (${item.quantity}${weight ? " " + weight : ""})\n`;
   });
 
-  // Add subtotal
+  // subtotal
   message += `\nSubtotal for items: ${formatRupiah(
     customer.cart.totalAmount
   )}\n`;
 
-  // Add delivery charge details if applicable
+  // delivery charge
   if (customer.cart.deliveryCharge > 0) {
     message += `Delivery charges: ${formatRupiah(
       customer.cart.deliveryCharge
-    )}`;
-
-    // Add explanation for charges
-    const deliveryDetails = [];
-
-    if (
-      customer.cart.deliveryOption === "Speed Delivery" ||
-      customer.cart.deliveryOption === "Early Morning Delivery"
-    ) {
-      deliveryDetails.push(
-        `${customer.cart.deliveryOption} fee: ${formatRupiah(50)}`
-      );
-    }
-
-    if (customer.cart.deliveryLocation === "ubud") {
-      deliveryDetails.push(
-        `${customer.cart.deliveryLocation} location surcharge: ${formatRupiah(
-          200
-        )}`
-      );
-    }
-
-    if (deliveryDetails.length > 0) {
-      message += ` (${deliveryDetails.join(", ")})`;
-    }
-
-    message += `\n`;
+    )}\n`;
   } else {
     message += `Delivery: Free\n`;
   }
 
-  // Check if this is the customer's first order and apply discount
-  let firstOrderDiscount = 0;
-  if (!customer.orderHistory || customer.orderHistory.length === 0) {
-    // Calculate 10% discount on non-discounted items
-    const regularItems = customer.cart.items.filter(
-      (item) => !item.isDiscounted
-    );
-    const regularItemsTotal = regularItems.reduce(
-      (total, item) => total + item.totalPrice,
-      0
-    );
-    firstOrderDiscount = Math.round(regularItemsTotal * 0.1); // 10% of regular items
-
-    if (firstOrderDiscount > 0) {
-      message += `First Order Discount (10%): -${formatRupiah(
-        firstOrderDiscount
-      )}\n`;
-    }
+  // first-order & eco discounts
+  const firstOrder = customer.cart.firstOrderDiscount || 0;
+  const ecoDisc = customer.cart.ecoDeliveryDiscount || 0;
+  if (firstOrder) {
+    message += `First Order Discount (10%): -${formatRupiah(firstOrder)}\n`;
+  }
+  if (ecoDisc) {
+    message += `Eco Delivery Discount (5%): -${formatRupiah(ecoDisc)}\n`;
   }
 
-  // Apply Eco Delivery discount if selected
-  let ecoDeliveryDiscount = 0;
-  if (customer.cart.deliveryOption === "Eco Delivery") {
-    ecoDeliveryDiscount = Math.round(customer.cart.totalAmount * 0.05); // 5% of total amount
-    if (ecoDeliveryDiscount > 0) {
-      message += `Eco Delivery Discount (5%): -${formatRupiah(
-        ecoDeliveryDiscount
-      )}\n`;
-    }
-  }
-
-  // Store the discounts for use in checkout
-  customer.cart.firstOrderDiscount = firstOrderDiscount;
-  customer.cart.ecoDeliveryDiscount = ecoDeliveryDiscount;
-  await customer.save();
-
-  // Delivery information summary
-  message += `Delivery option: ${customer.cart.deliveryOption}\n`;
-
-  // Add delivery address details
+  // delivery summary
+  message += `\nDelivery option: ${customer.cart.deliveryOption}\n`;
   if (customer.cart.deliveryOption !== "Self Pickup") {
-    if (customer.cart.deliveryAddress) {
-      // Using saved address - only show nickname and area
-      message += `Delivery to: ${customer.cart.deliveryAddress.nickname}\n`;
-      message += `Area: ${customer.cart.deliveryLocation}\n\n`;
-    } else {
-      // Using just location
-      message += `Delivery area: ${customer.cart.deliveryLocation}\n\n`;
-    }
+    message += `Delivery area: ${customer.cart.deliveryLocation}\n\n`;
+  } else {
+    message += `\n`;
   }
 
-  // Checkout options
-  message += "Would you like to proceed with payment?\n\n";
-  message += "1. Yes, I want to proceed with payment so checkout now\n";
-  message += "2. Modify Cart\n";
+  // checkout menu
   message +=
-    "3. I will come back later and pay (I may want to add more or modify products)\n";
-  message += "4. I don't want to continue, cancel process and empty my cart\n";
+    "Would you like to proceed with payment?\n\n" +
+    "1. Yes, I want to proceed with payment so checkout now\n" +
+    "2. Modify Cart\n" +
+    "3. I will come back later and pay\n" +
+    "4. I don't want to continue, cancel process and empty my cart\n";
 
-  // Calculate total with only applicable discounts
+  // final total
   const finalTotal =
     customer.cart.totalAmount +
     customer.cart.deliveryCharge -
-    firstOrderDiscount -
-    ecoDeliveryDiscount;
-
-  // Show final total in Rupiah
+    firstOrder -
+    ecoDisc;
   message += `\nTotal bill: ${formatRupiah(
     finalTotal
   )} (including all charges and discounts)`;
 
+  // send & log
   await sendWhatsAppMessage(phoneNumber, message);
   await customer.addToChatHistory(message, "bot");
 }
+
 // Initialize WhatsApp Client
 client.initialize();
 

@@ -5,42 +5,38 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 
-// Configure multer for file uploads
+// ─── 1) Helper to parse numbers safely ───────────────────────────────────
+function parseOptionalNumber(val) {
+  if (val === undefined || val === null || val === "" || val === "null") {
+    return null; // we want an explicit null in the DB
+  }
+  const num = Number(val);
+  return isNaN(num) ? null : num;
+}
+// ─── 2) Multer setup (unchanged) ────────────────────────────────────────
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
+  destination(req, file, cb) {
     const uploadDir = path.join(__dirname, "../public/uploads/products");
-
-    // Create directory if it doesn't exist
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-
+    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
     cb(null, uploadDir);
   },
-  filename: function (req, file, cb) {
-    // Generate unique filename with timestamp and original extension
+  filename(req, file, cb) {
     const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    const ext = path.extname(file.originalname);
-    cb(null, file.fieldname + "-" + uniqueSuffix + ext);
+    cb(
+      null,
+      `${file.fieldname}-${uniqueSuffix}${path.extname(file.originalname)}`
+    );
   },
 });
-
-// File filter to accept only images
-const fileFilter = (req, file, cb) => {
-  if (file.mimetype.startsWith("image/")) {
-    cb(null, true);
-  } else {
-    cb(new Error("Not an image! Please upload an image file."), false);
-  }
-};
-
+const fileFilter = (req, file, cb) =>
+  file.mimetype.startsWith("image/")
+    ? cb(null, true)
+    : cb(new Error("Not an image!"), false);
 const upload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max file size
+  limits: { fileSize: 5 * 1024 * 1024 },
 });
-
-// Handle multiple uploads (one master image and multiple additional images)
 const uploadFields = upload.fields([
   { name: "masterImage", maxCount: 1 },
   { name: "moreImage0", maxCount: 1 },
@@ -51,505 +47,435 @@ const uploadFields = upload.fields([
   { name: "moreImage5", maxCount: 1 },
 ]);
 
-// GET all products
+// ─── 3) READ Endpoints ───────────────────────────────────────────────────
 router.get("/", async (req, res) => {
   try {
     const products = await Product.find().sort({ createdAt: -1 });
-    res.status(200).json({
-      success: true,
-      count: products.length,
-      data: products,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    res
+      .status(200)
+      .json({ success: true, count: products.length, data: products });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
 
-// GET parent products only (for child product selection)
 router.get("/parents", async (req, res) => {
   try {
-    const parentProducts = await Product.find({ productType: "Parent" })
+    const parents = await Product.find({ productType: "Parent" })
       .select("productId productName brand")
       .sort({ productName: 1 });
-
-    res.status(200).json({
-      success: true,
-      count: parentProducts.length,
-      data: parentProducts,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    res.json({ success: true, count: parents.length, data: parents });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
 
-// GET parent products with search term for autocomplete
 router.get("/parents/search", async (req, res) => {
   try {
-    const searchTerm = req.query.term || "";
-
-    // Create a case-insensitive regex pattern
-    const searchRegex = new RegExp(searchTerm, "i");
-
-    // Search for parent products matching the term in name or ID
-    const parentProducts = await Product.find({
+    const term = req.query.term || "";
+    const regex = new RegExp(term, "i");
+    const parents = await Product.find({
       productType: "Parent",
-      $or: [{ productName: searchRegex }, { productId: searchRegex }],
+      $or: [{ productName: regex }, { productId: regex }],
     })
       .select("productId productName brand")
       .sort({ productName: 1 })
-      .limit(10); // Limit to 10 results for performance
-
-    res.status(200).json({
-      success: true,
-      count: parentProducts.length,
-      data: parentProducts,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+      .limit(10);
+    res.json({ success: true, count: parents.length, data: parents });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
 
-// GET single product by ID
 router.get("/:id", async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
-
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      data: product,
-    });
-  } catch (error) {
-    if (error.kind === "ObjectId") {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
-
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    const p = await Product.findById(req.params.id);
+    if (!p)
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
+    res.json({ success: true, data: p });
+  } catch (err) {
+    if (err.kind === "ObjectId")
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
 
-// GET product by productId
 router.get("/code/:productId", async (req, res) => {
   try {
-    const product = await Product.findOne({ productId: req.params.productId });
-
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      data: product,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    const p = await Product.findOne({ productId: req.params.productId });
+    if (!p)
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
+    res.json({ success: true, data: p });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
 
-// POST create new product
-router.post("/", uploadFields, async (req, res) => {
+// ─── 4) CREATE Endpoint with pricing sanitization ────────────────────────
+// ─── CREATE Endpoint ─────────────────────────────────────────────────────
+router.post("/", async (req, res) => {
   try {
-    const productData = { ...req.body };
+    const d = req.body;
 
-    // Process specifications from JSON string to object
-    if (productData.specifications) {
-      productData.specifications = JSON.parse(productData.specifications);
-    }
+    // 1) Child‐product shorthands:
+    const productName =
+      d.productType === "Child" ? d.varianceName : d.productName;
+    const description =
+      d.productType === "Child" ? d.subtitleDescription : d.description;
 
-    // Process tags from JSON string to array
-    if (productData.tags) {
-      productData.tags = JSON.parse(productData.tags);
-    }
+    // 2) Pricing fields
+    const anyDiscount = parseOptionalNumber(d.anyDiscount);
+    const priceAfterDiscount = parseOptionalNumber(d.priceAfterDiscount);
 
-    // Process our new boolean flags:
-    if (productData.noReorder !== undefined) {
-      productData.noReorder = productData.noReorder === "true";
-    }
-    if (productData.useStockAmount !== undefined) {
-      productData.useStockAmount = productData.useStockAmount === "true";
-    }
-    if (productData.useSafetyDays !== undefined) {
-      productData.useSafetyDays = productData.useSafetyDays === "true";
-    }
+    // 3) Parse specs/tags
+    const specifications = d.specifications
+      ? typeof d.specifications === "string"
+        ? JSON.parse(d.specifications)
+        : d.specifications
+      : [];
+    const tags = d.tags
+      ? typeof d.tags === "string"
+        ? JSON.parse(d.tags)
+        : d.tags
+      : [];
 
-    // Process our new boolean flags:
-    if (productData.noReorder !== undefined) {
-      productData.noReorder = productData.noReorder === "true";
-    }
-    if (productData.useStockAmount !== undefined) {
-      productData.useStockAmount = productData.useStockAmount === "true";
-    }
-    if (productData.useSafetyDays !== undefined) {
-      productData.useSafetyDays = productData.useSafetyDays === "true";
-    }
+    // 4) Boolean flags
+    const onceShare = d.onceShare === "true" || d.onceShare === true;
+    const noChildHideParent =
+      d.noChildHideParent === "true" || d.noChildHideParent === true;
 
-    // Process boolean fields
-    if (productData.onceShare) {
-      productData.onceShare = productData.onceShare === "true";
-    }
+    // 5) Inventory flags
+    const useStockAmount =
+      d.useStockAmount === "true" || d.useStockAmount === true;
+    const useSafetyDays =
+      d.useSafetyDays === "true" || d.useSafetyDays === true;
+    const noReorder = d.noReorder === "true" || d.noReorder === true;
 
-    if (productData.noChildHideParent) {
-      productData.noChildHideParent = productData.noChildHideParent === "true";
-    }
+    // 6) Build and save the document
+    const product = new Product({
+      productType: d.productType,
+      productName,
+      description,
+      varianceName: d.varianceName,
+      subtitleDescription: d.subtitleDescription,
 
-    // Handle image uploads
-    if (req.files) {
-      // Master image
-      if (req.files.masterImage && req.files.masterImage[0]) {
-        productData.masterImage = `/uploads/products/${req.files.masterImage[0].filename}`;
-      }
+      globalTradeItemNumber: d.globalTradeItemNumber,
+      k3lNumber: d.k3lNumber,
+      sniNumber: d.sniNumber,
 
-      // Additional images
-      const moreImages = [];
-      for (let i = 0; i < 6; i++) {
-        const fieldName = `moreImage${i}`;
-        if (req.files[fieldName] && req.files[fieldName][0]) {
-          moreImages.push(
-            `/uploads/products/${req.files[fieldName][0].filename}`
-          );
-        }
-      }
+      specifications,
 
-      if (moreImages.length > 0) {
-        productData.moreImages = moreImages;
-      }
-    }
+      // Inventory
+      stock: parseOptionalNumber(d.stock),
+      minimumOrder: parseOptionalNumber(d.minimumOrder),
+      useStockAmount,
+      useSafetyDays,
+      noReorder,
+      stockAmount: parseOptionalNumber(d.stockAmount),
+      safetyDays: parseOptionalNumber(d.safetyDays),
+      safetyDaysStock: parseOptionalNumber(d.safetyDaysStock),
+      deliveryDays: d.deliveryDays,
+      deliveryTime: d.deliveryTime,
+      reOrderSetting: d.reOrderSetting,
+      inventoryInDays: d.inventoryInDays,
+      deliveryPeriod: d.deliveryPeriod,
+      orderTimeBackupInventory: d.orderTimeBackupInventory,
 
-    // Create new product
-    const product = await Product.create(productData);
+      alternateSupplier: d.alternateSupplier,
+      supplierName: d.supplierName,
+      supplierContact: d.supplierContact,
+      supplierAddress: d.supplierAddress,
+      supplierEmail: d.supplierEmail,
+      supplierWebsite: d.supplierWebsite,
+      supplierInformation: d.supplierInformation,
 
-    res.status(201).json({
-      success: true,
-      data: product,
+      // **Pricing**
+      anyDiscount,
+      priceAfterDiscount,
+
+      visibility: d.visibility,
+      onceShare,
+      noChildHideParent,
+
+      categories: d.categories,
+      subCategories: d.subCategories,
+      tags,
+      notes: d.notes,
+
+      // Images
+      masterImage: d.masterImage
+        ? {
+            data: Buffer.from(d.masterImage, "base64"),
+            contentType: d.masterImageType,
+          }
+        : null,
+      moreImages: Array.isArray(d.moreImages)
+        ? d.moreImages.map((img) => ({
+            data: Buffer.from(img.data, "base64"),
+            contentType: img.contentType,
+          }))
+        : [],
     });
-  } catch (error) {
-    if (error.name === "ValidationError") {
-      const messages = Object.values(error.errors).map((val) => val.message);
-      return res.status(400).json({
-        success: false,
-        message: messages.join(", "),
-      });
-    }
 
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    await product.save();
+
+    // 7) Extract weight from first specification
+    const out = product.toObject();
+    out.weight = out.specifications?.[0]?.weight ?? null;
+
+    return res.status(201).json({ success: true, data: out });
+  } catch (err) {
+    console.error("Error saving product:", err);
+    return res.status(400).json({ success: false, message: err.message });
   }
 });
 
-// PUT update product
+// ─── UPDATE Endpoint ─────────────────────────────────────────────────────
 router.put("/:id", uploadFields, async (req, res) => {
   try {
-    let product = await Product.findById(req.params.id);
+    const b = req.body;
+    const updates = {};
 
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
-
-    const productData = { ...req.body };
-
-    // Process specifications from JSON string to object
-    if (productData.specifications) {
-      productData.specifications = JSON.parse(productData.specifications);
-    }
-
-    // Process tags from JSON string to array
-    if (productData.tags) {
-      productData.tags = JSON.parse(productData.tags);
-    }
-
-    // Process boolean fields
-    if (productData.onceShare) {
-      productData.onceShare = productData.onceShare === "true";
-    }
-
-    if (productData.noChildHideParent) {
-      productData.noChildHideParent = productData.noChildHideParent === "true";
-    }
-
-    // Handle image uploads
-    if (req.files) {
-      // Master image
-      if (req.files.masterImage && req.files.masterImage[0]) {
-        // Remove old image if it exists
-        if (product.masterImage) {
-          const oldImagePath = path.join(
-            __dirname,
-            "../public",
-            product.masterImage
-          );
-          if (fs.existsSync(oldImagePath)) {
-            fs.unlinkSync(oldImagePath);
-          }
-        }
-
-        productData.masterImage = `/uploads/products/${req.files.masterImage[0].filename}`;
+    // 1) Child‐product shorthands
+    if (b.productType === "Child") {
+      if (b.varianceName !== undefined) {
+        updates.productName = b.varianceName;
+        updates.varianceName = b.varianceName;
       }
-
-      // Additional images
-      const moreImages = [...(product.moreImages || [])];
-      for (let i = 0; i < 6; i++) {
-        const fieldName = `moreImage${i}`;
-        if (req.files[fieldName] && req.files[fieldName][0]) {
-          // Remove old image if it exists
-          if (moreImages[i]) {
-            const oldImagePath = path.join(
-              __dirname,
-              "../public",
-              moreImages[i]
-            );
-            if (fs.existsSync(oldImagePath)) {
-              fs.unlinkSync(oldImagePath);
-            }
-          }
-
-          // If the image already exists at this position, replace it
-          if (moreImages[i]) {
-            moreImages[
-              i
-            ] = `/uploads/products/${req.files[fieldName][0].filename}`;
-          } else {
-            // Otherwise add it to the array
-            moreImages.push(
-              `/uploads/products/${req.files[fieldName][0].filename}`
-            );
-          }
-        }
+      if (b.subtitleDescription !== undefined) {
+        updates.description = b.subtitleDescription;
+        updates.subtitleDescription = b.subtitleDescription;
       }
-
-      productData.moreImages = moreImages;
+    } else {
+      if (b.productName !== undefined) updates.productName = b.productName;
+      if (b.description !== undefined) updates.description = b.description;
     }
 
-    // Update product
-    product = await Product.findByIdAndUpdate(req.params.id, productData, {
+    // 2) Parse specs/tags
+    if (b.specifications) {
+      updates.specifications =
+        typeof b.specifications === "string"
+          ? JSON.parse(b.specifications)
+          : b.specifications;
+    }
+    if (b.tags) {
+      updates.tags = typeof b.tags === "string" ? JSON.parse(b.tags) : b.tags;
+    }
+
+    // 3) Boolean flags
+    if (b.onceShare !== undefined) updates.onceShare = b.onceShare === "true";
+    if (b.noChildHideParent !== undefined)
+      updates.noChildHideParent = b.noChildHideParent === "true";
+
+    // 4) Inventory flags & numbers
+    if (b.useStockAmount !== undefined)
+      updates.useStockAmount = b.useStockAmount === "true";
+    if (b.useSafetyDays !== undefined)
+      updates.useSafetyDays = b.useSafetyDays === "true";
+    if (b.noReorder !== undefined) updates.noReorder = b.noReorder === "true";
+
+    if (b.stock !== undefined) updates.stock = parseOptionalNumber(b.stock);
+    if (b.minimumOrder !== undefined)
+      updates.minimumOrder = parseOptionalNumber(b.minimumOrder);
+    if (b.stockAmount !== undefined)
+      updates.stockAmount = parseOptionalNumber(b.stockAmount);
+    if (b.safetyDays !== undefined)
+      updates.safetyDays = parseOptionalNumber(b.safetyDays);
+    if (b.safetyDaysStock !== undefined)
+      updates.safetyDaysStock = parseOptionalNumber(b.safetyDaysStock);
+
+    if (b.deliveryDays !== undefined) updates.deliveryDays = b.deliveryDays;
+    if (b.deliveryTime !== undefined) updates.deliveryTime = b.deliveryTime;
+    if (b.reOrderSetting !== undefined)
+      updates.reOrderSetting = b.reOrderSetting;
+    if (b.inventoryInDays !== undefined)
+      updates.inventoryInDays = b.inventoryInDays;
+    if (b.deliveryPeriod !== undefined)
+      updates.deliveryPeriod = b.deliveryPeriod;
+    if (b.orderTimeBackupInventory !== undefined)
+      updates.orderTimeBackupInventory = b.orderTimeBackupInventory;
+
+    // 5) Pricing
+    if (b.anyDiscount !== undefined)
+      updates.anyDiscount = parseOptionalNumber(b.anyDiscount);
+    if (b.priceAfterDiscount !== undefined)
+      updates.priceAfterDiscount = parseOptionalNumber(b.priceAfterDiscount);
+
+    // 6) Other string fields
+    if (b.globalTradeItemNumber !== undefined)
+      updates.globalTradeItemNumber = b.globalTradeItemNumber;
+    if (b.k3lNumber !== undefined) updates.k3lNumber = b.k3lNumber;
+    if (b.sniNumber !== undefined) updates.sniNumber = b.sniNumber;
+    if (b.alternateSupplier !== undefined)
+      updates.alternateSupplier = b.alternateSupplier;
+    if (b.supplierName !== undefined) updates.supplierName = b.supplierName;
+    if (b.supplierContact !== undefined)
+      updates.supplierContact = b.supplierContact;
+    if (b.supplierAddress !== undefined)
+      updates.supplierAddress = b.supplierAddress;
+    if (b.supplierEmail !== undefined) updates.supplierEmail = b.supplierEmail;
+    if (b.supplierWebsite !== undefined)
+      updates.supplierWebsite = b.supplierWebsite;
+    if (b.supplierInformation !== undefined)
+      updates.supplierInformation = b.supplierInformation;
+    if (b.visibility !== undefined) updates.visibility = b.visibility;
+    if (b.categories !== undefined) updates.categories = b.categories;
+    if (b.subCategories !== undefined) updates.subCategories = b.subCategories;
+    if (b.notes !== undefined) updates.notes = b.notes;
+
+    // 7) Image uploads
+    if (req.files.masterImage && req.files.masterImage[0]) {
+      updates.masterImage = `/uploads/products/${req.files.masterImage[0].filename}`;
+    }
+    const mi = [];
+    for (let i = 0; i < 6; i++) {
+      const field = `moreImage${i}`;
+      if (req.files[field] && req.files[field][0]) {
+        mi[i] = `/uploads/products/${req.files[field][0].filename}`;
+      }
+    }
+    if (mi.length) updates.moreImages = mi;
+
+    // 8) Update & respond
+    const product = await Product.findByIdAndUpdate(req.params.id, updates, {
       new: true,
       runValidators: true,
     });
-
-    res.status(200).json({
-      success: true,
-      data: product,
-    });
-  } catch (error) {
-    if (error.name === "ValidationError") {
-      const messages = Object.values(error.errors).map((val) => val.message);
-      return res.status(400).json({
-        success: false,
-        message: messages.join(", "),
-      });
+    if (!product) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
     }
 
-    if (error.kind === "ObjectId") {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
+    const out = product.toObject();
+    out.weight = out.specifications?.[0]?.weight ?? null;
 
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    return res.json({ success: true, data: out });
+  } catch (err) {
+    console.error("Error updating product:", err);
+    if (err.name === "ValidationError") {
+      const msgs = Object.values(err.errors).map((e) => e.message);
+      return res.status(400).json({ success: false, message: msgs.join(", ") });
+    }
+    return res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
-
-// DELETE product
+// ─── 6) DELETE ──────────────────────────────────────────────────────────
 router.delete("/:id", async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
+    const p = await Product.findById(req.params.id);
+    if (!p)
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
 
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
-
-    // Check if it's a parent product with child products
-    if (product.productType === "Parent") {
-      const childProducts = await Product.find({
-        parentProduct: product.productId,
-      });
-
-      if (childProducts.length > 0) {
+    if (p.productType === "Parent") {
+      const children = await Product.find({ parentProduct: p.productId });
+      if (children.length)
         return res.status(400).json({
           success: false,
-          message: "Cannot delete parent product with existing child products",
+          message: "Cannot delete parent with children",
         });
-      }
     }
 
-    // Delete associated images
-    if (product.masterImage) {
-      const masterImagePath = path.join(
-        __dirname,
-        "../public",
-        product.masterImage
-      );
-      if (fs.existsSync(masterImagePath)) {
-        fs.unlinkSync(masterImagePath);
-      }
+    // remove images from disk…
+    if (p.masterImage) {
+      const mp = path.join(__dirname, "../public", p.masterImage);
+      if (fs.existsSync(mp)) fs.unlinkSync(mp);
     }
-
-    if (product.moreImages && product.moreImages.length > 0) {
-      product.moreImages.forEach((imagePath) => {
-        const fullPath = path.join(__dirname, "../public", imagePath);
-        if (fs.existsSync(fullPath)) {
-          fs.unlinkSync(fullPath);
-        }
-      });
-    }
-
-    // Delete the product
-    await product.remove();
-
-    res.status(200).json({
-      success: true,
-      data: {},
+    (p.moreImages || []).forEach((imgPath) => {
+      const full = path.join(__dirname, "../public", imgPath);
+      if (fs.existsSync(full)) fs.unlinkSync(full);
     });
-  } catch (error) {
-    if (error.kind === "ObjectId") {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
 
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    await p.remove();
+    res.json({ success: true, data: {} });
+  } catch (err) {
+    if (err.kind === "ObjectId")
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
 
-// GET products by search term
+// ─── 7) SEARCH / CATEGORY / TAG / CHILDREN ─────────────────────────────
 router.get("/search/:term", async (req, res) => {
   try {
-    const searchRegex = new RegExp(req.params.term, "i");
-
+    const regex = new RegExp(req.params.term, "i");
     const products = await Product.find({
       $or: [
-        { productName: searchRegex },
-        { productId: searchRegex },
-        { brand: searchRegex },
-        { tags: searchRegex },
+        { productName: regex },
+        { productId: regex },
+        { brand: regex },
+        { tags: regex },
       ],
     }).sort({ createdAt: -1 });
-
-    res.status(200).json({
-      success: true,
-      count: products.length,
-      data: products,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    res.json({ success: true, count: products.length, data: products });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
 
-// GET products by category
 router.get("/category/:category", async (req, res) => {
   try {
     const products = await Product.find({
       categories: req.params.category,
     }).sort({ createdAt: -1 });
-
-    res.status(200).json({
-      success: true,
-      count: products.length,
-      data: products,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    res.json({ success: true, count: products.length, data: products });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
 
-// GET products by tag
 router.get("/tag/:tag", async (req, res) => {
   try {
     const products = await Product.find({ tags: req.params.tag }).sort({
       createdAt: -1,
     });
-
-    res.status(200).json({
-      success: true,
-      count: products.length,
-      data: products,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    res.json({ success: true, count: products.length, data: products });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
 
-// GET child products of a parent
 router.get("/children/:parentId", async (req, res) => {
   try {
     const children = await Product.find({
       parentProduct: req.params.parentId,
       productType: "Child",
     }).sort({ createdAt: -1 });
-
-    res.status(200).json({
-      success: true,
-      count: children.length,
-      data: children,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    res.json({ success: true, count: children.length, data: children });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
   }
 });
 
