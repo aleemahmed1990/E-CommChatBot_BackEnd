@@ -24,7 +24,56 @@ const supportTicketSchema = new mongoose.Schema(
     resolution: String,
   },
   { _id: false }
-); // no need for _id on sub-documents unless you want it
+);
+
+// Complaint schema for order-specific complaints
+const complaintSchema = new mongoose.Schema(
+  {
+    complaintId: {
+      type: String,
+      required: true,
+      unique: true,
+    },
+    issueTypes: [
+      {
+        type: String,
+        enum: ["broken", "not_what_ordered", "missing_amount", "other"],
+        required: true,
+      },
+    ],
+    additionalDetails: String,
+    solutions: [
+      {
+        type: String,
+        enum: ["customer_keeps_product", "customer_returns_with_truck"],
+      },
+    ],
+    solutionDetails: String,
+    customerRequests: [
+      {
+        type: String,
+        enum: ["customer_asks_cancellation", "customer_asks_replacement"],
+      },
+    ],
+    customerRequestDetails: String,
+    reportedBy: {
+      driverId: String,
+      driverName: String,
+    },
+    reportedAt: {
+      type: Date,
+      default: Date.now,
+    },
+    status: {
+      type: String,
+      enum: ["open", "in_progress", "resolved"],
+      default: "open",
+    },
+    resolution: String,
+    resolvedAt: Date,
+  },
+  { _id: false }
+);
 
 // 15 statuses pulled straight from your AllOrders component
 const ORDER_STATUSES = [
@@ -38,8 +87,13 @@ const ORDER_STATUSES = [
   "order-refunded",
   "picking-order",
   "allocated-driver",
+  "ready to pickup",
+  "order-not-pickedup",
+  "order-pickuped-up",
   "on-way",
   "driver-confirmed",
+  "refund",
+  "complain-order",
   "issue-driver",
   "parcel-returned",
   "order-complete",
@@ -54,7 +108,7 @@ const customerSchema = new mongoose.Schema(
       validate: [arrayLimit, "{PATH} must have at least one phone number"],
     },
 
-    // Track “where” the customer is in the order flow
+    // Track "where" the customer is in the order flow
     currentOrderStatus: {
       type: String,
       enum: ORDER_STATUSES,
@@ -247,6 +301,11 @@ const customerSchema = new mongoose.Schema(
             price: Number,
             weight: String,
             totalPrice: Number,
+            // Add onTruck field for individual item tracking
+            onTruck: {
+              type: Boolean,
+              default: false,
+            },
           },
         ],
         totalAmount: Number,
@@ -305,6 +364,52 @@ const customerSchema = new mongoose.Schema(
           default: "heavy-pickup",
         },
         truckOnDeliver: { type: Boolean, default: false },
+        totalAmount: {
+          type: Number,
+          default: 0,
+        },
+        deliveryOption: {
+          type: String,
+          default: "Normal Delivery",
+        },
+        // ADD THESE NEW FIELDS:
+        deliveryType: {
+          type: String,
+          enum: ["truck", "scooter", "self_pickup"],
+          default: "truck",
+        },
+        deliverySpeed: {
+          type: String,
+          enum: ["normal", "speed", "early_morning", "eco"],
+          default: "normal",
+        },
+        deliveryLocation: String,
+        // ADD THIS STRUCTURED OBJECT FOR DELIVERY ADDRESS:
+        deliveryAddress: {
+          nickname: String,
+          area: String,
+          fullAddress: String,
+          googleMapLink: String,
+        },
+        deliveryCharge: {
+          type: Number,
+          default: 0,
+        },
+        // For eco delivery discount:
+        ecoDeliveryDiscount: {
+          type: Number,
+          default: 0,
+        },
+        // Add admin reason field
+        adminReason: String,
+        // Add pickup allocation field
+        pickupAllocated: {
+          type: Boolean,
+          default: false,
+        },
+        allocatedAt: Date,
+        // Add complaints array to each order
+        complaints: [complaintSchema],
       },
     ],
     cart: {
@@ -321,42 +426,6 @@ const customerSchema = new mongoose.Schema(
           imageUrl: String,
         },
       ],
-      totalAmount: {
-        type: Number,
-        default: 0,
-      },
-      deliveryOption: {
-        type: String,
-        default: "Normal Delivery",
-      },
-      // ADD THESE NEW FIELDS:
-      deliveryType: {
-        type: String,
-        enum: ["truck", "scooter", "self_pickup"],
-        default: "truck",
-      },
-      deliverySpeed: {
-        type: String,
-        enum: ["normal", "speed", "early_morning", "eco"],
-        default: "normal",
-      },
-      deliveryLocation: String,
-      // ADD THIS STRUCTURED OBJECT FOR DELIVERY ADDRESS:
-      deliveryAddress: {
-        nickname: String,
-        area: String,
-        fullAddress: String,
-        googleMapLink: String,
-      },
-      deliveryCharge: {
-        type: Number,
-        default: 0,
-      },
-      // For eco delivery discount:
-      ecoDeliveryDiscount: {
-        type: Number,
-        default: 0,
-      },
     },
 
     chatHistory: [
@@ -523,5 +592,3 @@ function arrayLimit(val) {
 const Customer = mongoose.model("Customer", customerSchema);
 
 module.exports = Customer;
-
-// models/customer.js

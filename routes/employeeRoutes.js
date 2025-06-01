@@ -178,6 +178,26 @@ router.get("/", async (req, res) => {
   }
 });
 
+router.get("/", async (req, res) => {
+  try {
+    const { employeeCategory } = req.query;
+    const query = employeeCategory ? { employeeCategory } : {};
+    const employees = await Employee.find(query).sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: employees.length,
+      data: employees,
+    });
+  } catch (error) {
+    console.error("Error fetching employees:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error. Could not fetch employees.",
+    });
+  }
+});
+
 // @route   GET /api/employees/:id
 // @desc    Get employee by ID
 // @access  Private

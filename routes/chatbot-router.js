@@ -43,7 +43,7 @@ async function recordCartOrder(customer) {
     orderId,
     items: [...customer.cart.items],
     totalAmount: total,
-    deliveryOption: customer.cart.deliveryOption,
+    deliveryType: customer.cart.deliveryType,
     deliveryLocation: customer.cart.deliveryLocation,
     deliveryCharge: customer.cart.deliveryCharge,
     paymentStatus: "pending",
@@ -457,7 +457,7 @@ async function createOrder(customer) {
     orderId,
     items: [...customer.cart.items],
     totalAmount: totalWithDiscounts,
-    deliveryOption: customer.cart.deliveryOption,
+    deliveryType: customer.cart.deliveryType,
     deliveryLocation: customer.cart.deliveryLocation,
     deliveryCharge: customer.cart.deliveryCharge,
     firstOrderDiscount: customer.cart.firstOrderDiscount || 0,
@@ -469,11 +469,11 @@ async function createOrder(customer) {
     orderDate: new Date(),
     deliveryDate: new Date(
       Date.now() +
-        (customer.cart.deliveryOption === "Speed Delivery"
+        (customer.cart.deliveryType === "Speed Delivery"
           ? 2
-          : customer.cart.deliveryOption === "Normal Delivery"
+          : customer.cart.deliveryType === "Normal Delivery"
           ? 5
-          : customer.cart.deliveryOption === "Eco Delivery"
+          : customer.cart.deliveryType === "Eco Delivery"
           ? 10
           : /* fallback: */ 5) *
           24 *
@@ -494,7 +494,7 @@ async function createOrder(customer) {
     items: [],
     totalAmount: 0,
     deliveryCharge: 0,
-    deliveryOption: "Normal Delivery",
+    deliveryType: "Normal Delivery",
     deliveryLocation: "",
     firstOrderDiscount: 0,
     ecoDeliveryDiscount: 0,
@@ -571,7 +571,7 @@ async function processChatMessage(phoneNumber, text, message) {
       if (
         customer.pickupPlan &&
         customer.pickupPlan.date === moment().format("YYYY-MM-DD") &&
-        customer.cart.deliveryOption === "Self Pickup" &&
+        customer.cart.deliveryType === "self_pickup" &&
         !customer.pickupPlan.reminderSent
       ) {
         const timeSlot = customer.pickupPlan.timeSlot || "any time today";
@@ -1372,82 +1372,78 @@ async function processChatMessage(phoneNumber, text, message) {
             6: "Normal Scooter Delivery",
             7: "Direct Speed Scooter Delivery",
           };
-
           const deliveryCharges = {
             1: 0,
             2: 50,
             3: 50,
-            4: 0, // Eco delivery - no charge but has discount instead
-            5: 0, // Self pickup - no charge
-            6: 20, // Normal scooter delivery
-            7: 40, // Direct speed scooter delivery
+            4: 0,
+            5: 0,
+            6: 20,
+            7: 40,
           };
 
-          // Configure delivery type and speed based on selection
+          // Figure out type/speed
           let deliveryType, deliverySpeed;
-
           switch (text) {
-            case "1": // Normal Delivery
+            case "1":
               deliveryType = "truck";
               deliverySpeed = "normal";
               break;
-            case "2": // Speed Delivery
+            case "2":
               deliveryType = "truck";
               deliverySpeed = "speed";
               break;
-            case "3": // Early Morning Delivery
+            case "3":
               deliveryType = "truck";
               deliverySpeed = "early_morning";
               break;
-            case "4": // Eco Delivery
+            case "4":
               deliveryType = "truck";
               deliverySpeed = "eco";
               break;
-            case "5": // Self Pickup
+            case "5":
               deliveryType = "self_pickup";
               deliverySpeed = "normal";
               break;
-            case "6": // Normal Scooter Delivery
+            case "6":
               deliveryType = "scooter";
               deliverySpeed = "normal";
               break;
-            case "7": // Direct Speed Scooter Delivery
+            case "7":
               deliveryType = "scooter";
               deliverySpeed = "speed";
               break;
           }
 
-          // Save delivery option with type and speed
-          customer.cart.deliveryOption = deliveryOptions[text];
-          customer.cart.deliveryCharge = deliveryCharges[text];
-          customer.cart.deliveryType = deliveryType;
-          customer.cart.deliverySpeed = deliverySpeed;
-
-          // Calculate eco delivery discount if applicable
-          if (text === "4") {
-            customer.cart.ecoDeliveryDiscount =
-              customer.cart.totalAmount * 0.05;
-          } else {
-            customer.cart.ecoDeliveryDiscount = 0;
+          // write into the *current* orderHistory entry
+          const idx = customer.orderHistory.findIndex(
+            (o) => o.orderId === customer.latestOrderId
+          );
+          if (idx >= 0) {
+            customer.orderHistory[idx].deliveryType = deliveryType;
+            customer.orderHistory[idx].deliverySpeed = deliverySpeed;
+            customer.orderHistory[idx].deliveryOption = deliveryOptions[text];
+            customer.orderHistory[idx].deliveryCharge = deliveryCharges[text];
+            // if you also want to update ecoDiscount on the order itself:
+            customer.orderHistory[idx].ecoDeliveryDiscount =
+              text === "4" ? customer.cart.totalAmount * 0.05 : 0;
           }
 
           await customer.save();
 
-          // Confirm delivery option selection
-          if (text === "2" || text === "3") {
+          // Confirm back to user
+          if (["2", "3"].includes(text)) {
             await sendWhatsAppMessage(
               phoneNumber,
               `You've chosen ${deliveryOptions[text]}. A ${formatRupiah(
                 deliveryCharges[text]
-              )} charge will be added to your total.`
+              )} charge will be added.`
             );
           } else if (text === "4") {
             await sendWhatsAppMessage(
               phoneNumber,
-              `You've chosen ${deliveryOptions[text]}. A 5% discount will be applied to your total bill! Your order will be delivered in 8-10 days.`
+              `You've chosen ${deliveryOptions[text]}. 5% eco‐discount applied! Delivery in 8–10 days.`
             );
-
-            // Ask for eco delivery date
             await customer.updateConversationState(
               "checkout_eco_delivery_date"
             );
@@ -1455,14 +1451,7 @@ async function processChatMessage(phoneNumber, text, message) {
               phoneNumber,
               "Please select a delivery date for your Eco Delivery (8-10 days from now).\n\nFormat: YYYY-MM-DD"
             );
-            return; // Exit early since we've changed the state
-          } else if (text === "6" || text === "7") {
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `You've chosen ${deliveryOptions[text]}. A ${formatRupiah(
-                deliveryCharges[text]
-              )} delivery charge will be added to your total.`
-            );
+            return; // bail early
           } else {
             await sendWhatsAppMessage(
               phoneNumber,
@@ -1470,42 +1459,22 @@ async function processChatMessage(phoneNumber, text, message) {
             );
           }
 
-          // For self-pickup (text === "5"), proceed to checkout_summary
+          // advance the flow
           if (text === "5") {
             await customer.updateConversationState("checkout_summary");
-          } else if (text !== "4") {
-            // Skip this for eco delivery as we've already changed state
-            // For all other deliveries (truck or scooter), ask for delivery location
+            await sendOrderSummary(phoneNumber, customer);
+          } else {
             await customer.updateConversationState("checkout_location");
-
-            if (customer.addresses && customer.addresses.length > 0) {
-              // Customer has saved addresses, offer them as an option
-              await sendWhatsAppMessage(
-                phoneNumber,
-                "Select a drop off location or use a saved address:\n\n" +
-                  "These areas will be free of charge under normal delivery:\n\n" +
-                  "1- seminyak\n" +
-                  "2- legian\n" +
-                  "3- sannur\n" +
-                  "4- ubud (extra charge apply 200k)\n\n" +
-                  "Type 'saved' to use one of your saved addresses."
-              );
-            } else {
-              // Customer has no saved addresses, show only location options
-              await sendWhatsAppMessage(
-                phoneNumber,
-                "Select drop off location\n\nThese areas will be free or charge under normal delivery\n\n" +
-                  "1- seminyak\n" +
-                  "2- legian\n" +
-                  "3- sannur\n" +
-                  "4- ubud (extra charge apply 200k)"
-              );
-            }
+            const locPrompt = customer.addresses?.length
+              ? "Select a drop-off location or type 'saved' to use a saved address."
+              : "Select drop-off location:\n1- Seminyak\n2- Legian\n3- Sanur\n4- Ubud (extra charge 200k)";
+            await sendWhatsAppMessage(phoneNumber, locPrompt);
           }
         } else {
+          // invalid choice
           await sendWhatsAppMessage(
             phoneNumber,
-            "Please select a valid delivery option (1-7), or type 0 to return to the main menu."
+            "Please choose a valid delivery option (1–7), or type 0 to return to main menu."
           );
         }
         break;
@@ -1696,10 +1665,10 @@ async function processChatMessage(phoneNumber, text, message) {
           customer.cart.deliveryCharge
         )}`;
         if (
-          customer.cart.deliveryOption !== "Normal Delivery" &&
-          customer.cart.deliveryOption !== "Self Pickup"
+          customer.cart.deliveryType !== "Normal Delivery" &&
+          customer.cart.deliveryType !== "self_pickup"
         ) {
-          deliveryMessage += ` (including ${customer.cart.deliveryOption} fee)`;
+          deliveryMessage += ` (including ${customer.cart.deliveryType} fee)`;
         }
 
         await sendWhatsAppMessage(phoneNumber, deliveryMessage);
@@ -2748,7 +2717,7 @@ async function processChatMessage(phoneNumber, text, message) {
                   ).toLocaleString()}`
               )
               .join("\n") +
-            `\nDelivery: ${orderToTrack.deliveryOption}\n` +
+            `\nDelivery: ${orderToTrack.deliveryType}\n` +
             `Total Price: Rp.${Math.round(
               orderToTrack.totalAmount
             ).toLocaleString()}\n\n` +
@@ -2758,7 +2727,7 @@ async function processChatMessage(phoneNumber, text, message) {
               customer.contextData?.email || "Not provided"
             }\n` +
             `Delivery address: ${
-              orderToTrack.deliveryLocation || "Self pickup"
+              orderToTrack.deliveryLocation || "self_pickup"
             }\n\n` +
             `Your order was shipped on ${shippedDate.toLocaleDateString()} and is\n` +
             `expected to arrive on ${deliveryDate}.`;
@@ -5974,7 +5943,7 @@ async function processChatMessage(phoneNumber, text, message) {
             }\n`;
 
             // Delivery details with more information
-            orderDetails += `Delivery: ${order.deliveryOption}\n`;
+            orderDetails += `Delivery: ${order.deliveryType}\n`;
             if (order.deliveryLocation)
               orderDetails += `Location: ${order.deliveryLocation}\n`;
 
@@ -6105,7 +6074,7 @@ async function processChatMessage(phoneNumber, text, message) {
         }
 
         // 4) self-pickup branch
-        if (latestOrder?.deliveryOption === "Self Pickup") {
+        if (latestOrder?.deliveryType === "self_pickup") {
           if (latestOrder.totalAmount >= 25_000_000) {
             await sendWhatsAppMessage(
               phoneNumber,
@@ -7578,8 +7547,9 @@ async function proceedToCheckout(phoneNumber, customer) {
   );
 }
 
+// Updated sendOrderSummary to match the current Customer schema
 async function sendOrderSummary(phoneNumber, customer) {
-  // 1) flip the existing "cart-not-paid" into "order-made-not-paid"
+  // 1) Update order status to "order-made-not-paid"
   const idx = customer.orderHistory.findIndex(
     (o) => o.orderId === customer.latestOrderId
   );
@@ -7589,69 +7559,69 @@ async function sendOrderSummary(phoneNumber, customer) {
     await customer.save();
   }
 
-  // 2) build the exact same summary + menu as before
-  let message = "Your total bill will be\n\n";
+  // 2) Build the summary message
+  let message = "Your total bill will be:\n\n";
 
-  // line-items
+  // Line items
   customer.cart.items.forEach((item, i) => {
     const name = (item.productName || "").replace(" (DISCOUNTED)", "");
-    const weight = item.weight ? item.weight.replace("1kg", "1 kg") : "";
-    message +=
-      `${i + 1}. ${name}: ${formatRupiah(item.totalPrice)}` +
-      ` (${item.quantity}${weight ? " " + weight : ""})\n`;
+    const weight = item.weight ? item.weight.replace(/1kg/i, "1 kg") : "";
+    const lineTotal = formatRupiah(item.totalPrice);
+    message += `${i + 1}. ${name}: ${lineTotal}`;
+    if (item.quantity || weight) {
+      message += ` (${item.quantity || 1}${weight ? " " + weight : ""})`;
+    }
+    message += `\n`;
   });
 
-  // subtotal
-  message += `\nSubtotal for items: ${formatRupiah(
-    customer.cart.totalAmount
-  )}\n`;
+  // Subtotal
+  message += `\nSubtotal for items: ${formatRupiah(customer.cart.totalAmount)}`;
 
-  // delivery charge
+  // Delivery charges
   if (customer.cart.deliveryCharge > 0) {
-    message += `Delivery charges: ${formatRupiah(
+    message += `\nDelivery charges: ${formatRupiah(
       customer.cart.deliveryCharge
-    )}\n`;
+    )}`;
   } else {
-    message += `Delivery: Free\n`;
+    message += `\nDelivery: Free`;
   }
 
-  // first-order & eco discounts
-  const firstOrder = customer.cart.firstOrderDiscount || 0;
-  const ecoDisc = customer.cart.ecoDeliveryDiscount || 0;
-  if (firstOrder) {
-    message += `First Order Discount (10%): -${formatRupiah(firstOrder)}\n`;
-  }
-  if (ecoDisc) {
-    message += `Eco Delivery Discount (5%): -${formatRupiah(ecoDisc)}\n`;
+  // Eco delivery discount
+  if (customer.cart.ecoDeliveryDiscount > 0) {
+    message += `\nEco Delivery Discount (5%): -${formatRupiah(
+      customer.cart.ecoDeliveryDiscount
+    )}`;
   }
 
-  // delivery summary
-  message += `\nDelivery option: ${customer.cart.deliveryOption}\n`;
-  if (customer.cart.deliveryOption !== "Self Pickup") {
-    message += `Delivery area: ${customer.cart.deliveryLocation}\n\n`;
-  } else {
-    message += `\n`;
+  // Delivery summary
+  message += `\n\nDelivery option: ${customer.cart.deliveryOption}`;
+  // Show delivery type and area unless it's self_pickup
+  if (
+    customer.cart.deliveryType &&
+    customer.cart.deliveryType !== "self_pickup"
+  ) {
+    message += `\nDelivery type: ${customer.cart.deliveryType}`;
+    if (customer.cart.deliveryLocation) {
+      message += `\nDelivery area: ${customer.cart.deliveryLocation}`;
+    }
   }
 
-  // checkout menu
+  // Checkout menu
   message +=
-    "Would you like to proceed with payment?\n\n" +
-    "1. Yes, I want to proceed with payment so checkout now\n" +
-    "2. Modify Cart\n" +
-    "3. I will come back later and pay\n" +
-    "4. I don't want to continue, cancel process and empty my cart\n";
+    `\n\nWould you like to proceed with payment?\n` +
+    `1. Yes, proceed to payment\n` +
+    `2. Modify cart\n` +
+    `3. I'll pay later\n` +
+    `4. Cancel and empty cart`;
 
-  // final total
+  // Final total
   const finalTotal =
     customer.cart.totalAmount +
     customer.cart.deliveryCharge -
-    firstOrder -
-    ecoDisc;
-  message += `\nTotal bill: ${formatRupiah(
-    finalTotal
-  )} (including all charges and discounts)`;
+    (customer.cart.ecoDeliveryDiscount || 0);
+  message += `\n\nTotal bill: ${formatRupiah(finalTotal)}`;
 
-  // send & log
+  // Send message and log to chat history
   await sendWhatsAppMessage(phoneNumber, message);
   await customer.addToChatHistory(message, "bot");
 }
