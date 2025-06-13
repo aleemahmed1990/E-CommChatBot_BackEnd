@@ -50,6 +50,14 @@ const uploadFields = upload.fields([
   { name: "moreImage5", maxCount: 1 },
 ]);
 
+// ============================================================================
+// MISSING DISCOUNT FETCH ROUTES - Add these to your products.js router
+// ============================================================================
+
+// ✅ CRITICAL: Add these routes BEFORE any /:id routes in your products.js file
+
+// ✅ 1. Get all products with discounts (Main route for AllDiscounts component)
+
 // ✅ FIXED: Main products endpoint with proper status filtering
 router.get("/", async (req, res) => {
   try {
@@ -133,6 +141,355 @@ router.get("/", async (req, res) => {
     });
   }
 });
+
+router.get("/discounts", async (req, res) => {
+  try {
+    console.log("📋 Fetching all discounts...");
+    const { status, discountType, forWho } = req.query;
+
+    let query = {
+      discountConfig: { $exists: true, $ne: null },
+    };
+
+    // Filter by status
+    if (status) {
+      query["discountConfig.isActive"] = status === "active";
+    }
+
+    // Filter by discount type
+    if (discountType) {
+      query["discountConfig.discountType"] = discountType;
+    }
+
+    // Filter by target audience
+    if (forWho) {
+      query["discountConfig.forWho"] = forWho;
+    }
+
+    console.log("🔍 Discount query:", query);
+
+    const products = await Product.find(query)
+      .select(
+        "productId productName categories NormalPrice Stock discountConfig hasActiveDiscount currentDiscountPrice discountValidUntil createdAt updatedAt"
+      )
+      .sort({ updatedAt: -1 }) // Sort by most recently updated
+      .lean();
+
+    console.log(`💰 Found ${products.length} products with discounts`);
+
+    // Process products to include calculated discount details
+    const processedProducts = products.map((product) => {
+      const discountConfig = product.discountConfig;
+
+      // Calculate discount details manually since methods aren't available in lean()
+      const discountDetails = discountConfig
+        ? {
+            discountAmount:
+              discountConfig.originalPrice - discountConfig.newPrice,
+            discountPercentage: (
+              ((discountConfig.originalPrice - discountConfig.newPrice) /
+                discountConfig.originalPrice) *
+              100
+            ).toFixed(2),
+            savings: discountConfig.originalPrice - discountConfig.newPrice,
+          }
+        : null;
+
+      // Check if discount is currently valid
+      const now = new Date();
+      const isCurrentlyValid =
+        discountConfig &&
+        discountConfig.isActive &&
+        now >= new Date(discountConfig.startDate) &&
+        (!discountConfig.endDate || now <= new Date(discountConfig.endDate));
+
+      return {
+        ...product,
+        discountDetails,
+        isCurrentlyValid,
+        effectivePrice: isCurrentlyValid
+          ? discountConfig.newPrice
+          : product.NormalPrice,
+      };
+    });
+
+    const summary = {
+      totalDiscounts: processedProducts.length,
+      activeDiscounts: processedProducts.filter((p) => p.isCurrentlyValid)
+        .length,
+      expiredDiscounts: processedProducts.filter(
+        (p) => !p.isCurrentlyValid && p.discountConfig?.isActive
+      ).length,
+      disabledDiscounts: processedProducts.filter(
+        (p) => !p.discountConfig?.isActive
+      ).length,
+    };
+
+    console.log("📊 Discount summary:", summary);
+
+    res.json({
+      success: true,
+      data: processedProducts,
+      summary,
+    });
+  } catch (err) {
+    console.error("❌ Error fetching discounts:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching discounts",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ 2. Search products for discount creation
+router.get("/search-for-discount", async (req, res) => {
+  try {
+    const { q, hasDiscount } = req.query;
+
+    let query = {};
+
+    // Search by product name or ID
+    if (q) {
+      const regex = new RegExp(q, "i");
+      query.$or = [
+        { productName: regex },
+        { productId: regex },
+        { categories: regex },
+      ];
+    }
+
+    // Filter by discount status
+    if (hasDiscount === "true") {
+      query["discountConfig"] = { $exists: true, $ne: null };
+    } else if (hasDiscount === "false") {
+      query.$or = [
+        { discountConfig: { $exists: false } },
+        { discountConfig: null },
+      ];
+    }
+
+    console.log("🔍 Search query:", query);
+
+    const products = await Product.find(query)
+      .select(
+        "productId productName categories NormalPrice Stock discountConfig hasActiveDiscount"
+      )
+      .limit(20)
+      .sort({ productName: 1 })
+      .lean();
+
+    console.log(`📦 Found ${products.length} products for search term: "${q}"`);
+
+    // Format products for dropdown
+    const formattedProducts = products.map((product) => ({
+      id: product._id,
+      productId: product.productId,
+      productName: product.productName,
+      categories: product.categories,
+      normalPrice: product.NormalPrice || 0,
+      stock: product.Stock || 0,
+      hasDiscount: !!product.discountConfig,
+      displayText: `${product.productName} (#${product.productId}) - $${
+        product.NormalPrice || 0
+      }`,
+      currentDiscountPrice: product.hasActiveDiscount
+        ? product.discountConfig?.newPrice
+        : null,
+    }));
+
+    res.json({
+      success: true,
+      data: formattedProducts,
+      count: formattedProducts.length,
+    });
+  } catch (err) {
+    console.error("❌ Error searching products for discount:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while searching products",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ 3. Get discount analytics
+router.get("/discounts/analytics", async (req, res) => {
+  try {
+    const { period = "30" } = req.query; // Days
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - parseInt(period));
+
+    console.log(`📈 Fetching discount analytics for last ${period} days...`);
+
+    // Simple aggregation without complex fields that might not exist
+    const products = await Product.find({
+      discountConfig: { $exists: true, $ne: null },
+    }).lean();
+
+    // Process analytics manually for reliability
+    const analytics = {};
+    let totalProducts = 0;
+    let activeDiscounts = 0;
+    let totalSavingsOffered = 0;
+    let totalDiscountPercentage = 0;
+
+    products.forEach((product) => {
+      const config = product.discountConfig;
+      if (!config) return;
+
+      totalProducts++;
+
+      // Check if active
+      const now = new Date();
+      const isActive =
+        config.isActive &&
+        now >= new Date(config.startDate) &&
+        (!config.endDate || now <= new Date(config.endDate));
+
+      if (isActive) activeDiscounts++;
+
+      // Calculate savings
+      const savings = config.originalPrice - config.newPrice;
+      totalSavingsOffered += savings;
+
+      // Calculate percentage
+      const percentage = (savings / config.originalPrice) * 100;
+      totalDiscountPercentage += percentage;
+
+      // Group by type
+      const type = config.discountType || "Unknown";
+      if (!analytics[type]) {
+        analytics[type] = {
+          count: 0,
+          totalSavings: 0,
+          avgPercentage: 0,
+        };
+      }
+      analytics[type].count++;
+      analytics[type].totalSavings += savings;
+      analytics[type].avgPercentage += percentage;
+    });
+
+    // Calculate averages
+    Object.keys(analytics).forEach((type) => {
+      analytics[type].avgPercentage = (
+        analytics[type].avgPercentage / analytics[type].count
+      ).toFixed(2);
+    });
+
+    const summary = {
+      totalProducts,
+      activeDiscounts,
+      totalSavingsOffered: parseFloat(totalSavingsOffered.toFixed(2)),
+      avgDiscountPercentage:
+        totalProducts > 0
+          ? parseFloat((totalDiscountPercentage / totalProducts).toFixed(2))
+          : 0,
+    };
+
+    res.json({
+      success: true,
+      data: {
+        period: `${period} days`,
+        analytics: Object.entries(analytics).map(([type, data]) => ({
+          _id: type,
+          ...data,
+        })),
+        summary,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Error fetching discount analytics:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching analytics",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ 4. Bulk update discount status
+router.patch("/discounts/bulk-status", async (req, res) => {
+  try {
+    const { productIds, status } = req.body;
+
+    if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Product IDs array is required",
+      });
+    }
+
+    const isActive = status === "Enabled";
+    let updateCount = 0;
+    const errors = [];
+
+    for (const productId of productIds) {
+      try {
+        const product = await Product.findById(productId);
+
+        if (!product) {
+          errors.push(`Product ${productId} not found`);
+          continue;
+        }
+
+        if (!product.discountConfig) {
+          errors.push(`Product ${productId} has no discount to update`);
+          continue;
+        }
+
+        product.discountConfig.isActive = isActive;
+        product.discountConfig.updatedAt = new Date();
+
+        await product.save();
+        updateCount++;
+      } catch (err) {
+        errors.push(`Error updating product ${productId}: ${err.message}`);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully updated ${updateCount} discount(s)`,
+      data: {
+        updated: updateCount,
+        total: productIds.length,
+        errors: errors.length > 0 ? errors : undefined,
+      },
+    });
+  } catch (err) {
+    console.error("Error bulk updating discount status:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while bulk updating discounts",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ 5. Test route to verify discount routes are working
+router.get("/test-discounts", (req, res) => {
+  res.json({
+    success: true,
+    message: "Discount routes are working!",
+    timestamp: new Date(),
+    availableRoutes: [
+      "GET /api/products/discounts",
+      "GET /api/products/search-for-discount",
+      "GET /api/products/discounts/analytics",
+      "PATCH /api/products/discounts/bulk-status",
+      "PUT /api/products/:id/discount",
+      "GET /api/products/:id/discount",
+      "PATCH /api/products/:id/discount/status",
+      "DELETE /api/products/:id/discount",
+    ],
+  });
+});
+
+// ============================================================================
+// NOTE: Add these routes BEFORE your existing /:id routes in products.js
+// ============================================================================
 
 // ─── HELPER: Calculate stock status based on threshold ─────────────────────
 function getStockStatus(currentStock, threshold) {
@@ -517,6 +874,396 @@ router.put("/fill-inventory-bulk", async (req, res) => {
     });
   }
 });
+// ============================================================================
+// ADDITIONAL ROUTES FOR DISCOUNT INVENTORY MANAGEMENT
+// Add these routes to your products.js router file
+// ============================================================================
+
+// ✅ Fill inventory for discounted products only
+router.put("/fill-inventory-discount/:id", async (req, res) => {
+  try {
+    const { fillQuantity } = req.body;
+
+    // Validate fillQuantity
+    if (!fillQuantity || isNaN(fillQuantity) || fillQuantity <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Fill quantity must be a positive number",
+      });
+    }
+
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    // Check if product has an active discount
+    if (!product.discountConfig || !product.discountConfig.isActive) {
+      return res.status(400).json({
+        success: false,
+        message: "This product does not have an active discount configuration",
+      });
+    }
+
+    // Check if discount is currently valid
+    const now = new Date();
+    const startDate = new Date(product.discountConfig.startDate);
+    const endDate = product.discountConfig.endDate
+      ? new Date(product.discountConfig.endDate)
+      : null;
+
+    let discountStatus = "Active";
+    if (now < startDate) {
+      discountStatus = "Scheduled";
+    } else if (endDate && now > endDate) {
+      discountStatus = "Expired";
+    }
+
+    // Calculate new Stock (current Stock + fill quantity)
+    const currentStock = product.Stock || 0;
+    const newStock = currentStock + parseInt(fillQuantity);
+
+    // Update the product Stock
+    const updatedProduct = await Product.findByIdAndUpdate(
+      req.params.id,
+      {
+        Stock: newStock,
+        updatedAt: new Date(),
+      },
+      { new: true, runValidators: true }
+    );
+
+    // Log the inventory fill action for discounted products
+    console.log(
+      `Discounted product inventory filled: Product ${product.productId} (${product.productName}) - Added ${fillQuantity} units. Stock: ${currentStock} → ${newStock}. Discount Status: ${discountStatus}`
+    );
+
+    res.json({
+      success: true,
+      message: `Successfully filled ${fillQuantity} units for discounted product ${product.productName}`,
+      data: {
+        productId: updatedProduct.productId,
+        productName: updatedProduct.productName,
+        previousStock: currentStock,
+        filledQuantity: parseInt(fillQuantity),
+        Stock: newStock,
+        discountInfo: {
+          discountType: product.discountConfig.discountType,
+          originalPrice: product.discountConfig.originalPrice,
+          newPrice: product.discountConfig.newPrice,
+          discountStatus,
+          endDate: product.discountConfig.endDate,
+        },
+      },
+    });
+  } catch (err) {
+    console.error("Error filling discounted product inventory:", err);
+    if (err.kind === "ObjectId") {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: "Server error while filling discounted product inventory",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ Bulk fill inventory for multiple discounted products
+router.put("/fill-inventory-discount-bulk", async (req, res) => {
+  try {
+    const { fillData } = req.body; // Array of { productId, fillQuantity }
+
+    if (!Array.isArray(fillData) || fillData.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Fill data must be a non-empty array",
+      });
+    }
+
+    const results = [];
+    const errors = [];
+    const skipped = [];
+
+    for (const item of fillData) {
+      try {
+        const { productId, fillQuantity } = item;
+
+        if (
+          !productId ||
+          !fillQuantity ||
+          isNaN(fillQuantity) ||
+          fillQuantity <= 0
+        ) {
+          errors.push({
+            productId: productId || "unknown",
+            error: "Invalid product ID or fill quantity",
+          });
+          continue;
+        }
+
+        const product = await Product.findById(productId);
+        if (!product) {
+          errors.push({
+            productId,
+            error: "Product not found",
+          });
+          continue;
+        }
+
+        // Check if product has an active discount
+        if (!product.discountConfig || !product.discountConfig.isActive) {
+          skipped.push({
+            productId: product.productId,
+            productName: product.productName,
+            reason: "No active discount configuration",
+          });
+          continue;
+        }
+
+        // Check discount status
+        const now = new Date();
+        const startDate = new Date(product.discountConfig.startDate);
+        const endDate = product.discountConfig.endDate
+          ? new Date(product.discountConfig.endDate)
+          : null;
+
+        let discountStatus = "Active";
+        if (now < startDate) {
+          discountStatus = "Scheduled";
+        } else if (endDate && now > endDate) {
+          discountStatus = "Expired";
+        }
+
+        const currentStock = product.Stock || 0;
+        const newStock = currentStock + parseInt(fillQuantity);
+
+        const updatedProduct = await Product.findByIdAndUpdate(
+          productId,
+          {
+            Stock: newStock,
+            updatedAt: new Date(),
+          },
+          { new: true }
+        );
+
+        results.push({
+          productId: updatedProduct.productId,
+          productName: updatedProduct.productName,
+          previousStock: currentStock,
+          filledQuantity: parseInt(fillQuantity),
+          newStock: newStock,
+          discountInfo: {
+            discountType: product.discountConfig.discountType,
+            discountStatus,
+            originalPrice: product.discountConfig.originalPrice,
+            newPrice: product.discountConfig.newPrice,
+          },
+        });
+
+        console.log(
+          `Bulk discounted inventory fill: Product ${product.productId} - Added ${fillQuantity} units. Stock: ${currentStock} → ${newStock}. Discount: ${discountStatus}`
+        );
+      } catch (err) {
+        errors.push({
+          productId: item.productId || "unknown",
+          error: err.message,
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Processed ${results.length} discounted products successfully${
+        errors.length > 0 ? ` with ${errors.length} errors` : ""
+      }${skipped.length > 0 ? ` and ${skipped.length} skipped` : ""}`,
+      data: {
+        successful: results,
+        errors: errors,
+        skipped: skipped,
+        totalProcessed: fillData.length,
+        successCount: results.length,
+        errorCount: errors.length,
+        skippedCount: skipped.length,
+      },
+    });
+  } catch (err) {
+    console.error("Error in bulk discounted inventory fill:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error during bulk discounted inventory fill",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ Get low stock discounted products (products with discounts that need restocking)
+router.get("/discounts/low-stock", async (req, res) => {
+  try {
+    const { threshold = 5 } = req.query; // Default threshold of 5 units
+
+    console.log(
+      `🔍 Fetching discounted products with stock <= ${threshold}...`
+    );
+
+    const products = await Product.find({
+      discountConfig: { $exists: true, $ne: null },
+      "discountConfig.isActive": true,
+      Stock: { $lte: parseInt(threshold) },
+    })
+      .select(
+        "productId productName categories NormalPrice Stock discountConfig hasActiveDiscount"
+      )
+      .sort({ Stock: 1, updatedAt: -1 }) // Sort by stock ascending, then by recent updates
+      .lean();
+
+    console.log(`📦 Found ${products.length} low-stock discounted products`);
+
+    // Process products to include calculated details
+    const processedProducts = products.map((product) => {
+      const discountConfig = product.discountConfig;
+
+      // Calculate discount details
+      const discountDetails = discountConfig
+        ? {
+            discountAmount:
+              discountConfig.originalPrice - discountConfig.newPrice,
+            discountPercentage: (
+              ((discountConfig.originalPrice - discountConfig.newPrice) /
+                discountConfig.originalPrice) *
+              100
+            ).toFixed(2),
+            savings: discountConfig.originalPrice - discountConfig.newPrice,
+          }
+        : null;
+
+      // Check if discount is currently valid
+      const now = new Date();
+      const isCurrentlyValid =
+        discountConfig &&
+        discountConfig.isActive &&
+        now >= new Date(discountConfig.startDate) &&
+        (!discountConfig.endDate || now <= new Date(discountConfig.endDate));
+
+      // Determine urgency level
+      const stock = product.Stock || 0;
+      let urgency = "low";
+      if (stock === 0) urgency = "critical";
+      else if (stock <= 2) urgency = "high";
+      else if (stock <= parseInt(threshold) / 2) urgency = "medium";
+
+      return {
+        ...product,
+        discountDetails,
+        isCurrentlyValid,
+        urgency,
+        recommendedFill: Math.max(
+          parseInt(threshold) * 2 - stock,
+          parseInt(threshold)
+        ),
+      };
+    });
+
+    const summary = {
+      totalLowStock: processedProducts.length,
+      critical: processedProducts.filter((p) => p.urgency === "critical")
+        .length,
+      high: processedProducts.filter((p) => p.urgency === "high").length,
+      medium: processedProducts.filter((p) => p.urgency === "medium").length,
+      low: processedProducts.filter((p) => p.urgency === "low").length,
+      totalRecommendedFill: processedProducts.reduce(
+        (sum, p) => sum + p.recommendedFill,
+        0
+      ),
+    };
+
+    console.log("📊 Low stock summary:", summary);
+
+    res.json({
+      success: true,
+      data: processedProducts,
+      summary,
+      threshold: parseInt(threshold),
+    });
+  } catch (err) {
+    console.error("❌ Error fetching low stock discounted products:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching low stock discounted products",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ Get inventory filling history for discounted products
+router.get("/discounts/fill-history", async (req, res) => {
+  try {
+    const { days = 30, productId } = req.query;
+
+    // This would require a separate logging collection/table to track fill history
+    // For now, we'll return a mock response structure
+
+    console.log(`📋 Fetching fill history for last ${days} days...`);
+
+    // In a real implementation, you would:
+    // 1. Create a separate InventoryFillLog collection/table
+    // 2. Log each fill operation there with timestamp, product info, quantities, etc.
+    // 3. Query that collection here
+
+    const mockHistory = [
+      {
+        _id: "fill_001",
+        productId: "PROD001",
+        productName: "Sample Discounted Product",
+        fillQuantity: 50,
+        previousStock: 5,
+        newStock: 55,
+        filledBy: "admin",
+        fillDate: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000), // 2 days ago
+        discountInfo: {
+          discountType: "percentage",
+          discountPercentage: 20,
+          isActive: true,
+        },
+      },
+    ];
+
+    res.json({
+      success: true,
+      message:
+        "Fill history retrieved (mock data - implement logging for real data)",
+      data: mockHistory,
+      period: `${days} days`,
+      note: "To get real data, implement inventory fill logging in your application",
+    });
+  } catch (err) {
+    console.error("❌ Error fetching fill history:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching fill history",
+      error: err.message,
+    });
+  }
+});
+
+// ============================================================================
+// USAGE INSTRUCTIONS:
+//
+// 1. Add these routes to your products.js router file BEFORE any /:id routes
+// 2. The main component will use the existing /api/products/discounts route
+//    to fetch discounted products
+// 3. Use /api/products/fill-inventory/:id for single product fills
+// 4. Use /api/products/fill-inventory-discount/:id for discount-specific fills
+//    (with additional validation)
+// 5. Use /api/products/fill-inventory-discount-bulk for bulk operations
+// 6. Use /api/products/discounts/low-stock to get products needing restocking
+// ============================================================================
 // ✅ UPDATED: Out-of-stock endpoint - products that need reordering
 router.get("/out-of-stock", async (req, res) => {
   try {
@@ -3092,5 +3839,657 @@ router.patch("/bulk-update-orders", async (req, res) => {
     });
   }
 });
+
+// Add these routes to your existing products router file
+
+// ============================================================================
+// DISCOUNT MANAGEMENT ROUTES
+// ============================================================================
+
+// ============================================================================
+// DISCOUNT MANAGEMENT ROUTES - FIXED VERSION
+// ============================================================================
+
+// ✅ IMPORTANT: Place specific routes BEFORE parametric routes to avoid conflicts
+
+// ✅ NEW: Search products for discount creation (MUST BE BEFORE /:id routes)
+router.get("/search-for-discount", async (req, res) => {
+  try {
+    const { q, hasDiscount } = req.query;
+
+    let query = {};
+
+    // Search by product name or ID
+    if (q) {
+      const regex = new RegExp(q, "i");
+      query.$or = [
+        { productName: regex },
+        { productId: regex },
+        { categories: regex },
+      ];
+    }
+
+    // Filter by discount status
+    if (hasDiscount === "true") {
+      query["discountConfig"] = { $exists: true, $ne: null };
+    } else if (hasDiscount === "false") {
+      query.$or = [
+        { discountConfig: { $exists: false } },
+        { discountConfig: null },
+      ];
+    }
+
+    console.log("🔍 Search query:", query);
+
+    const products = await Product.find(query)
+      .select(
+        "productId productName categories NormalPrice Stock discountConfig hasActiveDiscount"
+      )
+      .limit(20)
+      .sort({ productName: 1 })
+      .lean();
+
+    console.log(`📦 Found ${products.length} products for search term: "${q}"`);
+
+    // Format products for dropdown
+    const formattedProducts = products.map((product) => ({
+      id: product._id,
+      productId: product.productId,
+      productName: product.productName,
+      categories: product.categories,
+      normalPrice: product.NormalPrice || 0,
+      stock: product.Stock || 0,
+      hasDiscount: !!product.discountConfig,
+      displayText: `${product.productName} (#${product.productId}) - $${
+        product.NormalPrice || 0
+      }`,
+      currentDiscountPrice: product.hasActiveDiscount
+        ? product.discountConfig?.newPrice
+        : null,
+    }));
+
+    res.json({
+      success: true,
+      data: formattedProducts,
+      count: formattedProducts.length,
+    });
+  } catch (err) {
+    console.error("❌ Error searching products for discount:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while searching products",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ NEW: Get all products with discounts (MUST BE BEFORE /:id routes)
+router.get("/discounts", async (req, res) => {
+  try {
+    console.log("📋 Fetching all discounts...");
+    const { status, discountType, forWho } = req.query;
+
+    let query = {
+      discountConfig: { $exists: true, $ne: null },
+    };
+
+    // Filter by status
+    if (status) {
+      query["discountConfig.isActive"] = status === "active";
+    }
+
+    // Filter by discount type
+    if (discountType) {
+      query["discountConfig.discountType"] = discountType;
+    }
+
+    // Filter by target audience
+    if (forWho) {
+      query["discountConfig.forWho"] = forWho;
+    }
+
+    console.log("🔍 Discount query:", query);
+
+    const products = await Product.find(query)
+      .select(
+        "productId productName categories NormalPrice Stock discountConfig hasActiveDiscount currentDiscountPrice discountValidUntil createdAt updatedAt"
+      )
+      .sort({ updatedAt: -1 }) // Sort by most recently updated
+      .lean();
+
+    console.log(`💰 Found ${products.length} products with discounts`);
+
+    // Process products to include calculated discount details
+    const processedProducts = products.map((product) => {
+      const discountConfig = product.discountConfig;
+
+      // Calculate discount details manually since methods aren't available in lean()
+      const discountDetails = discountConfig
+        ? {
+            discountAmount:
+              discountConfig.originalPrice - discountConfig.newPrice,
+            discountPercentage: (
+              ((discountConfig.originalPrice - discountConfig.newPrice) /
+                discountConfig.originalPrice) *
+              100
+            ).toFixed(2),
+            savings: discountConfig.originalPrice - discountConfig.newPrice,
+          }
+        : null;
+
+      // Check if discount is currently valid
+      const now = new Date();
+      const isCurrentlyValid =
+        discountConfig &&
+        discountConfig.isActive &&
+        now >= new Date(discountConfig.startDate) &&
+        (!discountConfig.endDate || now <= new Date(discountConfig.endDate));
+
+      return {
+        ...product,
+        discountDetails,
+        isCurrentlyValid,
+        effectivePrice: isCurrentlyValid
+          ? discountConfig.newPrice
+          : product.NormalPrice,
+      };
+    });
+
+    const summary = {
+      totalDiscounts: processedProducts.length,
+      activeDiscounts: processedProducts.filter((p) => p.isCurrentlyValid)
+        .length,
+      expiredDiscounts: processedProducts.filter(
+        (p) => !p.isCurrentlyValid && p.discountConfig?.isActive
+      ).length,
+      disabledDiscounts: processedProducts.filter(
+        (p) => !p.discountConfig?.isActive
+      ).length,
+    };
+
+    console.log("📊 Discount summary:", summary);
+
+    res.json({
+      success: true,
+      data: processedProducts,
+      summary,
+    });
+  } catch (err) {
+    console.error("❌ Error fetching discounts:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching discounts",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ NEW: Get discount analytics (MUST BE BEFORE /:id routes)
+router.get("/discounts/analytics", async (req, res) => {
+  try {
+    const { period = "30" } = req.query; // Days
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - parseInt(period));
+
+    console.log(`📈 Fetching discount analytics for last ${period} days...`);
+
+    // Simple aggregation without complex fields that might not exist
+    const products = await Product.find({
+      discountConfig: { $exists: true, $ne: null },
+    }).lean();
+
+    // Process analytics manually for reliability
+    const analytics = {};
+    let totalProducts = 0;
+    let activeDiscounts = 0;
+    let totalSavingsOffered = 0;
+    let totalDiscountPercentage = 0;
+
+    products.forEach((product) => {
+      const config = product.discountConfig;
+      if (!config) return;
+
+      totalProducts++;
+
+      // Check if active
+      const now = new Date();
+      const isActive =
+        config.isActive &&
+        now >= new Date(config.startDate) &&
+        (!config.endDate || now <= new Date(config.endDate));
+
+      if (isActive) activeDiscounts++;
+
+      // Calculate savings
+      const savings = config.originalPrice - config.newPrice;
+      totalSavingsOffered += savings;
+
+      // Calculate percentage
+      const percentage = (savings / config.originalPrice) * 100;
+      totalDiscountPercentage += percentage;
+
+      // Group by type
+      const type = config.discountType || "Unknown";
+      if (!analytics[type]) {
+        analytics[type] = {
+          count: 0,
+          totalSavings: 0,
+          avgPercentage: 0,
+        };
+      }
+      analytics[type].count++;
+      analytics[type].totalSavings += savings;
+      analytics[type].avgPercentage += percentage;
+    });
+
+    // Calculate averages
+    Object.keys(analytics).forEach((type) => {
+      analytics[type].avgPercentage = (
+        analytics[type].avgPercentage / analytics[type].count
+      ).toFixed(2);
+    });
+
+    const summary = {
+      totalProducts,
+      activeDiscounts,
+      totalSavingsOffered: parseFloat(totalSavingsOffered.toFixed(2)),
+      avgDiscountPercentage:
+        totalProducts > 0
+          ? parseFloat((totalDiscountPercentage / totalProducts).toFixed(2))
+          : 0,
+    };
+
+    res.json({
+      success: true,
+      data: {
+        period: `${period} days`,
+        analytics: Object.entries(analytics).map(([type, data]) => ({
+          _id: type,
+          ...data,
+        })),
+        summary,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Error fetching discount analytics:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching analytics",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ NEW: Bulk update discount status (MUST BE BEFORE /:id routes)
+router.patch("/discounts/bulk-status", async (req, res) => {
+  try {
+    const { productIds, status } = req.body;
+
+    if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Product IDs array is required",
+      });
+    }
+
+    const isActive = status === "Enabled";
+    let updateCount = 0;
+    const errors = [];
+
+    for (const productId of productIds) {
+      try {
+        const product = await Product.findById(productId);
+
+        if (!product) {
+          errors.push(`Product ${productId} not found`);
+          continue;
+        }
+
+        if (!product.discountConfig) {
+          errors.push(`Product ${productId} has no discount to update`);
+          continue;
+        }
+
+        product.discountConfig.isActive = isActive;
+        product.discountConfig.updatedAt = new Date();
+
+        await product.save();
+        updateCount++;
+      } catch (err) {
+        errors.push(`Error updating product ${productId}: ${err.message}`);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully updated ${updateCount} discount(s)`,
+      data: {
+        updated: updateCount,
+        total: productIds.length,
+        errors: errors.length > 0 ? errors : undefined,
+      },
+    });
+  } catch (err) {
+    console.error("Error bulk updating discount status:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while bulk updating discounts",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ NOW the parametric routes (/:id) can be safely placed after specific routes
+
+// ✅ NEW: Create or update discount for a product
+router.put("/:id/discount", async (req, res) => {
+  try {
+    const {
+      discountType,
+      forWho,
+      originalPrice,
+      oldPrice,
+      newPrice,
+      startDate,
+      endDate,
+      amount,
+      discountTitle,
+      description,
+      status = "Enabled",
+    } = req.body;
+
+    console.log(`💰 Creating discount for product ID: ${req.params.id}`);
+
+    // Validate required fields
+    if (
+      !discountType ||
+      !forWho ||
+      !originalPrice ||
+      !newPrice ||
+      !startDate ||
+      !discountTitle
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Missing required fields: discountType, forWho, originalPrice, newPrice, startDate, discountTitle",
+      });
+    }
+
+    // Validate prices
+    if (parseFloat(newPrice) >= parseFloat(originalPrice)) {
+      return res.status(400).json({
+        success: false,
+        message: "New price must be less than original price",
+      });
+    }
+
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    // Calculate discount details
+    const originalPriceNum = parseFloat(originalPrice);
+    const newPriceNum = parseFloat(newPrice);
+    const discountAmount = originalPriceNum - newPriceNum;
+    const discountPercentage = (discountAmount / originalPriceNum) * 100;
+
+    // Create discount configuration
+    const discountConfig = {
+      discountId: `DISC-${product.productId}-${Date.now()}`,
+      discountTitle,
+      discountType,
+      forWho,
+      isActive: status === "Enabled",
+      originalPrice: originalPriceNum,
+      oldPrice: oldPrice ? parseFloat(oldPrice) : originalPriceNum,
+      newPrice: newPriceNum,
+      discountAmount,
+      discountPercentage,
+      startDate: new Date(startDate),
+      endDate: endDate ? new Date(endDate) : null,
+      amount: amount ? parseFloat(amount) : null,
+      description: description || "",
+      createdBy: req.user?.name || "Admin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    // Update product with discount configuration
+    product.discountConfig = discountConfig;
+
+    // Update the normal price if needed
+    if (!product.NormalPrice) {
+      product.NormalPrice = originalPriceNum;
+    }
+
+    // Update quick access fields
+    const now = new Date();
+    const isCurrentlyValid =
+      discountConfig.isActive &&
+      now >= discountConfig.startDate &&
+      (!discountConfig.endDate || now <= discountConfig.endDate);
+
+    product.hasActiveDiscount = isCurrentlyValid;
+    product.currentDiscountPrice = isCurrentlyValid ? newPriceNum : null;
+    product.discountValidUntil = discountConfig.endDate;
+
+    await product.save();
+
+    console.log(`✅ Discount created for product: ${product.productId}`);
+    console.log(
+      `💰 Price: $${originalPrice} → $${newPrice} (${discountPercentage.toFixed(
+        1
+      )}% off)`
+    );
+
+    res.json({
+      success: true,
+      message: `Discount created successfully for ${product.productName}`,
+      data: {
+        productId: product.productId,
+        productName: product.productName,
+        discountConfig: product.discountConfig,
+        effectivePrice: isCurrentlyValid ? newPriceNum : product.NormalPrice,
+        discountDetails: {
+          discountAmount,
+          discountPercentage: parseFloat(discountPercentage.toFixed(2)),
+          savings: discountAmount,
+        },
+        isDiscountValid: isCurrentlyValid,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Error creating discount:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while creating discount",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ NEW: Get discount details for a specific product
+router.get("/:id/discount", async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id).select(
+      "productId productName NormalPrice discountConfig hasActiveDiscount currentDiscountPrice discountValidUntil"
+    );
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    if (!product.discountConfig) {
+      return res.status(404).json({
+        success: false,
+        message: "No discount found for this product",
+      });
+    }
+
+    // Calculate details manually
+    const config = product.discountConfig;
+    const discountDetails = {
+      discountAmount: config.originalPrice - config.newPrice,
+      discountPercentage: (
+        ((config.originalPrice - config.newPrice) / config.originalPrice) *
+        100
+      ).toFixed(2),
+      savings: config.originalPrice - config.newPrice,
+    };
+
+    const now = new Date();
+    const isDiscountValid =
+      config.isActive &&
+      now >= new Date(config.startDate) &&
+      (!config.endDate || now <= new Date(config.endDate));
+
+    res.json({
+      success: true,
+      data: {
+        productInfo: {
+          productId: product.productId,
+          productName: product.productName,
+          normalPrice: product.NormalPrice,
+        },
+        discountConfig: config,
+        discountDetails,
+        isDiscountValid,
+        effectivePrice: isDiscountValid ? config.newPrice : product.NormalPrice,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Error fetching product discount:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching discount",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ NEW: Update discount status (enable/disable)
+router.patch("/:id/discount/status", async (req, res) => {
+  try {
+    const { status } = req.body; // "Enabled" or "Disabled"
+
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    if (!product.discountConfig) {
+      return res.status(404).json({
+        success: false,
+        message: "No discount found for this product",
+      });
+    }
+
+    // Update discount status
+    product.discountConfig.isActive = status === "Enabled";
+    product.discountConfig.updatedAt = new Date();
+
+    // Update quick access fields
+    const now = new Date();
+    const isCurrentlyValid =
+      product.discountConfig.isActive &&
+      now >= new Date(product.discountConfig.startDate) &&
+      (!product.discountConfig.endDate ||
+        now <= new Date(product.discountConfig.endDate));
+
+    product.hasActiveDiscount = isCurrentlyValid;
+    product.currentDiscountPrice = isCurrentlyValid
+      ? product.discountConfig.newPrice
+      : null;
+
+    await product.save();
+
+    console.log(
+      `🔄 Discount ${status.toLowerCase()} for product: ${product.productId}`
+    );
+
+    res.json({
+      success: true,
+      message: `Discount ${status.toLowerCase()} successfully`,
+      data: {
+        productId: product.productId,
+        productName: product.productName,
+        discountStatus: status,
+        isDiscountValid: isCurrentlyValid,
+        effectivePrice: isCurrentlyValid
+          ? product.discountConfig.newPrice
+          : product.NormalPrice,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Error updating discount status:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while updating discount status",
+      error: err.message,
+    });
+  }
+});
+
+// ✅ NEW: Delete discount from a product
+router.delete("/:id/discount", async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    if (!product.discountConfig) {
+      return res.status(404).json({
+        success: false,
+        message: "No discount found for this product",
+      });
+    }
+
+    // Remove discount configuration
+    product.discountConfig = undefined;
+    product.hasActiveDiscount = false;
+    product.currentDiscountPrice = null;
+    product.discountValidUntil = null;
+
+    await product.save();
+
+    console.log(`🗑️ Discount removed from product: ${product.productId}`);
+
+    res.json({
+      success: true,
+      message: "Discount removed successfully",
+      data: {
+        productId: product.productId,
+        productName: product.productName,
+        effectivePrice: product.NormalPrice,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Error removing discount:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while removing discount",
+      error: err.message,
+    });
+  }
+});
+
+// ============================================================================
+// END OF DISCOUNT ROUTES
+// ============================================================================
 
 module.exports = router;

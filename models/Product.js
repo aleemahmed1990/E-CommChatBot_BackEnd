@@ -15,6 +15,63 @@ const specificationSchema = new Schema(
   { _id: false }
 );
 
+// ✅ NEW: Discount Configuration Schema
+const discountConfigSchema = new Schema(
+  {
+    discountId: { type: String, unique: true },
+    discountTitle: { type: String, required: true },
+    discountType: {
+      type: String,
+      enum: [
+        "clearance",
+        "new product",
+        "general discount",
+        "discount specific amount",
+        "above amount (discount)",
+        "above amount (for free delivery)",
+      ],
+      required: true,
+    },
+    forWho: {
+      type: String,
+      enum: [
+        "public",
+        "public referral",
+        "forman",
+        "forman referral",
+        "forman earnings mlm",
+      ],
+      required: true,
+    },
+    isActive: { type: Boolean, default: true },
+
+    // Pricing Details
+    originalPrice: { type: Number, required: true },
+    oldPrice: { type: Number },
+    newPrice: { type: Number, required: true },
+    discountAmount: { type: Number }, // Calculated field
+    discountPercentage: { type: Number }, // Calculated field
+
+    // Schedule
+    startDate: { type: Date, required: true },
+    endDate: { type: Date },
+    amount: { type: Number }, // Alternative to end date
+
+    // Description and notes
+    description: { type: String, maxlength: 500 },
+
+    // Tracking
+    createdBy: { type: String, default: "Admin" },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now },
+
+    // Usage tracking
+    usageCount: { type: Number, default: 0 },
+    maxUsage: { type: Number }, // Optional usage limit
+  },
+  { _id: false }
+);
+
 // Main Product schema
 const productSchema = new Schema(
   {
@@ -234,7 +291,13 @@ const productSchema = new Schema(
       type: Number,
       default: null,
     },
+    // ✅ NEW: Discount Configuration
+    discountConfig: discountConfigSchema,
 
+    // ✅ NEW: Quick discount access fields
+    hasActiveDiscount: { type: Boolean, default: false },
+    currentDiscountPrice: { type: Number },
+    discountValidUntil: { type: Date },
     // Flags & visibility
     visibility: {
       type: String,
@@ -322,6 +385,52 @@ const productSchema = new Schema(
   },
   { timestamps: true }
 );
+// ✅ NEW: Method to calculate discount details
+productSchema.methods.calculateDiscountDetails = function () {
+  if (!this.discountConfig || !this.discountConfig.isActive) {
+    return null;
+  }
+
+  const { originalPrice, newPrice } = this.discountConfig;
+  const discountAmount = originalPrice - newPrice;
+  const discountPercentage = ((discountAmount / originalPrice) * 100).toFixed(
+    2
+  );
+
+  return {
+    discountAmount,
+    discountPercentage,
+    savings: discountAmount,
+  };
+};
+
+// ✅ NEW: Method to check if discount is currently valid
+productSchema.methods.isDiscountValid = function () {
+  if (!this.discountConfig || !this.discountConfig.isActive) {
+    return false;
+  }
+
+  const now = new Date();
+  const { startDate, endDate } = this.discountConfig;
+
+  if (now < startDate) {
+    return false; // Discount hasn't started yet
+  }
+
+  if (endDate && now > endDate) {
+    return false; // Discount has expired
+  }
+
+  return true;
+};
+
+// ✅ NEW: Method to get effective price (with or without discount)
+productSchema.methods.getEffectivePrice = function () {
+  if (this.isDiscountValid()) {
+    return this.discountConfig.newPrice;
+  }
+  return this.NormalPrice || this.discountConfig?.originalPrice || 0;
+};
 
 // ✅ UPDATED: Helper method to get product's overall order status
 productSchema.methods.getOverallOrderStatus = function () {
@@ -359,8 +468,9 @@ productSchema.methods.needsReorder = function () {
   return currentStock <= reorderThreshold && !hasActiveOrders;
 };
 
-// Auto-generate productId if missing
+// ✅ UPDATED: Pre-save hook with discount processing
 productSchema.pre("save", async function (next) {
+  // Auto-generate productId if missing
   if (!this.productId) {
     const prefix =
       this.productType === "Parent"
@@ -369,7 +479,6 @@ productSchema.pre("save", async function (next) {
         ? "C"
         : "N";
 
-    // Find the highest existing ID with this prefix
     const highest = await this.constructor
       .findOne({ productId: new RegExp(`^${prefix}`) })
       .sort({ productId: -1 })
@@ -384,7 +493,7 @@ productSchema.pre("save", async function (next) {
     this.productId = `${prefix}${String(nextNum).padStart(4, "0")}`;
   }
 
-  // ✅ AUTO-UPDATE: Update quick access fields based on orderStock array
+  // Update quick access fields based on orderStock array
   if (this.orderStock) {
     const activeOrders = this.orderStock.filter((order) =>
       ["pending", "order_placed", "order_confirmed"].includes(order.status)
@@ -401,6 +510,39 @@ productSchema.pre("save", async function (next) {
         ...activeOrders.map((order) => order.requestedAt)
       );
     }
+  }
+
+  // ✅ NEW: Process discount configuration
+  if (this.discountConfig) {
+    // Auto-generate discount ID if missing
+    if (!this.discountConfig.discountId) {
+      this.discountConfig.discountId = `DISC-${this.productId}-${Date.now()}`;
+    }
+
+    // Calculate discount amount and percentage
+    if (this.discountConfig.originalPrice && this.discountConfig.newPrice) {
+      this.discountConfig.discountAmount =
+        this.discountConfig.originalPrice - this.discountConfig.newPrice;
+      this.discountConfig.discountPercentage =
+        (this.discountConfig.discountAmount /
+          this.discountConfig.originalPrice) *
+        100;
+    }
+
+    // Update quick access fields
+    this.hasActiveDiscount = this.isDiscountValid();
+    this.currentDiscountPrice = this.hasActiveDiscount
+      ? this.discountConfig.newPrice
+      : null;
+    this.discountValidUntil = this.discountConfig.endDate;
+
+    // Update timestamps
+    this.discountConfig.updatedAt = new Date();
+  } else {
+    // Clear discount fields if no discount config
+    this.hasActiveDiscount = false;
+    this.currentDiscountPrice = null;
+    this.discountValidUntil = null;
   }
 
   next();

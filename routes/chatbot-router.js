@@ -1,19 +1,42 @@
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
-const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
-const qrcode = require("qrcode-terminal");
+const axios = require("axios"); // For HTTP requests to Ultramsg API
 const path = require("path");
 const fs = require("fs");
 const moment = require("moment");
 const Category = require("../models/Category");
 const Product = require("../models/Product");
-const mkdirp = require("mkdirp"); // You might need to install this: npm install mkdirp
+const Customer = require("../models/customer");
+const mkdirp = require("mkdirp");
+const sharp = require("sharp");
 
-// At the top of your file, add:
-const referralImagesDir = path.join(__dirname, "../referral_images");
-mkdirp.sync(referralImagesDir);
+// Ultramsg Configuration
+const ULTRAMSG_CONFIG = {
+  instanceId: "instance100248",
+  token: "qh8kyj9myo1o07a2",
+  baseURL: "https://api.ultramsg.com",
+  botNumber: "6281818185522",
+  mediaUploadURL: "https://api.ultramsg.com/upload", // Add this line
+};
 
+// Create referral images directory
+const referralvideosDir = path.join(__dirname, "../referral_images");
+mkdirp.sync(referralvideosDir);
+
+// MongoDB Connection
+const mongoURI =
+  "mongodb+srv://realahmedali4:HcPqEvYvWK4Yvrgs@cluster0.cjdum.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
+
+mongoose
+  .connect(mongoURI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
+  .then(() => console.log("MongoDB connected successfully"))
+  .catch((err) => console.error("MongoDB connection error:", err));
+
+// Counter model for order IDs
 const Counter = mongoose.model(
   "Counter",
   new mongoose.Schema({
@@ -29,6 +52,306 @@ async function getNextSequence(name) {
     { new: true, upsert: true }
   );
   return counter.seq;
+}
+
+// ============================================================================
+// ULTRAMSG API FUNCTIONS
+// ============================================================================
+
+/**
+ * Send a text message via Ultramsg API
+ */
+async function sendWhatsAppMessage(to, content) {
+  try {
+    // Clean phone number (remove @ symbols if present)
+    const cleanTo = to.replace(/@c\.us|@s\.whatsapp\.net/g, "");
+
+    console.log(
+      `📤 Sending message to ${cleanTo}: "${content.substring(0, 50)}..."`
+    );
+
+    const response = await axios.post(
+      `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/chat`,
+      `token=${ULTRAMSG_CONFIG.token}&to=${cleanTo}&body=${encodeURIComponent(
+        content
+      )}`,
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
+    );
+
+    if (response.data.sent) {
+      console.log(`✅ Message sent successfully to ${cleanTo}`);
+      return { success: true, data: response.data };
+    } else {
+      console.error(`❌ Failed to send message:`, response.data);
+      return { success: false, error: response.data };
+    }
+  } catch (error) {
+    console.error(
+      `❌ Error sending WhatsApp message to ${to}:`,
+      error.response?.data || error.message
+    );
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Send an image with caption via Ultramsg API
+ */
+async function sendImageWithCaption(to, imagePath, caption) {
+  try {
+    const cleanTo = to.replace(/@c\.us|@s\.whatsapp\.net/g, "");
+
+    // Check if image exists
+    if (!fs.existsSync(imagePath)) {
+      console.error(`Image does not exist: ${imagePath}`);
+      await sendWhatsAppMessage(to, caption);
+      return;
+    }
+
+    // Convert image to base64
+    const imageBuffer = fs.readFileSync(imagePath);
+    const base64Image = imageBuffer.toString("base64");
+    const mimeType = "image/jpeg";
+
+    const formData = new URLSearchParams();
+    formData.append("token", ULTRAMSG_CONFIG.token);
+    formData.append("to", cleanTo);
+    formData.append("image", `data:${mimeType};base64,${base64Image}`);
+    formData.append("caption", caption);
+
+    const response = await axios.post(
+      `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/image`,
+      formData,
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
+    );
+
+    console.log("📸 Image sent successfully");
+    return { success: true, data: response.data };
+  } catch (error) {
+    console.error("❌ Error sending image:", error);
+    // Fallback to sending just the text
+    await sendWhatsAppMessage(to, caption);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Download media from Ultramsg
+ */
+async function downloadMedia(mediaUrl, filename) {
+  try {
+    const response = await axios({
+      method: "GET",
+      url: mediaUrl,
+      responseType: "stream",
+    });
+
+    const filePath = path.join(referralvideosDir, filename);
+    const writer = fs.createWriteStream(filePath);
+
+    response.data.pipe(writer);
+
+    return new Promise((resolve, reject) => {
+      writer.on("finish", () => resolve(filePath));
+      writer.on("error", reject);
+    });
+  } catch (error) {
+    console.error("❌ Error downloading media:", error);
+    throw error;
+  }
+}
+
+// ============================================================================
+// WEBHOOK ROUTES FOR RECEIVING MESSAGES
+// ============================================================================
+
+/**
+ * Webhook endpoint to receive messages from Ultramsg
+ */
+
+router.post("/webhook", express.json(), async (req, res) => {
+  try {
+    console.log("=== WEBHOOK RECEIVED ===");
+    console.log("Webhook data:", JSON.stringify(req.body, null, 2));
+
+    const data = req.body;
+
+    // Handle UltraMsg webhook structure
+    if (data.event_type === "message_received") {
+      const messageData = data.data;
+      const message = {
+        from: messageData.from,
+        body: messageData.body || "",
+        hasMedia: messageData.media !== "",
+        type: messageData.type || "text",
+        timestamp: messageData.time,
+        pushname: messageData.pushname || "",
+      };
+
+      console.log("=== MESSAGE RECEIVED ===");
+      console.log("From:", message.from);
+      console.log("Body:", message.body);
+      console.log("Type:", message.type);
+      console.log(
+        "Timestamp:",
+        new Date(message.timestamp * 1000).toISOString()
+      );
+
+      // Handle different message types
+      if (messageData.media) {
+        if (message.type === "image") {
+          console.log("📎 Image detected - processing...");
+          message.hasMedia = true;
+          message.media = {
+            mimetype: "image/jpeg",
+            caption: messageData.caption || "",
+            url: messageData.media,
+          };
+
+          try {
+            const filename = `media_${Date.now()}_image.jpg`;
+            const localPath = await downloadMedia(messageData.media, filename);
+            message.localMediaPath = localPath;
+            message.mediaInfo = message.media;
+            console.log(`📹 Media downloaded: ${localPath}`);
+          } catch (error) {
+            console.error("❌ Error downloading media:", error);
+            await sendWhatsAppMessage(
+              message.from,
+              "❌ Unable to process your media file. Please try sending it again."
+            );
+            return res.status(200).json({ status: "received" });
+          }
+        } else if (message.type === "video") {
+          console.log("📎 Video detected - processing...");
+          message.hasMedia = true;
+          message.media = {
+            mimetype: "video/mp4",
+            caption: messageData.caption || "",
+            url: messageData.media,
+          };
+
+          try {
+            const filename = `media_${Date.now()}_video.mp4`;
+            const localPath = await downloadMedia(messageData.media, filename);
+            message.localMediaPath = localPath;
+            message.mediaInfo = message.media;
+            console.log(`📹 Video downloaded: ${localPath}`);
+          } catch (error) {
+            console.error("❌ Error downloading video:", error);
+            await sendWhatsAppMessage(
+              message.from,
+              "❌ Unable to process your video file. Please try sending it again."
+            );
+            return res.status(200).json({ status: "received" });
+          }
+        } else if (message.type === "document") {
+          console.log("📎 Document detected - processing...");
+          message.hasMedia = true;
+          message.media = {
+            mimetype: messageData.mimetype || "application/octet-stream",
+            filename: messageData.filename || "document",
+            url: messageData.media,
+          };
+
+          try {
+            const filename = `media_${Date.now()}_${
+              messageData.filename || "document"
+            }`;
+            const localPath = await downloadMedia(messageData.media, filename);
+            message.localMediaPath = localPath;
+            message.mediaInfo = message.media;
+            console.log(`📄 Document downloaded: ${localPath}`);
+          } catch (error) {
+            console.error("❌ Error downloading document:", error);
+            await sendWhatsAppMessage(
+              message.from,
+              "❌ Unable to process your document. Please try sending it again."
+            );
+            return res.status(200).json({ status: "received" });
+          }
+        }
+      }
+
+      // Clean phone number for processing
+      const phone = message.from.replace(/@c\.us|@s\.whatsapp\.net/g, "");
+
+      // Process the message using existing logic
+      await processChatMessage(phone, message.body, message);
+      return res.status(200).json({ status: "received" });
+    }
+
+    // Handle other webhook events (status updates, etc)
+    if (data.event_type) {
+      console.log(`Received ${data.event_type} event`);
+      return res.status(200).json({ status: "ignored" });
+    }
+
+    console.log("Received invalid webhook payload");
+    return res.status(400).json({ error: "Invalid payload" });
+  } catch (error) {
+    console.error("❌ Webhook error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+/**
+ * Route to check webhook status
+ */
+router.get("/webhook-status", (req, res) => {
+  res.json({
+    status: "active",
+    timestamp: new Date().toISOString(),
+    config: {
+      instanceId: ULTRAMSG_CONFIG.instanceId,
+      hasToken: !!ULTRAMSG_CONFIG.token,
+    },
+  });
+});
+
+/**
+ * Route to get instance info
+ */
+router.get("/instance-info", async (req, res) => {
+  try {
+    const response = await axios.get(
+      `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/instance/status?token=${ULTRAMSG_CONFIG.token}`
+    );
+
+    res.json(response.data);
+  } catch (error) {
+    console.error("❌ Error getting instance info:", error);
+    res.status(500).json({ error: "Failed to get instance info" });
+  }
+});
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+function normalizeWhatsAppId(rawPhone) {
+  // For Ultramsg, we just need the clean phone number
+  return rawPhone.replace(/\D/g, "");
+}
+
+// Replace your cleanPhoneNumber function with:
+function cleanPhoneNumber(phoneNumber) {
+  // Remove WhatsApp suffixes if present
+  let cleanNumber = phoneNumber.replace(/@(c\.us|s\.whatsapp\.net)$/, "");
+  // Remove all non-digit characters
+  cleanNumber = cleanNumber.replace(/\D/g, "");
+  // Ensure it starts with country code without + or 00
+  if (cleanNumber.startsWith("0")) {
+    cleanNumber = "62" + cleanNumber.substring(1); // Replace leading 0 with 62 for Indonesia
+  }
+  return cleanNumber;
 }
 
 // ─── When someone adds to cart, push a single "cart-not-paid" order ────────────
@@ -53,179 +376,37 @@ async function recordCartOrder(customer) {
   };
 
   customer.orderHistory.push(cartOrder);
-
-  // ← NEW
   customer.latestOrderId = orderId;
   customer.currentOrderStatus = "cart-not-paid";
 
   await customer.save();
 }
 
-// Import Customer model
-const Customer = require("../models/customer");
-
-// MongoDB Connection
-const mongoURI =
-  "mongodb+srv://realahmedali4:HcPqEvYvWK4Yvrgs@cluster0.cjdum.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
-
-// Connect to MongoDB
-mongoose
-  .connect(mongoURI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => console.log("MongoDB connected successfully"))
-  .catch((err) => console.error("MongoDB connection error:", err));
-
-// Initialize WhatsApp Web.js client
-const client = new Client({
-  authStrategy: new LocalAuth(),
-  puppeteer: {
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  },
-});
-
-// Add this before initializing the client
-client.on("authenticated", () => {
-  console.log("Client authenticated successfully");
-});
-
-client.on("auth_failure", (error) => {
-  console.error("Authentication failure:", error);
-});
-
-client.on("message", async (message) => {
+// Helper function for sending reliable sequential messages
+async function sendSequentialMessages(
+  phoneNumber,
+  message1,
+  message2,
+  delayMs = 5000
+) {
   try {
-    const from = message.from; // e.g., '923325173276@c.us'
-    const phone = from.replace("@c.us", "");
+    console.log(`Sending first message`);
+    await sendWhatsAppMessage(phoneNumber, message1);
 
-    let customer = await Customer.findOne({ phoneNumber: phone });
-
-    // Handle Media Messages First
-    if (message.hasMedia && customer) {
-      const media = await message.downloadMedia();
-
-      // ✅ Referral Image Upload
-      if (
-        media.mimetype.startsWith("image/") &&
-        customer.conversationState === "referral_create_image"
-      ) {
-        const imageId = "IMG" + Date.now().toString().slice(-8);
-        const imageFilename = `${imageId}.jpg`;
-        const imagePath = path.join(referralImagesDir, imageFilename);
-
-        fs.writeFileSync(imagePath, media.data, "base64");
-
-        if (!customer.referralImages) customer.referralImages = [];
-
-        customer.referralImages.push({
-          imageId,
-          imagePath: `/referral_images/${imageFilename}`,
-          approvalDate: new Date(),
-          sharedWith: [],
-        });
-
-        await customer.save();
-
-        await sendWhatsAppMessage(
-          from,
-          `Video #${customer.referralImages.length}\n` +
-            `Approved on: ${new Date().toLocaleDateString()}\n` +
-            `Duration: 3 min\n` +
-            `Shared till now: 0 contact`
-        );
-
-        await customer.updateConversationState("referral_add_contacts");
-
-        return;
+    console.log(`Waiting ${delayMs}ms before sending second message`);
+    setTimeout(async () => {
+      try {
+        await sendWhatsAppMessage(phoneNumber, message2);
+        console.log(`Second message sent successfully`);
+      } catch (error) {
+        console.error(`Error sending second message: ${error.message}`);
       }
-
-      // ✅ Handle Contact (vCard)
-      if (media.mimetype === "text/vcard") {
-        const vcard = media.data.toString("utf8");
-
-        let contactName = "";
-        const nameMatch = vcard.match(/FN:(.*)/i);
-        if (nameMatch && nameMatch[1]) contactName = nameMatch[1].trim();
-
-        let contactNumber = "";
-        const phoneMatch = vcard.match(/TEL;[^:]*:(.*)/i);
-        if (phoneMatch && phoneMatch[1]) {
-          contactNumber = phoneMatch[1].trim().replace(/[^0-9+]/g, "");
-
-          if (!contactNumber.includes("@c.us")) {
-            if (!contactNumber.startsWith("+")) {
-              contactNumber = "+" + contactNumber;
-            }
-            contactNumber = contactNumber.replace("+", "") + "@c.us";
-          }
-        }
-
-        if (
-          contactNumber &&
-          ["referral_add_contacts", "referral_contact_number"].includes(
-            customer.conversationState
-          )
-        ) {
-          if (
-            !customer.referralImages ||
-            customer.referralImages.length === 0
-          ) {
-            await sendWhatsAppMessage(
-              from,
-              "Error: No referral video found. Please create a video first."
-            );
-            await sendMainMenu(from, customer);
-            return;
-          }
-
-          const latestImage =
-            customer.referralImages[customer.referralImages.length - 1];
-
-          latestImage.sharedWith.push({
-            name: contactName || "Contact",
-            phoneNumber: contactNumber,
-            dateShared: new Date(),
-            status: "pending",
-          });
-
-          await customer.save();
-
-          await sendWhatsAppMessage(from, contactNumber.replace("@c.us", ""));
-
-          await customer.updateConversationState("referral_more_contacts");
-          await sendWhatsAppMessage(
-            from,
-            "Do you want to refer more friends?\n1. Yes\n2. No"
-          );
-
-          return;
-        }
-      }
-    }
-
-    // ✅ Process Normal Text Messages
-    await processChatMessage(from, message.body, message);
-  } catch (err) {
-    console.error("Error handling WhatsApp message:", err);
+    }, delayMs);
+  } catch (error) {
+    console.error(`Error in sendSequentialMessages: ${error.message}`);
   }
-});
-
-function normalizeWhatsAppId(rawPhone) {
-  if (rawPhone.includes("@c.us")) return rawPhone;
-  return rawPhone.replace(/\D/g, "") + "@c.us";
 }
 
-function cleanPhoneNumber(phoneNumber) {
-  // Remove @c.us, @s.whatsapp.net, or any similar suffix
-  let cleanNumber = phoneNumber.replace(/@(c\.us|s\.whatsapp\.net)$/, "");
-
-  // Remove any non-digit characters
-  cleanNumber = cleanNumber.replace(/\D/g, "");
-
-  return cleanNumber;
-}
 // Helper function to find product by ID with better fallback for discounted products
 function findProductById(productId) {
   // First try to find the product in the regular product database
@@ -243,7 +424,6 @@ function findProductById(productId) {
   }
 
   // If not found, check if it's a discounted product
-  // We need to get the base product ID and merge with discount info
   const allDiscountProducts = [];
   for (let i = 1; i <= 5; i++) {
     allDiscountProducts.push(...getDiscountProductsForCategory(i.toString()));
@@ -275,82 +455,43 @@ function findProductById(productId) {
 
   return null;
 }
-// New helper function for sending reliable sequential messages
-async function sendSequentialMessages(
-  phoneNumber,
-  message1,
-  message2,
-  delayMs = 5000
-) {
-  // Flag to track delivery in the customer's session
-  let customer = await Customer.findOne({ phoneNumber });
 
-  // Create a unique message tracking ID
-  const messageTrackerId = `msg_${Date.now()}`;
+// Simplified function to get all discounted products
+async function getDiscountedProducts() {
+  console.log("Fetching all products with active discounts");
 
-  // First message
   try {
-    console.log(`Sending first message with tracking ID ${messageTrackerId}`);
-    await client.sendMessage(phoneNumber, message1);
+    // Query for products with active discounts
+    const query = {
+      hasActiveDiscount: true,
+      "discountConfig.isActive": true,
+      visibility: "Public",
+      Stock: { $gt: 0 }, // Only show products with stock
+    };
 
-    // Store in database that we've sent the first message
-    if (customer) {
-      if (!customer.contextData) customer.contextData = {};
-      customer.contextData[messageTrackerId] = "first_sent";
-      await customer.save();
-    }
+    // Fetch products from database
+    const products = await Product.find(query)
+      .select("productId productName discountConfig NormalPrice Stock")
+      .limit(20) // Limit to 20 products for better UX
+      .lean();
 
-    // Debug log
-    console.log(
-      `First message sent successfully, waiting ${delayMs}ms before sending second`
-    );
+    console.log(`Found ${products.length} products with active discounts`);
 
-    // Set up a timer to send the second message after delay
-    setTimeout(async () => {
-      try {
-        console.log(
-          `Sending second message for tracking ID ${messageTrackerId}`
-        );
-        await client.sendMessage(phoneNumber, message2);
+    // Transform products to match the expected format
+    const transformedProducts = products.map((product) => ({
+      id: product.productId,
+      name: product.productName,
+      originalPrice:
+        product.discountConfig.originalPrice || product.NormalPrice,
+      discountPrice: product.discountConfig.newPrice,
+      stock: product.Stock || 0,
+      discountPercentage: product.discountConfig.discountPercentage || 0,
+    }));
 
-        // Update tracking status
-        customer = await Customer.findOne({ phoneNumber });
-        if (customer && customer.contextData) {
-          customer.contextData[messageTrackerId] = "both_sent";
-          await customer.save();
-
-          // Clean up tracking data after another delay
-          setTimeout(async () => {
-            customer = await Customer.findOne({ phoneNumber });
-            if (
-              customer &&
-              customer.contextData &&
-              customer.contextData[messageTrackerId]
-            ) {
-              delete customer.contextData[messageTrackerId];
-              await customer.save();
-            }
-          }, 10000);
-        }
-
-        console.log(
-          `Second message sent successfully for tracking ID ${messageTrackerId}`
-        );
-      } catch (error) {
-        console.error(`Error sending second message: ${error.message}`);
-        // One more attempt with direct sendWhatsAppMessage
-        try {
-          await sendWhatsAppMessage(phoneNumber, message2);
-        } catch (finalError) {
-          console.error(`Final attempt failed: ${finalError.message}`);
-        }
-      }
-    }, delayMs);
+    return transformedProducts;
   } catch (error) {
-    console.error(`Error sending first message: ${error.message}`);
-    // Fallback to standard message sending
-    await sendWhatsAppMessage(phoneNumber, message1);
-    setTimeout(() => sendWhatsAppMessage(phoneNumber, message2), delayMs);
+    console.error("Error fetching discount products:", error);
+    return [];
   }
 }
 
@@ -416,19 +557,6 @@ function findSubCategoryById(categoryId, subCategoryId) {
   return category.subCategories.find((sub) => sub.id === subCategoryId);
 }
 
-// Generate and display QR code
-client.on("qr", (qr) => {
-  console.log("QR Code received, scan with WhatsApp:");
-  qrcode.generate(qr, { small: true });
-});
-
-// Client ready event
-client.on("ready", () => {
-  console.log("WhatsApp client is ready!");
-});
-
-const sharp = require("sharp");
-
 // Function to convert image into the required format (e.g., JPEG or PNG)
 const convertImage = async (imageBuffer) => {
   try {
@@ -442,6 +570,7 @@ const convertImage = async (imageBuffer) => {
     throw new Error("Error converting image");
   }
 };
+
 // ─── At final checkout, bump to "order-made-not-paid" ─────────────────────────
 async function createOrder(customer) {
   const seq = await getNextSequence("orderId");
@@ -484,8 +613,6 @@ async function createOrder(customer) {
   };
 
   customer.orderHistory.push(newOrder);
-
-  // ← NEW
   customer.latestOrderId = orderId;
   customer.currentOrderStatus = "order-made-not-paid";
 
@@ -503,44 +630,6 @@ async function createOrder(customer) {
 
   await customer.save();
   return orderId;
-}
-
-async function sendWhatsAppMessage(to, content) {
-  try {
-    console.log(
-      `Attempting to send message to ${to}: "${content.substring(0, 50)}..."`
-    );
-    await client.sendMessage(to, content);
-    console.log(`Successfully sent message to ${to}`);
-  } catch (error) {
-    console.error(`Error sending WhatsApp message to ${to}:`, error);
-    // Try reconnecting the client if there's an authentication error
-    if (
-      error.message.includes("not authenticated") ||
-      error.message.includes("connection closed")
-    ) {
-      console.log("Attempting to reinitialize the WhatsApp client...");
-      client.initialize();
-    }
-  }
-}
-// Function to send an image with caption
-async function sendImageWithCaption(to, imagePath, caption) {
-  try {
-    // Check if image exists
-    if (!fs.existsSync(imagePath)) {
-      console.error(`Image does not exist: ${imagePath}`);
-      await sendWhatsAppMessage(to, caption); // Send just the caption if image doesn't exist
-      return;
-    }
-
-    const media = MessageMedia.fromFilePath(imagePath);
-    await client.sendMessage(to, media, { caption });
-  } catch (error) {
-    console.error("Error sending image:", error);
-    // Fallback to sending just the text
-    await sendWhatsAppMessage(to, caption);
-  }
 }
 
 async function processChatMessage(phoneNumber, text, message) {
@@ -564,8 +653,6 @@ async function processChatMessage(phoneNumber, text, message) {
         conversationState: "greeting",
       });
       await customer.save();
-
-      // if not already imported
 
       // Check if we should send a pickup reminder
       if (
@@ -628,7 +715,6 @@ async function processChatMessage(phoneNumber, text, message) {
 
     // Process based on conversation state
     switch (customer.conversationState) {
-      // Add this to the greeting case
       case "greeting":
         // Save customer name
         customer.name = text;
@@ -643,7 +729,6 @@ async function processChatMessage(phoneNumber, text, message) {
         await sendMainMenu(phoneNumber, customer);
         break;
 
-        break;
       case "main_menu":
         // Process main menu selection
         switch (text) {
@@ -668,33 +753,12 @@ async function processChatMessage(phoneNumber, text, message) {
             }
             break;
 
-          // Add this to the switch statement in processChatMessage function to handle discount selection
-          // In the main menu "case 3" section - simplify this to just set up initial state
-
-          // In the main menu handler for "case 3"
           case "3":
-            // Only set up the initial state and send the categories menu
-            await customer.updateConversationState("discounts");
-
-            // Send welcome message for discounts
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "First Order: 10% off your first order on anything that is not discounted\n"
-            );
-
-            // Send the discount categories menu
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "🎁 *Available Discounts* 🎁\n\n" +
-                "Please select a discount category:\n\n" +
-                "1. General\n" +
-                "2. For your referral\n" +
-                "3. As forman for your referral\n" +
-                "4. As forman\n" +
-                "5. Only for you\n\n" +
-                "Type 0 to return to main menu."
-            );
+            // Directly show discounted products without categories
+            await customer.updateConversationState("discount_products");
+            await sendDiscountedProductsList(phoneNumber, customer);
             break;
+
           case "4":
             // Learn about referral program - update state and immediately process
             await customer.updateConversationState("referral");
@@ -753,7 +817,6 @@ async function processChatMessage(phoneNumber, text, message) {
               `6. Return to Main Menu`;
 
             await sendWhatsAppMessage(phoneNumber, updatedProfileMessage);
-
             break;
 
           case "7":
@@ -837,8 +900,9 @@ async function processChatMessage(phoneNumber, text, message) {
           );
         }
         break;
+
       case "product_details":
-        // user answered “1- Add to cart”
+        // user answered "1- Add to cart"
         if (text === "1") {
           // fetch the real product
           const product = await Product.findById(
@@ -847,12 +911,12 @@ async function processChatMessage(phoneNumber, text, message) {
           if (!product) {
             await sendWhatsAppMessage(
               phoneNumber,
-              "Oops, I can’t find that product right now. Let’s start over."
+              "Oops, I can't find that product right now. Let's start over."
             );
             return sendMainMenu(phoneNumber, customer);
           }
 
-          // if it’s a Child product, go ask for weight
+          // if it's a Child product, go ask for weight
           if (product.productType === "Child") {
             // build weight options from all child variants under the same parent
             const siblingVariants = await Product.find(
@@ -861,13 +925,13 @@ async function processChatMessage(phoneNumber, text, message) {
                 productType: "Child",
                 visibility: "Public",
               },
-              "varianceName priceAfterDiscount specifications.weight"
+              "varianceName NormalPrice specifications.weight"
             );
 
             let weightMsg = `Please pick the weight option :\n\n`;
             siblingVariants.forEach((v, i) => {
               const w = v.specifications?.[0]?.weight ?? "N/A";
-              const price = v.priceAfterDiscount ?? "N/A";
+              const price = v.NormalPrice ?? "N/A";
               weightMsg += `${i + 1}. ${w}kg    -${price}rp\n`;
             });
 
@@ -879,7 +943,7 @@ async function processChatMessage(phoneNumber, text, message) {
             return sendWhatsAppMessage(phoneNumber, weightMsg);
           }
 
-          // otherwise it’s a Normal (no‐weight) product: straight to quantity
+          // otherwise it's a Normal (no‐weight) product: straight to quantity
           await customer.updateConversationState("select_quantity");
           await sendWhatsAppMessage(
             phoneNumber,
@@ -946,7 +1010,7 @@ async function processChatMessage(phoneNumber, text, message) {
         });
         siblingVariants.forEach((v, i) => {
           const w = v.specifications?.[0]?.weight ?? "";
-          const p = v.priceAfterDiscount ?? 0;
+          const p = v.NormalPrice ?? 0;
           msg += `${i + 1}- ${w} pack - Rp ${p}\n`;
         });
 
@@ -962,7 +1026,7 @@ async function processChatMessage(phoneNumber, text, message) {
           const finalProd = await Product.findById(
             customer.contextData.productId
           );
-          const unitPrice = finalProd.priceAfterDiscount || 0;
+          const unitPrice = finalProd.NormalPrice || 0;
           const totalLine = unitPrice * buyQty;
 
           // 1) Push item into cart
@@ -982,7 +1046,7 @@ async function processChatMessage(phoneNumber, text, message) {
           );
           await customer.save();
 
-          // 2) Record a new “cart-not-paid” order immediately
+          // 2) Record a new "cart-not-paid" order immediately
           await recordCartOrder(customer);
 
           // 3) Move to post_add_to_cart state
@@ -1039,6 +1103,243 @@ async function processChatMessage(phoneNumber, text, message) {
             break;
         }
         break;
+
+      case "pickup_date_select": {
+        await customer.updateConversationState("pickup_date_main");
+        break;
+      }
+
+      case "pickup_date_main": {
+        if (!["1", "2", "3"].includes(text.trim())) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Please choose a valid option:\n1. Today\n2. Tomorrow\n3. Later"
+          );
+          return;
+        }
+
+        const today = moment().format("YYYY-MM-DD");
+        const tomorrow = moment().add(1, "day").format("YYYY-MM-DD");
+
+        switch (text.trim()) {
+          case "1":
+            customer.pickupPlan = { date: today };
+            break;
+          case "2":
+            customer.pickupPlan = { date: tomorrow };
+            break;
+          case "3":
+            // Go to extended 13-day calendar
+            const dateOptions = [];
+            for (let i = 0; i < 13; i++) {
+              dateOptions.push(moment().add(i, "days"));
+            }
+
+            customer.pickupDateList = dateOptions.map((d) =>
+              d.format("YYYY-MM-DD")
+            );
+            await customer.save();
+
+            let msg = "📅 *Select a pickup date (from the next 13 days):*\n";
+            msg += "--------------------------------------------\n";
+            dateOptions.forEach((date, index) => {
+              if (index === 0) {
+                msg += `${index + 1}. Today\n`;
+              } else if (index === 1) {
+                msg += `${index + 1}. Tomorrow\n`;
+              } else {
+                msg += `${index + 1}. ${date.format("Do MMMM (ddd)")}\n`;
+              }
+            });
+
+            await customer.updateConversationState(
+              "pickup_date_select_confirm"
+            );
+            await sendWhatsAppMessage(phoneNumber, msg);
+            return;
+
+          default:
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Invalid selection. Please choose 1 (Today), 2 (Tomorrow), or 3 (Later)."
+            );
+            return;
+        }
+
+        await customer.updateConversationState("pickup_time_select");
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ Got it! You're picking up on *${customer.pickupPlan.date}*.\n\n` +
+            `🕒 Now select your preferred pickup time slot:\n\n` +
+            `1. 6 AM – 9 AM\n` +
+            `2. 9 AM – 12 PM\n` +
+            `3. 12 PM – 3 PM\n` +
+            `4. 3 PM – 6 PM\n` +
+            `5. 6 PM – 9 PM`
+        );
+        break;
+      }
+
+      case "pickup_date_select_confirm": {
+        console.log("🚨 [pickup_date_select_confirm] Raw text:", text);
+
+        const idx = parseInt(text.trim()) - 1;
+        console.log("📍 Parsed index:", idx);
+        console.log("📍 customer.pickupDateList:", customer.pickupDateList);
+
+        if (
+          !customer.pickupDateList ||
+          !Array.isArray(customer.pickupDateList)
+        ) {
+          console.log("❌ pickupDateList is missing or not an array");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "⚠️ Something went wrong (date list missing). Please type *menu* and try again."
+          );
+          return;
+        }
+
+        if (isNaN(idx) || idx < 0 || idx >= customer.pickupDateList.length) {
+          console.log("❌ Invalid index selected:", idx);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Please select a valid number from the list (1–13)."
+          );
+          return;
+        }
+
+        const selectedDate = customer.pickupDateList[idx];
+        console.log("✅ Selected date from list:", selectedDate);
+
+        customer.pickupPlan.date = selectedDate;
+        customer.pickupDateList = []; // cleanup
+        await customer.save();
+
+        await customer.updateConversationState("pickup_time_select");
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ Got it! You're picking up on *${customer.pickupPlan.date}*.\n\n` +
+            `🕒 Now select your preferred pickup time slot:\n\n` +
+            `1. 6 AM – 9 AM\n` +
+            `2. 9 AM – 12 PM\n` +
+            `3. 12 PM – 3 PM\n` +
+            `4. 3 PM – 6 PM\n` +
+            `5. 6 PM – 9 PM`
+        );
+        break;
+      }
+
+      case "pickup_time_select": {
+        const timeOptions = {
+          1: "6 AM – 9 AM",
+          2: "9 AM – 12 PM",
+          3: "12 PM – 3 PM",
+          4: "3 PM – 6 PM",
+          5: "6 PM – 9 PM",
+        };
+
+        const timeSlot = timeOptions[text.trim()];
+        if (!timeSlot) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Please select a valid time slot (1–5)."
+          );
+          return;
+        }
+
+        customer.pickupPlan.timeSlot = timeSlot;
+
+        const lastOrder =
+          customer.orderHistory[customer.orderHistory.length - 1];
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ Your order is in progress and will be confirmed once payment is verified!\n\n` +
+            `🧾 Order ID: *#${lastOrder.orderId}*\n` +
+            `📦 We'll expect you on *${customer.pickupPlan.date}* between *${timeSlot}*.\n\n` +
+            `Thank you for shopping with us! 😊`
+        );
+
+        await customer.updateConversationState("main_menu");
+        await sendMainMenu(phoneNumber, customer);
+        break;
+      }
+
+      case "cart_view":
+        // Handle cart actions
+        switch (text.toLowerCase()) {
+          case "delete an item":
+            if (customer.cart.items.length === 0) {
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "Your cart is already empty."
+              );
+              await sendMainMenu(phoneNumber, customer);
+            } else {
+              await customer.updateConversationState("cart_delete_item");
+              let deleteMessage =
+                "Which item would you like to remove from your cart?\n\n";
+              customer.cart.items.forEach((item, index) => {
+                deleteMessage += `${index + 1}. ${item.productName} (${
+                  item.weight
+                }) - ${item.quantity} units - ${item.totalPrice}\n`;
+              });
+              deleteMessage +=
+                "\nEnter the number of the item you want to delete.";
+
+              await sendWhatsAppMessage(phoneNumber, deleteMessage);
+            }
+            break;
+
+          case "empty my cart fully":
+            await customer.updateConversationState("cart_confirm_empty");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Are you sure you want to empty your cart?\n\n1. Yes, empty my cart\n2. No, keep my items"
+            );
+            break;
+
+          case "proceed to payment":
+          case "checkout":
+            await proceedToCheckout(phoneNumber, customer);
+            break;
+
+          case "go back to menu":
+            await sendMainMenu(phoneNumber, customer);
+            break;
+
+          case "view product details":
+            if (customer.cart.items.length === 0) {
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "Your cart is empty. There are no product details to view."
+              );
+              await goToCart(phoneNumber, customer);
+            } else {
+              await customer.updateConversationState("cart_view_details");
+              let detailsMessage =
+                "Which product details would you like to view?\n\n";
+              customer.cart.items.forEach((item, index) => {
+                detailsMessage += `${index + 1}. ${item.productName} (${
+                  item.weight
+                })\n`;
+              });
+
+              await sendWhatsAppMessage(phoneNumber, detailsMessage);
+            }
+            break;
+
+          default:
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Please select a valid option from the cart menu, or type 0 to return to the main menu."
+            );
+            break;
+        }
+        break;
+
       case "pickup_date_select": {
         await customer.updateConversationState("pickup_date_main");
 
@@ -1740,195 +2041,189 @@ async function processChatMessage(phoneNumber, text, message) {
         await sendOrderSummary(phoneNumber, customer);
         break;
       // ─── CASE: checkout_summary ─────────────────────────────────
-      case "checkout_summary":
-        {
-          // Move into the "waiting for receipt" step
-          await customer.updateConversationState("checkout_wait_receipt");
+      case "checkout_summary": {
+        // Move into the "waiting for receipt" step
+        await customer.updateConversationState("checkout_wait_receipt");
 
-          // Prompt for the screenshot
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "📸 Please send a screenshot of your payment transfer receipt to continue."
-          );
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "💡 Make sure the *bank name*, *account holder*, and *amount paid* are clearly visible."
-          );
-        }
+        // Prompt for the screenshot
+        await sendSequentialMessages(
+          phoneNumber,
+          "📸 Please send a screenshot of your payment transfer receipt to continue.",
+          "💡 Make sure the *bank name*, *account holder*, and *amount paid* are clearly visible.",
+          1000
+        );
         break;
-      case "checkout_wait_receipt":
-        {
-          // Ensure the received message is an image
-          if (message.type !== "image") {
+      }
+
+      // ─── CASE: checkout_wait_receipt ────────────────────────────
+      case "checkout_wait_receipt": {
+        // Ensure the received message is an image
+        if (!message.hasMedia || message.type !== "image") {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❗ You must send a screenshot of your payment receipt to proceed."
+          );
+          break;
+        }
+
+        // Acknowledge receipt of the image
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "✅ Receipt received. Your payment will be confirmed by us in a moment"
+        );
+
+        try {
+          // For UltraMsg, we use the already downloaded media from webhook
+          if (!message.mediaInfo || !message.localMediaPath) {
             await sendWhatsAppMessage(
               phoneNumber,
-              "❗ You must send a screenshot of your payment receipt to proceed."
+              "❌ Error: Could not process your receipt image. Please try again."
             );
             break;
           }
 
-          // Acknowledge receipt of the image
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "✅ Receipt received, processing your payment..."
+          // Read the downloaded image file
+          const imageBuffer = fs.readFileSync(message.localMediaPath);
+          const base64Image = `data:${
+            message.mediaInfo.mimetype
+          };base64,${imageBuffer.toString("base64")}`;
+
+          // Check if we have a valid order ID, if not, find the most recent order
+          if (
+            !customer.contextData.latestOrderId &&
+            customer.orderHistory.length > 0
+          ) {
+            const recentOrders = [...customer.orderHistory].sort(
+              (a, b) => new Date(b.orderDate) - new Date(a.orderDate)
+            );
+
+            if (recentOrders.length > 0) {
+              customer.contextData.latestOrderId = recentOrders[0].orderId;
+              console.log(
+                `Found most recent order: ${customer.contextData.latestOrderId}`
+              );
+            }
+          }
+
+          // Try to find the order with the ID
+          const idxPay = customer.orderHistory.findIndex(
+            (o) => o.orderId === customer.contextData.latestOrderId
           );
 
-          try {
-            // For WhatsApp Web, we need to download the image data first
-            const media = await message.downloadMedia();
+          if (idxPay >= 0) {
+            // Store the image in base64 format directly
+            customer.orderHistory[idxPay].receiptImage = {
+              data: base64Image,
+              contentType: message.mediaInfo.mimetype,
+            };
 
-            if (!media || !media.data) {
+            // Store receipt image metadata
+            customer.orderHistory[idxPay].receiptImageMetadata = {
+              mimetype: message.mediaInfo.mimetype,
+              filename: `receipt-${Date.now()}.${
+                message.mediaInfo.mimetype.split("/")[1] || "jpeg"
+              }`,
+              timestamp: new Date(),
+              originalUrl: message.mediaInfo.url, // Store UltraMsg media URL for reference
+            };
+
+            // Update order status to 'pay-not-confirmed'
+            customer.orderHistory[idxPay].status = "pay-not-confirmed";
+            customer.currentOrderStatus = "pay-not-confirmed";
+
+            // Save the updated customer document
+            await customer.save();
+
+            console.log(
+              `Successfully saved receipt for order: ${customer.contextData.latestOrderId}`
+            );
+          } else {
+            console.log(
+              `Order not found: ${customer.contextData.latestOrderId}`
+            );
+
+            // Create new order if none exists
+            if (customer.cart.items && customer.cart.items.length > 0) {
+              const newOrderId = await createOrder(customer);
+              customer.contextData.latestOrderId = newOrderId;
+              customer.latestOrderId = newOrderId;
+              await customer.save();
+
+              const newIdxPay = customer.orderHistory.findIndex(
+                (o) => o.orderId === newOrderId
+              );
+              if (newIdxPay >= 0) {
+                // Store the image in base64 format directly
+                customer.orderHistory[newIdxPay].receiptImage = {
+                  data: base64Image,
+                  contentType: message.mediaInfo.mimetype,
+                };
+
+                // Store receipt image metadata
+                customer.orderHistory[newIdxPay].receiptImageMetadata = {
+                  mimetype: message.mediaInfo.mimetype,
+                  filename: `receipt-${Date.now()}.${
+                    message.mediaInfo.mimetype.split("/")[1] || "jpeg"
+                  }`,
+                  timestamp: new Date(),
+                  originalUrl: message.mediaInfo.url,
+                };
+
+                customer.orderHistory[newIdxPay].status = "pay-not-confirmed";
+                customer.currentOrderStatus = "pay-not-confirmed";
+
+                await customer.save();
+                console.log(
+                  `Successfully saved receipt for new order: ${newOrderId}`
+                );
+              }
+            } else {
               await sendWhatsAppMessage(
                 phoneNumber,
-                "❌ Error: Could not download your receipt image. Please try again."
+                "❌ Error: No items found in your cart. Please contact support."
               );
               break;
             }
+          }
 
-            // Convert the buffer to a base64 string and format it
-            const base64Image = `data:${
-              media.mimetype
-            };base64,${media.data.toString("base64")}`;
-
-            // Check if we have a valid order ID, if not, find the most recent order
-            if (
-              !customer.contextData.latestOrderId &&
-              customer.orderHistory.length > 0
-            ) {
-              const recentOrders = [...customer.orderHistory].sort(
-                (a, b) => new Date(b.orderDate) - new Date(a.orderDate)
-              );
-
-              if (recentOrders.length > 0) {
-                customer.contextData.latestOrderId = recentOrders[0].orderId;
-                console.log(
-                  `Found most recent order: ${customer.contextData.latestOrderId}`
-                );
-              }
-            }
-
-            // Try to find the order with the ID
-            const idxPay = customer.orderHistory.findIndex(
-              (o) => o.orderId === customer.contextData.latestOrderId
+          // Proceed to the next step (bank selection or other details)
+          if (customer.bankAccounts?.length) {
+            await customer.updateConversationState(
+              "checkout_select_saved_bank"
             );
-
-            if (idxPay >= 0) {
-              // Store the image in base64 format directly
-              customer.orderHistory[idxPay].receiptImage = {
-                data: base64Image, // Base64 encoded data from WhatsApp
-                contentType: media.mimetype, // Use the mimetype provided by WhatsApp
-              };
-
-              // Store receipt image metadata
-              customer.orderHistory[idxPay].receiptImageMetadata = {
-                mimetype: media.mimetype,
-                filename:
-                  media.filename ||
-                  `receipt-${Date.now()}.${
-                    media.mimetype.split("/")[1] || "jpeg"
-                  }`,
-                timestamp: new Date(),
-              };
-
-              // Store the media ID for reference if necessary
-              customer.orderHistory[idxPay].receiptImageId =
-                message.id._serialized;
-
-              // Update order status to 'pay-not-confirmed'
-              customer.orderHistory[idxPay].status = "pay-not-confirmed";
-              customer.currentOrderStatus = "pay-not-confirmed";
-
-              // Save the updated customer document
-              await customer.save();
-
-              console.log(
-                `Successfully saved receipt for order: ${customer.contextData.latestOrderId}`
-              );
-            } else {
-              console.log(
-                `Order not found: ${customer.contextData.latestOrderId}`
-              );
-
-              // Create new order if none exists
-              if (customer.cart.items && customer.cart.items.length > 0) {
-                const newOrderId = await customer.createOrder();
-                customer.contextData.latestOrderId = newOrderId;
-                customer.latestOrderId = newOrderId;
-                await customer.save();
-
-                const newIdxPay = customer.orderHistory.findIndex(
-                  (o) => o.orderId === newOrderId
-                );
-                if (newIdxPay >= 0) {
-                  // Store the image in base64 format directly
-                  customer.orderHistory[newIdxPay].receiptImage = {
-                    data: base64Image, // Base64 encoded data from WhatsApp
-                    contentType: media.mimetype, // Use the mimetype provided by WhatsApp
-                  };
-
-                  // Store receipt image metadata
-                  customer.orderHistory[newIdxPay].receiptImageMetadata = {
-                    mimetype: media.mimetype,
-                    filename:
-                      media.filename ||
-                      `receipt-${Date.now()}.${
-                        media.mimetype.split("/")[1] || "jpeg"
-                      }`,
-                    timestamp: new Date(),
-                  };
-
-                  customer.orderHistory[newIdxPay].receiptImageId =
-                    message.id._serialized;
-                  customer.orderHistory[newIdxPay].status = "pay-not-confirmed";
-                  customer.currentOrderStatus = "pay-not-confirmed";
-
-                  await customer.save();
-                  console.log(
-                    `Successfully saved receipt for new order: ${newOrderId}`
-                  );
-                }
-              } else {
-                await sendWhatsAppMessage(
-                  phoneNumber,
-                  "❌ Error: No items found in your cart. Please contact support."
-                );
-                break;
-              }
-            }
-
-            // Proceed to the next step (bank selection or other details)
-            if (customer.bankAccounts?.length) {
-              await customer.updateConversationState(
-                "checkout_select_saved_bank"
-              );
-              let msg = "*🏦 Select your saved bank account for payment:*\n\n";
-              customer.bankAccounts.forEach((b, i) => {
-                msg += `${i + 1}. ${
-                  b.bankName
-                } - Account: ${b.accountNumber.slice(0, 4)}xxxx (${
-                  b.accountHolderName
-                })\n`;
-              });
-              msg += `${
-                customer.bankAccounts.length + 1
-              }. Other Bank\n\nℹ️ To manage your saved bank accounts, visit your *Profile* from the Main Menu.`;
-              await sendWhatsAppMessage(phoneNumber, msg);
-            } else {
-              await customer.updateConversationState("checkout_enter_name");
-              await sendWhatsAppMessage(
-                phoneNumber,
-                "👤 What is the full name of the account you are paying from?"
-              );
-            }
-          } catch (error) {
-            console.error("Error processing payment receipt:", error);
+            let msg = "*🏦 Select your saved bank account for payment:*\n\n";
+            customer.bankAccounts.forEach((b, i) => {
+              msg += `${i + 1}. ${
+                b.bankName
+              } - Account: ${b.accountNumber.slice(0, 4)}xxxx (${
+                b.accountHolderName
+              })\n`;
+            });
+            msg += `${
+              customer.bankAccounts.length + 1
+            }. Other Bank\n\nℹ️ To manage your saved bank accounts, visit your *Profile* from the Main Menu.`;
+            await sendWhatsAppMessage(phoneNumber, msg);
+          } else {
+            await customer.updateConversationState("checkout_enter_name");
             await sendWhatsAppMessage(
               phoneNumber,
-              "❌ Error: Unable to process your receipt. Please try again or contact support if the issue persists."
+              "👤 What is the full name of the account you are paying from?"
             );
+          }
+        } catch (error) {
+          console.error("Error processing payment receipt:", error);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Error: Unable to process your receipt. Please try again or contact support if the issue persists."
+          );
+
+          // Clean up downloaded file if error occurs
+          if (message.localMediaPath && fs.existsSync(message.localMediaPath)) {
+            fs.unlinkSync(message.localMediaPath);
           }
         }
         break;
+      }
 
       // ─── CASE: checkout_select_saved_bank ──────────────────────────
       case "checkout_select_saved_bank":
@@ -6117,287 +6412,268 @@ async function processChatMessage(phoneNumber, text, message) {
         break;
       }
 
+      // =============================================================================
+      // SIMPLIFIED REFERRAL CASES - Clean and working
+      // =============================================================================
+
+      // ─── CASE: referral ──────────────────────────────────────────────────────────
       case "referral":
-        if (text === "0") {
-          await sendMainMenu(phoneNumber, customer);
-          break;
-        }
-
-        // Check if responding to option selection from previous menu
-        if (text === "1") {
-          await customer.updateConversationState("referral_create_image");
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Attach your new referral video"
-          );
-          break;
-        } else if (
-          text === "2" &&
-          customer.referralImages &&
-          customer.referralImages.length > 0
-        ) {
-          // User selected "Use my previous video"
-          const latestImage =
-            customer.referralImages[customer.referralImages.length - 1];
-
-          await sendWhatsAppMessage(
-            phoneNumber,
-            `Video #${customer.referralImages.length}\n` +
-              `Approved on: ${new Date(
-                latestImage.approvalDate
-              ).toLocaleDateString()}\n` +
-              `Duration: 3 min\n` +
-              `Shared till now: ${
-                latestImage.sharedWith ? latestImage.sharedWith.length : 0
-              } contact`
-          );
-
-          // Move directly to adding contacts
-          await customer.updateConversationState("referral_add_contacts");
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Write or attach the contact numbers of your friends one by one with whom you want to share the video"
-          );
-          break;
-        }
-
-        // First-time or returning user referral flow
-        await sendWhatsAppMessage(
+        // Simple referral introduction and move to video creation
+        await sendSequentialMessages(
           phoneNumber,
-          "Our referral program is simple and rewarding!\nHere's how it works:\n\n" +
-            "• Share your referral video with friends.\n" +
-            "• When your friend makes their first purchase, you'll get access to many discounted products."
+          "🎉 Welcome to our Referral Program!\n\n" +
+            "💰 Share videos with friends and earn rewards!\n\n" +
+            "🎥 Please record and send your referral video now\n\n" +
+            "📹 Supported video formats:\n" +
+            "• MP4 (recommended)\n" +
+            "• AVI\n" +
+            "• MOV\n" +
+            "• 3GP\n" +
+            "• MKV\n\n" +
+            "📏 Max size: 15MB\n" +
+            "⏱️ Keep it under 3 minutes for best results!",
+          "📱 Send your video now or type '0' to return to main menu",
+          1000
         );
 
-        if (customer.referralImages && customer.referralImages.length > 0) {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "We already have your referral video. What do you want to do next?"
-          );
-
-          setTimeout(async () => {
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "1. Attach a new referral video\n2. Use my previous video"
-            );
-          }, 500);
-        } else {
-          // First-time video creation flow
-          setTimeout(async () => {
-            await sendWhatsAppMessage(phoneNumber, "Ready to create a video?");
-
-            setTimeout(async () => {
-              try {
-                const demoImagePath = path.join(
-                  __dirname,
-                  "/dem-imgs/demo.jpg"
-                );
-                if (fs.existsSync(demoImagePath)) {
-                  const media = MessageMedia.fromFilePath(demoImagePath);
-                  await client.sendMessage(phoneNumber, media, {
-                    caption: "Here is a sample video",
-                  });
-                }
-              } catch (error) {
-                console.error("Error sending demo image:", error);
-              }
-
-              setTimeout(async () => {
-                await sendWhatsAppMessage(
-                  phoneNumber,
-                  "What to say in your video:\n" +
-                    "• Your name\n" +
-                    "• Say hi in general\n" +
-                    "• Say you love us\n" +
-                    "• Why you like us"
-                );
-
-                setTimeout(async () => {
-                  await sendWhatsAppMessage(
-                    phoneNumber,
-                    "What do you want to do next?"
-                  );
-
-                  setTimeout(async () => {
-                    await sendWhatsAppMessage(
-                      phoneNumber,
-                      "1. Attach your referral video\n2. Return to main menu"
-                    );
-
-                    await customer.updateConversationState(
-                      "referral_create_image"
-                    );
-                  }, 500);
-                }, 1000);
-              }, 1000);
-            }, 1000);
-          }, 1000);
-        }
+        // Move directly to video creation state
+        await customer.updateConversationState("create_video");
         break;
 
-      // Revised referral flow
-      case "referral_create_image":
-        if (text === "1") {
-          await sendWhatsAppMessage(phoneNumber, "Attach your video");
-          // No state change needed, keep waiting for the image
-        } else if (text === "2" || text === "0") {
-          await sendMainMenu(phoneNumber, customer);
-        } else if (text.toLowerCase() === "back") {
-          await customer.updateConversationState("referral");
-          await processChatMessage(phoneNumber, "", message);
-        } else {
-          // If they just sent a message but not an image, remind them
-          if (!message.hasMedia) {
-            await sendWhatsAppMessage(phoneNumber, "Please attach your video");
-          }
-        }
-        break;
+      // ─── CASE: create_video ──────────────────────────────────────────────────────
+      // ─── CASE: create_video (Updated) ────────────────────────────────────────────
+      // ─── CASE: create_video (Simplified) ──────────────────────────────────────
+      case "create_video":
+        if (message.hasMedia && message.type === "video") {
+          try {
+            // 1. Download video buffer directly
+            const response = await axios.get(message.media.url, {
+              responseType: "arraybuffer",
+            });
+            const videoBuffer = Buffer.from(response.data, "binary");
 
-      case "referral_add_contacts":
-        if (text === "0") {
-          await sendMainMenu(phoneNumber, customer);
-          break;
-        }
+            // 2. Convert to Base64
+            const base64Video = videoBuffer.toString("base64");
+            const videoSizeMB = (base64Video.length * 3) / 4 / (1024 * 1024); // Accurate size calc
 
-        // Ensure a referral image exists
-        if (!customer.referralImages || customer.referralImages.length === 0) {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Error: No referral video found. Please create a video first."
-          );
-          await sendMainMenu(phoneNumber, customer);
-          break;
-        }
-
-        // Now proceed directly to ask for contact (no duplicate prompts)
-        await sendWhatsAppMessage(
-          phoneNumber,
-          "Write or attach the contact numbers of your friends one by one with whom you want to share the video"
-        );
-
-        // Move to next state to handle contact input
-        await customer.updateConversationState("referral_contact_number");
-        break;
-      case "referral_contact_number":
-        // Format phone number
-        let formattedPhoneNumber = text.replace(/\D/g, "");
-
-        // Ensure the number is in international format
-        if (!formattedPhoneNumber.startsWith("")) {
-          formattedPhoneNumber = "" + formattedPhoneNumber.replace(/^0/, "");
-        }
-
-        const contactPhoneNumber = formattedPhoneNumber + "@c.us";
-
-        // Validate referral image
-        if (!customer.referralImages || customer.referralImages.length === 0) {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Error: No referral video found. Please create a video first."
-          );
-          await sendMainMenu(phoneNumber, customer);
-          break;
-        }
-
-        const latestImage =
-          customer.referralImages[customer.referralImages.length - 1];
-
-        // Add contact to sharedWith array
-        if (!latestImage.sharedWith) {
-          latestImage.sharedWith = [];
-        }
-
-        latestImage.sharedWith.push({
-          name: "Contact", // You might want to ask for a name
-          phoneNumber: contactPhoneNumber,
-          dateShared: new Date(),
-          status: "pending",
-        });
-
-        await customer.save();
-
-        // Add debug logging
-        console.log(`Preparing to send referral to: ${contactPhoneNumber}`);
-
-        // Move to contact confirmation state
-        await customer.updateConversationState("referral_more_contacts");
-        await sendWhatsAppMessage(
-          phoneNumber,
-          `Contact ${text} has been added to share list.\n` +
-            "Do you want to refer more friends?\n1. Yes\n2. No"
-        );
-        break;
-
-      case "referral_more_contacts":
-        if (text === "1" || text.toLowerCase() === "yes") {
-          // Reset for next contact
-          await customer.updateConversationState("referral_contact_number");
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Write or attach his/her WhatsApp number"
-          );
-        } else if (text === "2" || text.toLowerCase() === "no") {
-          // Finalize referral process
-          await customer.updateConversationState("referral_confirmation");
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Thank you! Your video will be shared with your friends shortly"
-          );
-
-          // After a delay, trigger the actual sharing process
-          setTimeout(async () => {
-            // Process all pending referrals
-            if (customer.referralImages && customer.referralImages.length > 0) {
-              const latestImage =
-                customer.referralImages[customer.referralImages.length - 1];
-
-              if (latestImage.sharedWith && latestImage.sharedWith.length > 0) {
-                for (const contact of latestImage.sharedWith) {
-                  if (contact.status === "pending") {
-                    await sendReferralToContact(customer, latestImage, contact);
-                  }
-                }
-              }
+            // 3. Validate size
+            if (videoSizeMB > 15) {
+              await sendWhatsAppMessage(
+                phoneNumber,
+                `❌ Video too large (${videoSizeMB.toFixed(
+                  1
+                )}MB). Max 15MB allowed.`
+              );
+              break;
             }
 
-            // Return to main menu
-            await sendWhatsAppMessage(phoneNumber, "Redirecting to main menu");
-            await sendMainMenu(phoneNumber, customer);
-          }, 2000);
+            // 4. Save to database
+            const videoId = "VID" + Date.now().toString().slice(-6);
+            customer.referralvideos.push({
+              imageId: videoId,
+              mediaType: "video",
+              mimetype: message.media.mimetype || "video/mp4",
+              filename: `referral_${videoId}.mp4`,
+              base64Data: base64Video,
+              fileSize: videoSizeMB,
+              approvalDate: new Date(),
+              status: "unverified",
+              // ... other metadata fields ...
+            });
+
+            await customer.save();
+
+            // 5. Confirm receipt
+            await sendSequentialMessages(
+              phoneNumber,
+              `✅ Video received (${videoSizeMB.toFixed(1)}MB)`,
+              "📱 Now send recipient's phone number\nExample: 03001234567",
+              1000
+            );
+            await customer.updateConversationState("add_contact");
+          } catch (error) {
+            console.error("Video processing error:", error);
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Failed to process video. Please try again."
+            );
+          }
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Please select a valid option:\n1. Yes\n2. No\n\nType 0 to return to main menu."
+            "🎥 Please send a video file or type '0' to cancel"
           );
         }
         break;
-      case "referral_confirmation":
-        // Any input will return to main menu
-        await sendMainMenu(phoneNumber, customer);
-        break;
-
-      // Replace the discounts case with this improved implementation
-      case "discounts":
-        // Check if the input is a valid discount category selection (1-5)
-        if (["1", "2", "3", "4", "5"].includes(text)) {
-          // Save the selected category and transition to showing products
-          console.log(`Selected discount category: ${text}`);
-
-          // Update state to show products from the selected category
-          await customer.updateConversationState("discount_products");
-
-          // Fetch and send the discounted products list for the selected category
-          await sendDiscountedProductsList(phoneNumber, customer, text);
-        } else if (text === "0") {
+      // ─── CASE: add_contact ──────────────────────────────────────────────────────
+      case "add_contact":
+        if (text === "0") {
           await sendMainMenu(phoneNumber, customer);
-        } else {
-          // Invalid selection
+          break;
+        }
+
+        // Get the latest video
+        if (!customer.referralvideos || customer.referralvideos.length === 0) {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Please select a valid discount category (1-5), or type 0 to return to main menu."
+            "❌ No video found. Please create one first."
+          );
+          await sendMainMenu(phoneNumber, customer);
+          break;
+        }
+
+        const latestVideo =
+          customer.referralvideos[customer.referralvideos.length - 1];
+        if (!latestVideo.sharedWith) latestVideo.sharedWith = [];
+
+        // Extract only digits from input
+        const rawNumber = text.replace(/\D/g, "");
+
+        // Validate number format (at least 8 digits)
+        if (rawNumber.length < 8) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Invalid number! Please send a valid phone number (at least 8 digits)\n" +
+              "Example: 03001234567\n\n" +
+              "Or type '0' to return to main menu"
+          );
+          break;
+        }
+
+        // Prevent sending to self
+        const currentUserNumber = phoneNumber
+          .replace(/@.*$/, "")
+          .replace(/\D/g, "");
+        if (rawNumber === currentUserNumber) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ You can't send a referral to yourself!\n" +
+              "Please provide a different phone number."
+          );
+          break;
+        }
+
+        // Check for duplicates (compare raw numbers)
+        const existingContact = latestVideo.sharedWith.find((contact) => {
+          const contactNumber = contact.phoneNumber.replace(/\D/g, "");
+          return contactNumber === rawNumber;
+        });
+
+        if (existingContact) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "⚠️ This contact was already added!"
+          );
+          break;
+        }
+
+        // Store exactly as provided by user (without @c.us suffix)
+        const newContact = {
+          name: "Contact", // Can be updated later
+          phoneNumber: rawNumber, // Store raw number exactly as provided
+          dateShared: new Date(),
+          status: "pending",
+        };
+
+        latestVideo.sharedWith.push(newContact);
+        await customer.save();
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ Contact added: ${rawNumber}\n\n` +
+            `🚀 Sending your referral now...`
+        );
+
+        try {
+          console.log("🚀 Attempting to send referral...");
+          await sendReferralToContact(customer, latestVideo, newContact);
+
+          // Update status and save
+          newContact.status = "sent";
+          newContact.dateSent = new Date();
+          await customer.save();
+
+          // RESET STATE HERE
+          await customer.updateConversationState("main_menu");
+
+          await sendSequentialMessages(
+            phoneNumber,
+            `✅ Referral sent successfully to ${rawNumber}!`,
+            `🎉 Earn rewards when they make their first purchase!\n\n` +
+              `Type '0' to return to main menu or send another number to continue.`,
+            1000
+          );
+        } catch (error) {
+          console.error("❌ Error in referral sending process:", error);
+
+          // Update contact status to failed
+          newContact.status = "failed";
+          await customer.save();
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `❌ Error sending to ${rawNumber}.\n\n` +
+              `Please check the number and try again, or contact support.\n\n` +
+              `Send another contact number or type '0' for main menu.`
           );
         }
         break;
+
+        // =============================================================================
+        // HELPER FUNCTION - Send referral to contacts using UltraMsg
+        // =============================================================================
+        // ─── HELPER: downloadMediaBuffer ─────────────────────────────────────────────
+        async function downloadMediaBuffer(mediaUrl) {
+          try {
+            const response = await axios({
+              method: "GET",
+              url: mediaUrl,
+              responseType: "arraybuffer",
+            });
+            return Buffer.from(response.data, "binary");
+          } catch (error) {
+            console.error("Error downloading media:", error);
+            throw error;
+          }
+        }
+
+        // ─── UPDATED sendReferralToContact ───────────────────────────────────────────
+        // ─── sendReferralToContact (UltraMsg Compatible) ───────────────────────────
+        async function sendReferralToContact(customer, video, contact) {
+          try {
+            // 1. Prepare caption
+            const caption =
+              `🎉 Referral from ${customer.name}\n` +
+              `Use code: ${customer.referralCode || "WELCOME10"}\n` +
+              `for 10% first purchase discount!`;
+
+            // 2. Send via UltraMsg API
+            const result = await axios.post(
+              `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/video`,
+              new URLSearchParams({
+                token: ULTRAMSG_CONFIG.token,
+                to: contact.phoneNumber + "@c.us",
+                video: `data:${video.mimetype};base64,${video.base64Data}`,
+                caption: caption,
+              }),
+              {
+                headers: {
+                  "Content-Type": "application/x-www-form-urlencoded",
+                },
+              }
+            );
+
+            if (!result.data?.sent) {
+              throw new Error("UltraMsg send failed");
+            }
+
+            return true;
+          } catch (error) {
+            console.error("Referral send error:", error);
+            throw new Error("Failed to send video referral");
+          }
+        }
+      // Simplified discount_products case (no more discounts state needed)
       case "discount_products":
         // Check if customer is trying to go back to main menu
         if (text === "0") {
@@ -6409,7 +6685,7 @@ async function processChatMessage(phoneNumber, text, message) {
         const selectedProductNumber = parseInt(text);
 
         // Validate the product number
-        const selectedProduct = getDiscountProductByNumber(
+        const selectedProduct = await getDiscountProductByNumber(
           selectedProductNumber
         );
 
@@ -6419,62 +6695,52 @@ async function processChatMessage(phoneNumber, text, message) {
             JSON.stringify(selectedProduct, null, 2)
           );
 
-          // Determine the category based on the product number
-          let category;
-          if (selectedProductNumber >= 11 && selectedProductNumber <= 19)
-            category = "1";
-          else if (selectedProductNumber >= 21 && selectedProductNumber <= 29)
-            category = "2";
-          else if (selectedProductNumber >= 31 && selectedProductNumber <= 39)
-            category = "3";
-          else if (selectedProductNumber >= 41 && selectedProductNumber <= 49)
-            category = "4";
-          else if (selectedProductNumber >= 51 && selectedProductNumber <= 59)
-            category = "5";
-          else {
-            // Fallback if category can't be determined
-            console.error(
-              `Unable to determine category for product number: ${selectedProductNumber}`
-            );
+          // Check if product is still in stock
+          if (selectedProduct.stock <= 0) {
             await sendWhatsAppMessage(
               phoneNumber,
-              "Sorry, there was an error processing your selection. Please try again."
+              "❌ Sorry, this product is currently out of stock. Please choose another option."
             );
-            await sendDiscountedProductsList(phoneNumber, customer, "1"); // Default to first category
+            await sendDiscountedProductsList(phoneNumber, customer);
             break;
           }
 
-          // IMPORTANT: Store selected discounted product info in dedicated fields
+          // Store selected discounted product info
           customer.currentDiscountProductId = selectedProduct.id;
           customer.currentDiscountProductName = selectedProduct.name;
           customer.currentDiscountProductPrice = selectedProduct.discountPrice;
           customer.currentDiscountProductOriginalPrice =
             selectedProduct.originalPrice;
-          customer.currentDiscountCategory = category;
           await customer.save();
 
           console.log(
-            "Saved discount product ID to dedicated field:",
+            "Saved discount product ID:",
             customer.currentDiscountProductId
           );
 
           // Move to showing product details
           await customer.updateConversationState("discount_product_details");
 
-          // Get the actual product from our database
-          const product = findProductById(selectedProduct.id);
+          // Get the actual product from database
+          const product = await Product.findOne({
+            productId: selectedProduct.id,
+          }).lean();
+
           if (product) {
-            // Modify price display to show discount
-            const originalProduct = { ...product };
-            originalProduct.price = selectedProduct.discountPrice; // Override price with discount price
+            // Create a modified product object with discount price
+            const modifiedProduct = {
+              ...product,
+              price: selectedProduct.discountPrice,
+              originalPrice: selectedProduct.originalPrice,
+            };
 
             // Send product details with discount information
             await sendProductDetails(
               phoneNumber,
               customer,
-              originalProduct,
-              true,
-              selectedProduct.originalPrice // Pass original price to show discount
+              modifiedProduct,
+              true, // isDiscounted flag
+              selectedProduct.originalPrice
             );
           } else {
             console.error(
@@ -6482,123 +6748,100 @@ async function processChatMessage(phoneNumber, text, message) {
             );
             await sendWhatsAppMessage(
               phoneNumber,
-              "Sorry, this product is temporarily unavailable. Please choose another option."
+              "❌ Sorry, this product is temporarily unavailable. Please choose another option."
             );
-
-            // Resend the discount products list for the same category
-            await sendDiscountedProductsList(phoneNumber, customer, category);
+            await sendDiscountedProductsList(phoneNumber, customer);
           }
         } else {
           // Invalid product number
           console.log(`Invalid product selection: ${selectedProductNumber}`);
 
-          // Determine the appropriate category for resending the list
-          let fallbackCategory = "1"; // Default to first category
-          if (customer.currentDiscountCategory) {
-            fallbackCategory = customer.currentDiscountCategory;
-          }
-
           // Send error message
           await sendWhatsAppMessage(
             phoneNumber,
-            "Invalid selection. Please choose a product number from the list shown below."
+            "❌ Invalid selection. Please choose a product number from the list shown below."
           );
 
           // Resend the discount products list
-          await sendDiscountedProductsList(
-            phoneNumber,
-            customer,
-            fallbackCategory
-          );
+          await sendDiscountedProductsList(phoneNumber, customer);
         }
         break;
+
+      // Modified discount_product_details case
       case "discount_product_details":
         // Handle buy options for discounted products
         if (text === "1") {
           // Yes, add to cart
           await customer.updateConversationState("discount_select_weight");
 
-          console.log(
-            "Using dedicated discount fields:",
-            JSON.stringify(
-              {
-                id: customer.currentDiscountProductId,
-                name: customer.currentDiscountProductName,
-                price: customer.currentDiscountProductPrice,
-              },
-              null,
-              2
-            )
-          );
-
-          // CRITICAL: Use the dedicated field for discount product ID
           const discountProductId = customer.currentDiscountProductId;
           console.log("Product ID attempting to find:", discountProductId);
 
           if (!discountProductId) {
-            console.error("Missing discount product ID in dedicated field");
+            console.error("Missing discount product ID");
             await sendWhatsAppMessage(
               phoneNumber,
-              "Sorry, there was an error processing your request. Please try selecting the product again."
+              "❌ Sorry, there was an error processing your request. Please try selecting the product again."
             );
-            await sendDiscountedProductsList(phoneNumber, customer, "1"); // Default to first category
+            await sendDiscountedProductsList(phoneNumber, customer);
             break;
           }
 
-          const product = findProductById(discountProductId);
+          // Get product from database
+          const product = await Product.findOne({
+            productId: discountProductId,
+          }).lean();
+
           if (!product) {
-            // Improved error handling with more details
             console.error(`Product not found with ID: ${discountProductId}`);
-
             await sendWhatsAppMessage(
               phoneNumber,
-              "Sorry, we couldn't find this product in our inventory. Please try another product or contact support."
+              "❌ Sorry, we couldn't find this product. Please try another product."
             );
-            await sendDiscountedProductsList(phoneNumber, customer, "1"); // Default to first category
+            await sendDiscountedProductsList(phoneNumber, customer);
             break;
           }
+
+          // Default weight options (you can modify this based on your product structure)
+          const weightOptions = ["1kg", "5kg", "10kg", "25kg", "50kg"];
 
           // Create weight selection message with discounted price
-          let weightMessage = "Please select the weight option:\n\n";
+          let weightMessage = "⚖️ *Please select the weight option:*\n\n";
           const discountPrice = customer.currentDiscountProductPrice;
-          const priceRatio = discountPrice / product.price; // Calculate ratio for weight pricing
+          const basePrice = product.NormalPrice || discountPrice;
+          const priceRatio = discountPrice / basePrice;
 
-          product.weights.forEach((weight, index) => {
-            // Calculate discounted weight price using the same ratio as original prices
-            let weightPrice = product.price;
+          weightOptions.forEach((weight, index) => {
+            // Calculate discounted weight price
+            let weightPrice = basePrice;
             if (weight.includes("5kg")) {
-              weightPrice = product.price * 4.5;
+              weightPrice = basePrice * 4.5;
             } else if (weight.includes("10kg")) {
-              weightPrice = product.price * 9;
-            } else if (weight.includes("50kg") || weight.includes("500g")) {
-              weightPrice = product.price * 0.5;
-            } else if (weight.includes("100kg") || weight.includes("100g")) {
-              weightPrice = product.price * 0.2;
+              weightPrice = basePrice * 9;
+            } else if (weight.includes("25kg")) {
+              weightPrice = basePrice * 22;
+            } else if (weight.includes("50kg")) {
+              weightPrice = basePrice * 45;
             }
 
             // Apply discount to the weight price
             weightPrice = Math.round(weightPrice * priceRatio);
 
-            weightMessage += `${
-              index + 1
-            }- ${weight} - ${weightPrice}$ (DISCOUNTED)\n`;
+            weightMessage += `${index + 1}. ${weight} - ${formatRupiah(
+              weightPrice
+            )} ✨ *DISCOUNTED*\n`;
           });
+
+          // Store weight options for later use
+          customer.contextData = customer.contextData || {};
+          customer.contextData.weightOptions = weightOptions;
+          await customer.save();
 
           await sendWhatsAppMessage(phoneNumber, weightMessage);
         } else if (text === "2") {
-          // No, return to discount categories
-          await customer.updateConversationState("discounts");
-
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Please select a discount category:\n\n" +
-              "1. General\n" +
-              "2. For your referral\n" +
-              "3. As forman for your referral\n" +
-              "4. As forman\n" +
-              "5. Only for you\n\n" +
-              "Type 0 to return to main menu."
-          );
+          // No, return to discount products list
+          await customer.updateConversationState("discount_products");
+          await sendDiscountedProductsList(phoneNumber, customer);
         } else if (text === "3") {
           // Return to main menu
           await sendMainMenu(phoneNumber, customer);
@@ -6609,44 +6852,59 @@ async function processChatMessage(phoneNumber, text, message) {
           );
         }
         break;
+
+      // Modified discount_select_weight case
       case "discount_select_weight":
-        // Make sure we have the discount product ID
         const discountProductId = customer.currentDiscountProductId;
         if (!discountProductId) {
-          console.error("Missing discount product ID in dedicated field");
+          console.error("Missing discount product ID");
           await sendWhatsAppMessage(
             phoneNumber,
-            "Sorry, there was an error processing your request. Please try selecting the product again."
+            "❌ Sorry, there was an error. Please try again."
           );
           await sendMainMenu(phoneNumber, customer);
           break;
         }
 
-        const discountProductForWeight = findProductById(discountProductId);
+        // Get product from database
+        const discountProductForWeight = await Product.findOne({
+          productId: discountProductId,
+        }).lean();
+
         if (!discountProductForWeight) {
           console.error(`Product not found with ID: ${discountProductId}`);
           await sendWhatsAppMessage(
             phoneNumber,
-            "Product not found. Let's return to the main menu."
+            "❌ Product not found. Let's return to the main menu."
           );
           await sendMainMenu(phoneNumber, customer);
           break;
         }
 
+        // Get stored weight options
+        const weightOptions = customer.contextData?.weightOptions || [
+          "1kg",
+          "5kg",
+          "10kg",
+          "25kg",
+          "50kg",
+        ];
+
         const discountWeightIndex = parseInt(text) - 1;
         if (
           discountWeightIndex >= 0 &&
-          discountWeightIndex < discountProductForWeight.weights.length
+          discountWeightIndex < weightOptions.length
         ) {
           // Save selected weight
+          customer.contextData = customer.contextData || {};
           customer.contextData.selectedWeight =
-            discountProductForWeight.weights[discountWeightIndex];
+            weightOptions[discountWeightIndex];
           await customer.save();
 
-          // Send confirmation message about the weight they've chosen
+          // Send confirmation message
           await sendWhatsAppMessage(
             phoneNumber,
-            `You have chosen ${discountProductForWeight.weights[discountWeightIndex]}. Great choice!`
+            `✅ You have chosen ${weightOptions[discountWeightIndex]}. Great choice!`
           );
 
           // Small delay before asking for quantity
@@ -6656,75 +6914,92 @@ async function processChatMessage(phoneNumber, text, message) {
           await customer.updateConversationState("discount_select_quantity");
           await sendWhatsAppMessage(
             phoneNumber,
-            "How many bags would you like to order? Enter only in digits."
+            "🔢 How many units would you like to order? Enter the quantity as a number."
           );
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            `Please select a valid weight option (1 to ${discountProductForWeight.weights.length}), or type 0 to return to the main menu.`
+            `Please select a valid weight option (1 to ${weightOptions.length}), or type 0 to return to the main menu.`
           );
         }
         break;
+
+      // Modified discount_select_quantity case
       case "discount_select_quantity":
         const discountQuantity = parseInt(text);
         if (!isNaN(discountQuantity) && discountQuantity > 0) {
           // Save quantity
+          customer.contextData = customer.contextData || {};
           customer.contextData.quantity = discountQuantity;
           await customer.save();
 
-          // Add discounted product to cart
-          const product = findProductById(customer.currentDiscountProductId);
+          // Get product from database
+          const product = await Product.findOne({
+            productId: customer.currentDiscountProductId,
+          }).lean();
+
           if (!product) {
             await sendWhatsAppMessage(
               phoneNumber,
-              "Product not found. Let's return to the main menu."
+              "❌ Product not found. Let's return to the main menu."
             );
             await sendMainMenu(phoneNumber, customer);
             break;
           }
 
-          // Use the discounted price from the dedicated field
+          // Check stock availability
+          const availableStock = product.Stock || 0;
+          if (availableStock < discountQuantity) {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `❌ Sorry, we only have ${availableStock} items in stock. Please enter a quantity of ${availableStock} or less.`
+            );
+            break;
+          }
+
+          // Calculate pricing
           const discountedPrice = customer.currentDiscountProductPrice;
           const selectedWeight = customer.contextData.selectedWeight;
+          const basePrice = product.NormalPrice || discountedPrice;
 
           // Calculate weight-specific price with discount applied
           let weightPrice = discountedPrice;
-          const priceRatio = discountedPrice / product.price; // Ratio for weight pricing
+          const priceRatio = discountedPrice / basePrice;
 
           if (selectedWeight.includes("5kg")) {
-            weightPrice = product.price * 4.5 * priceRatio;
+            weightPrice = basePrice * 4.5 * priceRatio;
           } else if (selectedWeight.includes("10kg")) {
-            weightPrice = product.price * 9 * priceRatio;
-          } else if (
-            selectedWeight.includes("50kg") ||
-            selectedWeight.includes("500g")
-          ) {
-            weightPrice = product.price * 0.5 * priceRatio;
-          } else if (selectedWeight.includes("100g")) {
-            weightPrice = product.price * 0.2 * priceRatio;
+            weightPrice = basePrice * 9 * priceRatio;
+          } else if (selectedWeight.includes("25kg")) {
+            weightPrice = basePrice * 22 * priceRatio;
+          } else if (selectedWeight.includes("50kg")) {
+            weightPrice = basePrice * 45 * priceRatio;
           }
 
-          // Round to whole number for cleaner display
+          // Round to whole number
           weightPrice = Math.round(weightPrice);
-
-          // Calculate total price for this item using the discounted weight-specific price
           const totalPrice = weightPrice * discountQuantity;
 
-          // Add to cart with special flag for discounted item but proper weight formatting
-          await customer.cart.items.push({
-            productId: product.id,
-            productName: product.name, // Remove "(DISCOUNTED)" from name
-            category: customer.contextData.categoryName || product.category,
-            subCategory:
-              customer.contextData.subCategoryName || product.subCategory,
-            weight: customer.contextData.selectedWeight.replace("1kg", "1 kg"), // Fix weight format
+          // Add to cart
+          customer.cart = customer.cart || { items: [], totalAmount: 0 };
+          customer.cart.items.push({
+            productId: product.productId,
+            productName: product.productName,
+            category: product.categories || "General",
+            subCategory: product.subCategories || "General",
+            weight: customer.contextData.selectedWeight,
             quantity: discountQuantity,
-            price: weightPrice, // Store the discounted weight-specific price
-            originalPrice: product.price, // Store original price for reference
+            price: weightPrice,
+            originalPrice: customer.currentDiscountProductOriginalPrice,
             totalPrice: totalPrice,
-            imageUrl: product.imageUrl,
-            isDiscounted: true, // We'll still track that it's discounted internally
+            imageUrl: product.masterImage
+              ? `data:${
+                  product.masterImage.contentType
+                };base64,${product.masterImage.data.toString("base64")}`
+              : null,
+            isDiscounted: true,
           });
+
           // Update cart total
           customer.cart.totalAmount = customer.cart.items.reduce(
             (total, item) => total + item.totalPrice,
@@ -6734,15 +7009,16 @@ async function processChatMessage(phoneNumber, text, message) {
 
           // Confirm addition to cart
           await customer.updateConversationState("post_add_to_cart");
-          const message = `added to your cart
-  ${product.name}
-  ${discountQuantity} bags (${customer.contextData.selectedWeight}) 
-  for ${formatRupiah(totalPrice)} (DISCOUNTED)`;
+          const message = `✅ *Added to your cart!*
+
+🛍️ ${product.productName}
+📦 ${discountQuantity} units (${customer.contextData.selectedWeight}) 
+💰 ${formatRupiah(totalPrice)} *(DISCOUNTED PRICE)*`;
 
           await sendWhatsAppMessage(phoneNumber, message);
           await sendWhatsAppMessage(
             phoneNumber,
-            "\n\nWhat do you want to do next?\n\n1- View cart\n2- Proceed to pay\n3- I want to shop more (Return to shopping list)\n0- Return to main menu"
+            "🎯 *What would you like to do next?*\n\n1️⃣ View cart\n2️⃣ Proceed to checkout\n3️⃣ Continue shopping\n0️⃣ Return to main menu"
           );
         } else {
           await sendWhatsAppMessage(
@@ -6751,6 +7027,7 @@ async function processChatMessage(phoneNumber, text, message) {
           );
         }
         break;
+
       default:
         // If we don't recognize the state, reset to main menu
         await sendMainMenu(phoneNumber, customer);
@@ -6778,7 +7055,6 @@ async function processChatMessage(phoneNumber, text, message) {
 }
 
 // Update the sendMainMenu function
-// Update the sendMainMenu function to show the correct platform name
 async function sendMainMenu(phoneNumber, customer) {
   // Send discount message first
   await sendWhatsAppMessage(
@@ -6812,60 +7088,45 @@ async function sendMainMenu(phoneNumber, customer) {
   await customer.addToChatHistory(menuText, "bot");
   await customer.updateConversationState("main_menu");
 }
-// Ensure the function properly sends products and updates state
-async function sendDiscountedProductsList(phoneNumber, customer, category) {
-  console.log(`Fetching discount products for category: ${category}`);
 
-  // First send the introduction message
-  const introMessage =
-    "In below the menu is a selection of discounts as a thank you for (you as beloved customer) our most popular products of your selected category:";
-  await sendWhatsAppMessage(phoneNumber, introMessage);
+// Simplified function to send discounted products list
+async function sendDiscountedProductsList(phoneNumber, customer) {
+  console.log("Fetching all discount products");
 
-  // Get products for this category
-  const discountProducts = getDiscountProductsForCategory(category);
-  console.log(
-    `Found ${discountProducts.length} discount products for category ${category}`
+  // Send welcome message for discounts
+  await sendWhatsAppMessage(
+    phoneNumber,
+    "🎁 *Special Discounts Available!* 🎁\n\nHere are all our current discounted products:"
   );
+
+  // Get all discounted products
+  const discountProducts = await getDiscountedProducts();
 
   if (discountProducts.length === 0) {
     await sendWhatsAppMessage(
       phoneNumber,
-      "Sorry, there are no discounted products available in this category at the moment. Please check back later or select a different category."
+      "Sorry, there are no discounted products available at the moment. Please check back later or browse our regular products."
     );
     return;
   }
 
   // Create a single product list message
-  let productsMessage = "Discounted Products:\n\n";
+  let productsMessage = "📋 *Discounted Products:*\n\n";
 
-  // Base number offset for this category
-  const baseOffset =
-    {
-      1: 10, // General: 11-19
-      2: 20, // For your referral: 21-29
-      3: 30, // As forman for your referral: 31-39
-      4: 40, // As forman: 41-49
-      5: 50, // Only for you: 51-59
-    }[category] || 10;
-
-  // Add all products to the message with Rupiah formatting
+  // Add all products to the message with formatting
   discountProducts.forEach((product, index) => {
-    const productNumber = baseOffset + index + 1;
+    const productNumber = index + 1;
     const discountPercent = Math.round(
       (1 - product.discountPrice / product.originalPrice) * 100
     );
 
-    productsMessage += `${productNumber}- ${product.name}\n`;
-    productsMessage += `Price: ${formatRupiah(
-      product.discountPrice
-    )} (${discountPercent}% OFF! Original: ${formatRupiah(
+    productsMessage += `${productNumber}. ${product.name}\n`;
+    productsMessage += `💰 Price: ${formatRupiah(product.discountPrice)} `;
+    productsMessage += `(${discountPercent}% OFF! Was: ${formatRupiah(
       product.originalPrice
-    )})\n\n`;
+    )})\n`;
+    productsMessage += `📦 Stock: ${product.stock} available\n\n`;
   });
-
-  // Save the current discount category in customer data for later reference
-  customer.currentDiscountCategory = category;
-  await customer.save();
 
   // Send the product list
   await sendWhatsAppMessage(phoneNumber, productsMessage);
@@ -6873,491 +7134,93 @@ async function sendDiscountedProductsList(phoneNumber, customer, category) {
   // Send instruction as a separate message
   await sendWhatsAppMessage(
     phoneNumber,
-    "Select a product number to view details, or type 0 to return to main menu."
+    "💡 Select a product number to view details and add to cart, or type 0 to return to main menu."
   );
 }
-// Helper function to get discounted products for a specific category
-// Helper function to get discounted products for a specific category with expanded product list
-function getDiscountProductsForCategory(category) {
-  console.log(
-    `Fetching discount products for category: ${category}, Type: ${typeof category}`
-  );
 
-  const allDiscountProducts = [
-    // General (11-19)
-    {
-      id: "ultra_cement",
-      name: "Ultra Tech Cement",
-      originalPrice: 1220,
-      discountPrice: 1098, // 10% off
-      category: "1",
-    },
-    {
-      id: "rocket_cement",
-      name: "Rocket Cement",
-      originalPrice: 1400,
-      discountPrice: 1260, // 10% off
-      category: "1",
-    },
-    {
-      id: "fast_cement",
-      name: "Fast Cement",
-      originalPrice: 1400,
-      discountPrice: 1190, // 15% off
-      category: "1",
-    },
-    {
-      id: "white_cement",
-      name: "White Cement - General Discount",
-      originalPrice: 1500,
-      discountPrice: 1350, // 10% off
-      category: "1",
-    },
-    {
-      id: "abc_cement",
-      name: "ABC Cement - General Discount",
-      originalPrice: 1300,
-      discountPrice: 1170, // 10% off
-      category: "1",
-    },
-    {
-      id: "sikacryl",
-      name: "SikaCryl Mix - General Discount",
-      originalPrice: 950,
-      discountPrice: 855, // 10% off
-      category: "1",
-    },
-    {
-      id: "red_cement",
-      name: "Red Colored Cement - General Discount",
-      originalPrice: 1700,
-      discountPrice: 1530, // 10% off
-      category: "1",
-    },
-    {
-      id: "clay_brick_standard",
-      name: "Clay Brick - General Discount",
-      originalPrice: 500,
-      discountPrice: 450, // 10% off
-      category: "1",
-    },
-    {
-      id: "concrete_brick_standard",
-      name: "Concrete Brick - General Discount",
-      originalPrice: 450,
-      discountPrice: 405, // 10% off
-      category: "1",
-    },
+async function getDiscountProductsForCategory(category) {
+  console.log(`Fetching discount products for category: ${category}`);
 
-    // For your referral (21-29)
-    {
-      id: "white_cement",
-      name: "White Cement",
-      originalPrice: 1500,
-      discountPrice: 1275, // 15% off
-      category: "2",
-    },
-    {
-      id: "abc_cement",
-      name: "ABC Cement",
-      originalPrice: 1300,
-      discountPrice: 1105, // 15% off
-      category: "2",
-    },
-    {
-      id: "ultra_cement",
-      name: "Ultra Tech Cement - Referral",
-      originalPrice: 1220,
-      discountPrice: 1037, // 15% off
-      category: "2",
-    },
-    {
-      id: "rocket_cement",
-      name: "Rocket Cement - Referral",
-      originalPrice: 1400,
-      discountPrice: 1190, // 15% off
-      category: "2",
-    },
-    {
-      id: "fast_cement",
-      name: "Fast Cement - Referral",
-      originalPrice: 1400,
-      discountPrice: 1190, // 15% off
-      category: "2",
-    },
-    {
-      id: "sikacryl",
-      name: "SikaCryl Mix - Referral",
-      originalPrice: 950,
-      discountPrice: 807, // 15% off
-      category: "2",
-    },
-    {
-      id: "red_cement",
-      name: "Red Colored Cement - Referral",
-      originalPrice: 1700,
-      discountPrice: 1445, // 15% off
-      category: "2",
-    },
-    {
-      id: "clay_brick_standard",
-      name: "Clay Brick - Referral",
-      originalPrice: 500,
-      discountPrice: 425, // 15% off
-      category: "2",
-    },
-    {
-      id: "concrete_brick_standard",
-      name: "Concrete Brick - Referral",
-      originalPrice: 450,
-      discountPrice: 382, // 15% off
-      category: "2",
-    },
+  try {
+    // Base query for products with active discounts
+    const baseQuery = {
+      hasActiveDiscount: true,
+      "discountConfig.isActive": true,
+      visibility: "Public",
+    };
 
-    // As forman for your referral (31-39)
-    {
-      id: "sikacryl",
-      name: "SikaCryl Ready-Mix Concrete Patch",
-      originalPrice: 950,
-      discountPrice: 760, // 20% off
-      category: "3",
-    },
-    {
-      id: "red_cement",
-      name: "Red Colored Cement",
-      originalPrice: 1700,
-      discountPrice: 1360, // 20% off
-      category: "3",
-    },
-    {
-      id: "ultra_cement",
-      name: "Ultra Tech Cement - Forman Referral",
-      originalPrice: 1220,
-      discountPrice: 976, // 20% off
-      category: "3",
-    },
-    {
-      id: "rocket_cement",
-      name: "Rocket Cement - Forman Referral",
-      originalPrice: 1400,
-      discountPrice: 1120, // 20% off
-      category: "3",
-    },
-    {
-      id: "fast_cement",
-      name: "Fast Cement - Forman Referral",
-      originalPrice: 1400,
-      discountPrice: 1120, // 20% off
-      category: "3",
-    },
-    {
-      id: "white_cement",
-      name: "White Cement - Forman Referral",
-      originalPrice: 1500,
-      discountPrice: 1200, // 20% off
-      category: "3",
-    },
-    {
-      id: "abc_cement",
-      name: "ABC Cement - Forman Referral",
-      originalPrice: 1300,
-      discountPrice: 1040, // 20% off
-      category: "3",
-    },
-    {
-      id: "clay_brick_standard",
-      name: "Clay Brick - Forman Referral",
-      originalPrice: 500,
-      discountPrice: 400, // 20% off
-      category: "3",
-    },
-    {
-      id: "concrete_brick_standard",
-      name: "Concrete Brick - Forman Referral",
-      originalPrice: 450,
-      discountPrice: 360, // 20% off
-      category: "3",
-    },
+    // Add category-specific filters based on forWho field
+    let categoryQuery = {};
+    switch (category) {
+      case "1":
+        categoryQuery = { "discountConfig.forWho": "public" };
+        break;
+      case "2":
+        categoryQuery = { "discountConfig.forWho": "public referral" };
+        break;
+      case "3":
+        categoryQuery = { "discountConfig.forWho": "forman referral" };
+        break;
+      case "4":
+        categoryQuery = { "discountConfig.forWho": "forman" };
+        break;
+      case "5":
+        categoryQuery = { "discountConfig.forWho": "forman earnings mlm" };
+        break;
+      default:
+        categoryQuery = { "discountConfig.forWho": "public" };
+    }
 
-    // As forman (41-49)
-    {
-      id: "clay_brick_standard",
-      name: "Standard Clay Brick",
-      originalPrice: 500,
-      discountPrice: 375, // 25% off
-      category: "4",
-    },
-    {
-      id: "concrete_brick_standard",
-      name: "Standard Concrete Brick",
-      originalPrice: 450,
-      discountPrice: 338, // 25% off
-      category: "4",
-    },
-    {
-      id: "ultra_cement",
-      name: "Ultra Tech Cement - Forman",
-      originalPrice: 1220,
-      discountPrice: 915, // 25% off
-      category: "4",
-    },
-    {
-      id: "rocket_cement",
-      name: "Rocket Cement - Forman",
-      originalPrice: 1400,
-      discountPrice: 1050, // 25% off
-      category: "4",
-    },
-    {
-      id: "fast_cement",
-      name: "Fast Cement - Forman",
-      originalPrice: 1400,
-      discountPrice: 1050, // 25% off
-      category: "4",
-    },
-    {
-      id: "white_cement",
-      name: "White Cement - Forman",
-      originalPrice: 1500,
-      discountPrice: 1125, // 25% off
-      category: "4",
-    },
-    {
-      id: "abc_cement",
-      name: "ABC Cement - Forman",
-      originalPrice: 1300,
-      discountPrice: 975, // 25% off
-      category: "4",
-    },
-    {
-      id: "sikacryl",
-      name: "SikaCryl Mix - Forman",
-      originalPrice: 950,
-      discountPrice: 712, // 25% off
-      category: "4",
-    },
-    {
-      id: "red_cement",
-      name: "Red Colored Cement - Forman",
-      originalPrice: 1700,
-      discountPrice: 1275, // 25% off
-      category: "4",
-    },
+    // Combine queries
+    const finalQuery = { ...baseQuery, ...categoryQuery };
 
-    // Only for you (51-59)
-    {
-      id: "rebar_8mm",
-      name: "8mm Reinforcement Bar (Rebar)",
-      originalPrice: 650,
-      discountPrice: 455, // 30% off
-      category: "5",
-    },
-    {
-      id: "smooth_rod_10mm",
-      name: "10mm Smooth Steel Rod",
-      originalPrice: 700,
-      discountPrice: 490, // 30% off
-      category: "5",
-    },
-    {
-      id: "ultra_cement",
-      name: "Ultra Tech Cement - VIP",
-      originalPrice: 1220,
-      discountPrice: 854, // 30% off
-      category: "5",
-    },
-    {
-      id: "rocket_cement",
-      name: "Rocket Cement - VIP",
-      originalPrice: 1400,
-      discountPrice: 980, // 30% off
-      category: "5",
-    },
-    {
-      id: "fast_cement",
-      name: "Fast Cement - VIP",
-      originalPrice: 1400,
-      discountPrice: 980, // 30% off
-      category: "5",
-    },
-    {
-      id: "white_cement",
-      name: "White Cement - VIP",
-      originalPrice: 1500,
-      discountPrice: 1050, // 30% off
-      category: "5",
-    },
-    {
-      id: "abc_cement",
-      name: "ABC Cement - VIP",
-      originalPrice: 1300,
-      discountPrice: 910, // 30% off
-      category: "5",
-    },
-    {
-      id: "sikacryl",
-      name: "SikaCryl Mix - VIP",
-      originalPrice: 950,
-      discountPrice: 665, // 30% off
-      category: "5",
-    },
-    {
-      id: "red_cement",
-      name: "Red Colored Cement - VIP",
-      originalPrice: 1700,
-      discountPrice: 1190, // 30% off
-      category: "5",
-    },
-  ];
+    // Fetch products from database
+    const products = await Product.find(finalQuery)
+      .select("productId productName discountConfig NormalPrice Stock")
+      .limit(9) // Limit to 9 products per category
+      .lean();
 
-  // Ensure category is a string
-  const categoryStr = String(category).trim();
-
-  // Rest of the function remains the same
-  const filteredProducts = allDiscountProducts.filter((product) => {
-    const match = product.category === categoryStr;
     console.log(
-      `Checking product: ${product.name}, Category: ${product.category}, Matches: ${match}`
+      `Found ${products.length} discount products for category ${category}`
     );
-    return match;
-  });
 
-  console.log(`Total discount products: ${allDiscountProducts.length}`);
-  console.log(
-    `Products found for category ${categoryStr}: ${filteredProducts.length}`
-  );
+    // Transform products to match the expected format
+    const transformedProducts = products.map((product) => ({
+      id: product.productId,
+      name: product.productName,
+      originalPrice:
+        product.discountConfig.originalPrice || product.NormalPrice,
+      discountPrice: product.discountConfig.newPrice,
+      category: category,
+      stock: product.Stock || 0,
+    }));
 
-  return filteredProducts;
+    return transformedProducts;
+  } catch (error) {
+    console.error("Error fetching discount products:", error);
+    return [];
+  }
 }
 
-function getDiscountProductByNumber(number) {
+// Simplified function to get discount product by number
+async function getDiscountProductByNumber(number) {
   console.log(`Attempting to retrieve product for number: ${number}`);
 
-  // Determine which category this number belongs to
-  let category;
-  if (number >= 11 && number <= 19) category = "1";
-  else if (number >= 21 && number <= 29) category = "2";
-  else if (number >= 31 && number <= 39) category = "3";
-  else if (number >= 41 && number <= 49) category = "4";
-  else if (number >= 51 && number <= 59) category = "5";
-  else {
-    console.log(`Invalid product number: ${number}`);
-    return null;
-  }
+  // Get all discounted products
+  const products = await getDiscountedProducts();
 
-  // Get base offset for this category
-  const baseOffset = {
-    1: 10, // General: 11-19
-    2: 20, // For your referral: 21-29
-    3: 30, // As forman for your referral: 31-39
-    4: 40, // As forman: 41-49
-    5: 50, // Only for you: 51-59
-  }[category];
+  // Check if the number is valid (1-based indexing)
+  const index = number - 1;
 
-  // Get the index in the category's product list
-  const index = number - baseOffset - 1;
-
-  // Get all products for this category
-  const products = getDiscountProductsForCategory(category);
-
-  console.log(
-    `Category: ${category}, Base Offset: ${baseOffset}, Calculated Index: ${index}`
-  );
-  console.log(`Total products in category: ${products.length}`);
-
-  // Return the product if index is valid
   if (index >= 0 && index < products.length) {
     const selectedProduct = products[index];
     console.log(`Found product: ${selectedProduct.name}`);
     console.log(`Product ID: ${selectedProduct.id}`);
 
-    return {
-      ...selectedProduct,
-      category: category,
-    };
+    return selectedProduct;
   } else {
     console.log(`No product found for number ${number}`);
     return null;
-  }
-}
-
-async function sendReferralToContact(referrerCustomer, referralImage, contact) {
-  try {
-    // Ensure the contact has a proper WhatsApp format
-    let contactNumber = contact.phoneNumber;
-    if (!contactNumber.includes("@c.us")) {
-      // Add @c.us if not already present
-      contactNumber = contactNumber.replace(/\D/g, "") + "@c.us";
-    }
-
-    // Validate phone number
-    if (!contactNumber || contactNumber.length < 10) {
-      console.error(`Invalid contact number: ${contactNumber}`);
-      return;
-    }
-
-    // Ensure referrer name
-    const referrerName = referrerCustomer.name || "A friend";
-
-    // Prepare referral message
-    const referralMessage =
-      `Hello ${contact.name || "there"}!\n\n` +
-      `${referrerName} has referred you to Construction Materials Hub! 🏗️\n\n` +
-      `Join now and get 10% off your first order with referral code:\n` +
-      `${
-        referrerCustomer.referralCode ||
-        "CM" + referrerCustomer._id.toString().substring(0, 6)
-      }\n\n` +
-      `Reply "hi" to start shopping!`;
-
-    // Send the referral message
-    await sendWhatsAppMessage(contactNumber, referralMessage);
-
-    // Send the referral image with caption
-    if (referralImage && referralImage.imagePath) {
-      try {
-        const imagePath = path.join(__dirname, "..", referralImage.imagePath);
-        if (fs.existsSync(imagePath)) {
-          const media = MessageMedia.fromFilePath(imagePath);
-          await client.sendMessage(contactNumber, media, {
-            caption: `Referral video from ${referrerName}`,
-          });
-        } else {
-          console.error(`Image not found: ${imagePath}`);
-        }
-      } catch (imageError) {
-        console.error("Error sending referral image:", imageError);
-      }
-    }
-
-    // Update the contact status
-    const imageIndex = referrerCustomer.referralImages.findIndex(
-      (v) => v.imageId === referralImage.imageId
-    );
-    if (imageIndex !== -1) {
-      const contactIndex = referrerCustomer.referralImages[
-        imageIndex
-      ].sharedWith.findIndex((c) => c.phoneNumber === contact.phoneNumber);
-
-      if (contactIndex !== -1) {
-        referrerCustomer.referralImages[imageIndex].sharedWith[
-          contactIndex
-        ].status = "sent";
-        await referrerCustomer.save();
-      }
-    }
-
-    // Log the successful referral
-    console.log(
-      `Referral sent from ${referrerName} to ${
-        contact.name || "contact"
-      } (${contactNumber})`
-    );
-  } catch (error) {
-    console.error(
-      `Error sending referral to ${contact.name || "contact"}:`,
-      error
-    );
   }
 }
 
@@ -7375,7 +7238,7 @@ async function sendProductsList(phoneNumber, customer, subCategoryName) {
   customer.contextData.productList = products.map((p) => p._id.toString());
 
   products.forEach((prod, idx) => {
-    const price = prod.priceAfterDiscount ?? prod.suggestedRetailPrice ?? 0;
+    const price = prod.NormalPrice ?? prod.NormalPrice ?? 0;
     msg += `${idx + 1}. ${prod.productName} - Rp ${price}\n`;
   });
 
@@ -7392,7 +7255,7 @@ async function sendProductDetails(to, customer, product) {
   const price =
     product.finalPrice != null
       ? product.finalPrice
-      : product.priceAfterDiscount || product.suggestedRetailPrice;
+      : product.NormalPrice || product.NormalPrice;
 
   // Build the prompt exactly as before
   const caption =
@@ -7403,17 +7266,39 @@ async function sendProductDetails(to, customer, product) {
     `2- No return to previous menu\n` +
     `3- Return to main menu`;
 
-  // If we have an image buffer, send it with the caption
+  // If we have an image buffer, send it with the caption using Ultramsg
   if (product.masterImage && product.masterImage.data) {
-    const buf = Buffer.isBuffer(product.masterImage.data)
-      ? product.masterImage.data
-      : product.masterImage.data.buffer;
-    const base64 = buf.toString("base64");
-    const media = new MessageMedia(
-      product.masterImage.contentType || "image/png",
-      base64
-    );
-    return client.sendMessage(to, media, { caption });
+    try {
+      const buf = Buffer.isBuffer(product.masterImage.data)
+        ? product.masterImage.data
+        : product.masterImage.data.buffer;
+      const base64 = buf.toString("base64");
+
+      const cleanTo = to.replace(/@c\.us|@s\.whatsapp\.net/g, "");
+      const mimeType = product.masterImage.contentType || "image/png";
+
+      const formData = new URLSearchParams();
+      formData.append("token", ULTRAMSG_CONFIG.token);
+      formData.append("to", cleanTo);
+      formData.append("image", `data:${mimeType};base64,${base64}`);
+      formData.append("caption", caption);
+
+      const response = await axios.post(
+        `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/image`,
+        formData,
+        {
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+        }
+      );
+
+      console.log("📸 Product image sent successfully");
+      return;
+    } catch (error) {
+      console.error("❌ Error sending product image:", error);
+      // Fallback to text only
+    }
   }
 
   // Otherwise fallback to text only
@@ -7626,17 +7511,28 @@ async function sendOrderSummary(phoneNumber, customer) {
   await customer.addToChatHistory(message, "bot");
 }
 
-// Initialize WhatsApp Client
-client.initialize();
-
-// REST API Endpoint (if needed)
-router.post("/webhook", async (req, res) => {
+// Test endpoint for Ultramsg
+router.get("/test-message", async (req, res) => {
   try {
-    // This endpoint could be used for external integrations
-    res.status(200).send("Webhook received");
+    const { to, message } = req.query;
+
+    if (!to || !message) {
+      return res
+        .status(400)
+        .json({ error: "Missing to or message parameters" });
+    }
+
+    const result = await sendWhatsAppMessage(to, message);
+    res.json(result);
   } catch (error) {
-    console.error("Error in webhook:", error);
-    res.status(500).send("Internal Server Error");
+    console.error("Test message error:", error);
+    res.status(500).json({ error: "Failed to send test message" });
   }
 });
+
+console.log("🚀 Ultramsg WhatsApp Bot Router Initialized");
+console.log(`📱 Instance ID: ${ULTRAMSG_CONFIG.instanceId}`);
+console.log(`🔗 Webhook endpoint: /webhook`);
+console.log(`✅ Ready to receive messages via Ultramsg webhooks`);
+
 module.exports = router;
