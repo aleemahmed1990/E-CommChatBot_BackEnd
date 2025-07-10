@@ -10,6 +10,7 @@ const jwt = require("jsonwebtoken");
 const speakeasy = require("speakeasy");
 const QRCode = require("qrcode");
 const rateLimit = require("express-rate-limit");
+const Admin = require("./models/admin");
 
 // Load environment variables
 dotenv.config();
@@ -81,7 +82,7 @@ const videoUpload = multer({
 
 // ========== ROUTE IMPORTS ==========
 const { router: adminAuthRouter } = require("./routes/adminAuth");
-const Admin = require("./routes/admin");
+
 const ordersRouter = require("./routes/orders");
 const employeeRoutes = require("./routes/employeeRoutes");
 const supplierRoutes = require("./routes/supplierRoutes");
