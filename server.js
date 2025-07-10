@@ -81,7 +81,7 @@ const videoUpload = multer({
 
 // ========== ROUTE IMPORTS ==========
 const { router: adminAuthRouter } = require("./routes/adminAuth");
-const Admin = require("./models/admin");
+const Admin = require("./routes/admin");
 const ordersRouter = require("./routes/orders");
 const employeeRoutes = require("./routes/employeeRoutes");
 const supplierRoutes = require("./routes/supplierRoutes");
