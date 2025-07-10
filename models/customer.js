@@ -1,16 +1,132 @@
 const mongoose = require("mongoose");
 
+// Enhanced support ticket schema with media support
 const supportTicketSchema = new mongoose.Schema(
   {
+    ticketId: {
+      type: String,
+      required: true,
+      default: function () {
+        return "TICK" + Date.now().toString().slice(-8);
+      },
+    },
     orderId: String,
-    type: String,
-    issueType: String,
+    type: {
+      type: String,
+      enum: [
+        "delivery_issue",
+        "product_issue",
+        "payment_problem",
+        "agent_request",
+        "complaint",
+        "address_change",
+        "delivery_reschedule",
+        "other",
+      ],
+      required: true,
+    },
+    subType: {
+      type: String,
+      enum: [
+        // Delivery issues
+        "track_order",
+        "delivery_delayed",
+        "change_delivery_address",
+        "driver_location_issue",
+        "marked_delivered_not_received",
+        "reschedule_delivery",
+        // Product issues
+        "broken_item",
+        "missing_wrong_amount",
+        "wrong_item",
+        "product_other",
+        // Payment problems
+        "paid_no_confirmation",
+        "payment_failed",
+        "paid_different_name",
+        "charged_twice",
+        "unsure_payment",
+        "use_credited_funds",
+      ],
+    },
     issueDetails: String,
-    details: String,
+    customerMessage: String,
+
+    // Media attachments (videos, images, voice notes)
+    mediaAttachments: [
+      {
+        mediaId: String, // UltraMsg media ID
+        mediaType: {
+          type: String,
+          enum: ["image", "video", "voice", "document"],
+          required: true,
+        },
+        mimetype: String,
+        filename: String,
+        caption: String,
+        base64Data: String, // Store media as base64
+        fileSize: Number,
+        uploadedAt: {
+          type: Date,
+          default: Date.now,
+        },
+        ultraMsgUrl: String, // UltraMsg media URL if available
+      },
+    ],
+
+    // Payment related data
+    paymentData: {
+      paymentScreenshot: {
+        base64Data: String,
+        mimetype: String,
+        uploadedAt: Date,
+      },
+      payerName: String,
+      isInternationalTransfer: Boolean,
+      transactionId: String,
+      bankName: String,
+      paymentAmount: Number,
+    },
+
+    // Delivery related data
+    deliveryData: {
+      currentAddress: String,
+      newAddress: String,
+      newDeliveryDate: String,
+      newDeliveryTime: String,
+      nearbyLandmark: String,
+      googleMapLink: String,
+      isOrderDispatched: Boolean,
+      extraChargesApplicable: Boolean,
+      estimatedExtraCharge: Number,
+    },
+
+    // Product issue data
+    productData: {
+      affectedItems: [String], // List of product names
+      issueDescription: String,
+      damagePhotos: [
+        {
+          base64Data: String,
+          mimetype: String,
+          uploadedAt: Date,
+        },
+      ],
+      customerPreference: {
+        type: String,
+        enum: ["keep_and_pay", "replace", "refund", "bring_to_facility"],
+      },
+    },
+
     status: {
       type: String,
-      enum: ["open", "in_progress", "resolved", "closed"],
+      enum: ["open", "in_progress", "resolved", "closed", "escalated"],
       default: "open",
+    },
+    priority: {
+      type: String,
+      enum: ["low", "medium", "high", "urgent"],
+      default: "medium",
     },
     agentNotes: String,
     createdAt: {
@@ -22,17 +138,80 @@ const supportTicketSchema = new mongoose.Schema(
       default: Date.now,
     },
     resolution: String,
+    resolvedAt: Date,
+    estimatedResolutionTime: String, // e.g., "within 1 hour", "1-2 business days"
   },
   { _id: false }
 );
 
-// Complaint schema for order-specific complaints - FIXED: removed unique constraint
+// Complaint schema for order-specific complaints
 const complaintSchema = new mongoose.Schema(
   {
     complaintId: {
       type: String,
       required: true,
-      // REMOVED: unique: true, // This was causing the duplicate key error
+      default: function () {
+        return "COMP" + Date.now().toString().slice(-8);
+      },
+    },
+    orderId: String, // Optional - complaint may not be order related
+
+    // Media attachments for complaints
+    mediaAttachments: [
+      {
+        mediaId: String,
+        mediaType: {
+          type: String,
+          enum: ["video", "voice", "image"],
+          required: true,
+        },
+        mimetype: String,
+        filename: String,
+        base64Data: String,
+        fileSize: Number,
+        uploadedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+
+    textSummary: String,
+    isOrderRelated: Boolean,
+    complaintCategory: String,
+    severity: {
+      type: String,
+      enum: ["low", "medium", "high", "critical"],
+      default: "medium",
+    },
+
+    customerContactDetails: {
+      preferredContactMethod: String,
+      alternatePhone: String,
+      email: String,
+    },
+
+    status: {
+      type: String,
+      enum: ["submitted", "under_review", "in_progress", "resolved"],
+      default: "submitted",
+    },
+    submittedAt: {
+      type: Date,
+      default: Date.now,
+    },
+    resolution: String,
+    resolvedAt: Date,
+  },
+  { _id: false }
+);
+
+// Original complaint schema for order-specific complaints - FIXED: removed unique constraint
+const originalComplaintSchema = new mongoose.Schema(
+  {
+    complaintId: {
+      type: String,
+      required: true,
     },
     issueTypes: [
       {
@@ -92,6 +271,7 @@ const ORDER_STATUSES = [
   "order-pickuped-up",
   "on-way",
   "driver-confirmed",
+  "order-processed",
   "refund",
   "complain-order",
   "issue-driver",
@@ -138,6 +318,123 @@ const customerSchema = new mongoose.Schema(
       default: "new", // Tracks where they are in the conversation flow
     },
 
+    // Current support conversation tracking
+    currentSupportFlow: {
+      mainCategory: String, // "delivery_product", "check_delivery", "payment", etc.
+      subCategory: String, // "delivery_issue", "product_issue", etc.
+      specificIssue: String, // "track_order", "broken_item", etc.
+      currentStep: String, // Current step in the flow
+      tempData: mongoose.Schema.Types.Mixed, // Temporary data during conversation
+      mediaExpected: Boolean, // Whether we're expecting media upload
+      lastInteraction: Date,
+      sessionId: String, // To track support sessions
+    },
+
+    // Enhanced support tickets with media
+    supportTickets: [supportTicketSchema],
+
+    // Complaints with media support
+    complaints: [complaintSchema],
+
+    // Support interaction history
+    supportInteractionHistory: [
+      {
+        sessionId: String,
+        startTime: Date,
+        endTime: Date,
+        category: String,
+        issueResolved: Boolean,
+        satisfaction: Number, // 1-5 rating
+        agentInvolved: Boolean,
+        totalMessages: Number,
+        mediaShared: Number,
+        lastAction: String,
+        lastActionTime: Date,
+      },
+    ],
+
+    // Support preferences
+    supportPreferences: {
+      preferredLanguage: {
+        type: String,
+        default: "english",
+      },
+      contactMethod: {
+        type: String,
+        enum: ["whatsapp", "phone", "email"],
+        default: "whatsapp",
+      },
+      allowMediaSharing: {
+        type: Boolean,
+        default: true,
+      },
+    },
+
+    // FAQ interaction tracking
+    faqInteractions: [
+      {
+        question: String,
+        category: String,
+        timestamp: Date,
+        helpful: Boolean,
+      },
+    ],
+
+    // Delivery address change history
+    addressChangeHistory: [
+      {
+        orderId: String,
+        oldAddress: String,
+        newAddress: String,
+        requestedAt: Date,
+        status: {
+          type: String,
+          enum: ["pending", "approved", "rejected", "too_late"],
+          default: "pending",
+        },
+        extraCharges: Number,
+        approvedAt: Date,
+      },
+    ],
+
+    // Payment issue tracking
+    paymentIssues: [
+      {
+        issueId: String,
+        orderId: String,
+        issueType: String,
+        description: String,
+        paymentScreenshot: {
+          base64Data: String,
+          mimetype: String,
+          uploadedAt: Date,
+        },
+        payerName: String,
+        isInternationalTransfer: Boolean,
+        status: {
+          type: String,
+          enum: ["reported", "investigating", "resolved"],
+          default: "reported",
+        },
+        reportedAt: Date,
+        resolvedAt: Date,
+      },
+    ],
+
+    // Media storage for support
+    supportMedia: [
+      {
+        mediaId: String,
+        ticketId: String,
+        mediaType: String,
+        base64Data: String,
+        mimetype: String,
+        fileSize: Number,
+        uploadedAt: Date,
+        description: String,
+      },
+    ],
+
     // Add these new fields for referrals
     referralCode: {
       type: String,
@@ -145,6 +442,28 @@ const customerSchema = new mongoose.Schema(
         return "CM" + this._id.toString().substring(0, 6);
       },
     },
+
+    referraldemovideos: [
+      {
+        videoId: mongoose.Schema.Types.ObjectId,
+        title: String,
+        mimetype: String,
+        filename: String,
+        fileSize: Number,
+        base64Data: String, // Binary data as base64
+        status: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
+        uploadDate: {
+          type: Date,
+          default: Date.now,
+        },
+        ultraMsgCompatible: Boolean,
+      },
+    ],
+
     // Replace the existing referralvideos section with this updated version:
     referralvideos: [
       {
@@ -275,9 +594,6 @@ const customerSchema = new mongoose.Schema(
       default: [],
     },
 
-    // ✅ Now this is valid
-    supportTickets: [supportTicketSchema],
-
     contextData: {
       // Store additional context for the current conversation state
       categoryId: String,
@@ -340,6 +656,18 @@ const customerSchema = new mongoose.Schema(
       bankName: String,
       transactionId: String,
       temporaryItemDetails: Object, // For temporary storage during shopping process
+
+      // Support-related context data
+      reportingOrderId: String,
+      issueType: String,
+      issueDetails: String,
+      complaintDetails: String,
+      paymentScreenshot: Object,
+      payerName: String,
+      isInternationalTransfer: Boolean,
+      complaintMedia: Object,
+      textSummary: String,
+      isOrderRelated: Boolean,
     },
 
     bankAccounts: [
@@ -436,14 +764,6 @@ const customerSchema = new mongoose.Schema(
           default: "heavy-pickup",
         },
         truckOnDeliver: { type: Boolean, default: false },
-        totalAmount: {
-          type: Number,
-          default: 0,
-        },
-        deliveryOption: {
-          type: String,
-          default: "Normal Delivery",
-        },
         // ADD THESE NEW FIELDS:
         deliveryType: {
           type: String,
@@ -455,17 +775,12 @@ const customerSchema = new mongoose.Schema(
           enum: ["normal", "speed", "early_morning", "eco"],
           default: "normal",
         },
-        deliveryLocation: String,
         // ADD THIS STRUCTURED OBJECT FOR DELIVERY ADDRESS:
         deliveryAddress: {
           nickname: String,
           area: String,
           fullAddress: String,
           googleMapLink: String,
-        },
-        deliveryCharge: {
-          type: Number,
-          default: 0,
         },
         // For eco delivery discount:
         ecoDeliveryDiscount: {
@@ -481,7 +796,7 @@ const customerSchema = new mongoose.Schema(
         },
         allocatedAt: Date,
         // Add complaints array to each order
-        complaints: [complaintSchema],
+        complaints: [originalComplaintSchema],
       },
     ],
     cart: {
@@ -498,6 +813,22 @@ const customerSchema = new mongoose.Schema(
           imageUrl: String,
         },
       ],
+      totalAmount: {
+        type: Number,
+        default: 0,
+      },
+      deliveryCharge: {
+        type: Number,
+        default: 0,
+      },
+      deliveryOption: {
+        type: String,
+        default: "Normal Delivery",
+      },
+      deliveryLocation: {
+        type: String,
+        default: "",
+      },
     },
 
     chatHistory: [
@@ -839,7 +1170,7 @@ customerSchema.methods.createOrder = function () {
   const newOrder = {
     orderId: orderId,
     items: [...this.cart.items],
-    totalAmount: this.cart.totalAmount + this.cart.deliveryCharge,
+    totalAmount: this.cart.totalAmount + (this.cart.deliveryCharge || 0),
     deliveryOption: this.cart.deliveryOption,
     deliveryLocation: this.cart.deliveryLocation,
     deliveryCharge: this.cart.deliveryCharge,
@@ -887,7 +1218,192 @@ customerSchema.methods.updateForemanStatus = function (
 
   return this.save();
 };
-// ========== METHODS TO ADD TO CUSTOMER SCHEMA ==========
+
+// ========== SUPPORT SYSTEM METHODS ==========
+
+// Method to create support ticket with media
+customerSchema.methods.createSupportTicket = function (ticketData) {
+  if (!this.supportTickets) {
+    this.supportTickets = [];
+  }
+
+  const ticket = {
+    ticketId: "TICK" + Date.now().toString().slice(-8),
+    ...ticketData,
+    createdAt: new Date(),
+    lastUpdated: new Date(),
+  };
+
+  this.supportTickets.push(ticket);
+  return this.save().then(() => ticket.ticketId);
+};
+
+// Method to add media to support ticket
+customerSchema.methods.addMediaToTicket = function (ticketId, mediaData) {
+  const ticket = this.supportTickets.find((t) => t.ticketId === ticketId);
+  if (ticket) {
+    if (!ticket.mediaAttachments) {
+      ticket.mediaAttachments = [];
+    }
+    ticket.mediaAttachments.push({
+      ...mediaData,
+      uploadedAt: new Date(),
+    });
+    ticket.lastUpdated = new Date();
+    return this.save();
+  }
+  return Promise.reject(new Error("Ticket not found"));
+};
+
+// Method to create complaint with media
+customerSchema.methods.createComplaint = function (complaintData) {
+  if (!this.complaints) {
+    this.complaints = [];
+  }
+
+  const complaint = {
+    complaintId: "COMP" + Date.now().toString().slice(-8),
+    ...complaintData,
+    submittedAt: new Date(),
+  };
+
+  this.complaints.push(complaint);
+  return this.save().then(() => complaint.complaintId);
+};
+
+// Method to update support flow state
+customerSchema.methods.updateSupportFlow = function (flowData) {
+  if (!this.currentSupportFlow) {
+    this.currentSupportFlow = {};
+  }
+
+  this.currentSupportFlow = {
+    ...this.currentSupportFlow,
+    ...flowData,
+    lastInteraction: new Date(),
+  };
+  return this.save();
+};
+
+// Method to clear support flow
+customerSchema.methods.clearSupportFlow = function () {
+  this.currentSupportFlow = {
+    mainCategory: null,
+    subCategory: null,
+    specificIssue: null,
+    currentStep: null,
+    tempData: {},
+    mediaExpected: false,
+    lastInteraction: new Date(),
+    sessionId: null,
+  };
+  return this.save();
+};
+
+// Method to log support interaction
+customerSchema.methods.logSupportInteraction = function (action, details = {}) {
+  if (!this.supportInteractionHistory) {
+    this.supportInteractionHistory = [];
+  }
+
+  const sessionId = this.currentSupportFlow?.sessionId || "SESS" + Date.now();
+
+  let currentSession = this.supportInteractionHistory.find(
+    (session) => session.sessionId === sessionId
+  );
+
+  if (currentSession) {
+    currentSession.totalMessages += 1;
+    currentSession.lastAction = action;
+    currentSession.lastActionTime = new Date();
+    if (details.mediaShared) {
+      currentSession.mediaShared += 1;
+    }
+  } else {
+    // Create new session
+    this.supportInteractionHistory.push({
+      sessionId: sessionId,
+      startTime: new Date(),
+      category: this.currentSupportFlow?.mainCategory || "unknown",
+      totalMessages: 1,
+      mediaShared: details.mediaShared ? 1 : 0,
+      lastAction: action,
+      lastActionTime: new Date(),
+    });
+
+    // Update current support flow with session ID
+    if (this.currentSupportFlow) {
+      this.currentSupportFlow.sessionId = sessionId;
+    }
+  }
+
+  return this.save();
+};
+
+// Method to add payment issue
+customerSchema.methods.addPaymentIssue = function (issueData) {
+  if (!this.paymentIssues) {
+    this.paymentIssues = [];
+  }
+
+  const paymentIssue = {
+    issueId: "PAY" + Date.now().toString().slice(-8),
+    ...issueData,
+    reportedAt: new Date(),
+  };
+
+  this.paymentIssues.push(paymentIssue);
+  return this.save().then(() => paymentIssue.issueId);
+};
+
+// Method to add address change request
+customerSchema.methods.addAddressChangeRequest = function (changeData) {
+  if (!this.addressChangeHistory) {
+    this.addressChangeHistory = [];
+  }
+
+  const addressChange = {
+    ...changeData,
+    requestedAt: new Date(),
+    status: "pending",
+  };
+
+  this.addressChangeHistory.push(addressChange);
+  return this.save();
+};
+
+// Method to add FAQ interaction
+customerSchema.methods.addFAQInteraction = function (question, category) {
+  if (!this.faqInteractions) {
+    this.faqInteractions = [];
+  }
+
+  this.faqInteractions.push({
+    question: question,
+    category: category,
+    timestamp: new Date(),
+    helpful: true,
+  });
+
+  return this.save();
+};
+
+// Method to save support media
+customerSchema.methods.saveSupportMedia = function (mediaData) {
+  if (!this.supportMedia) {
+    this.supportMedia = [];
+  }
+
+  const supportMediaItem = {
+    ...mediaData,
+    uploadedAt: new Date(),
+  };
+
+  this.supportMedia.push(supportMediaItem);
+  return this.save();
+};
+
+// ========== COMMISSION MANAGEMENT METHODS ==========
 
 // Method to calculate commission earned from a referred customer's order
 customerSchema.methods.calculateCommissionFromOrder = function (
@@ -1018,6 +1534,7 @@ customerSchema.methods.getCommissionDashboard = function () {
     commissionHistory: this.commissionHistory || [],
   };
 };
+
 // Method to calculate performance score
 customerSchema.methods.calculatePerformanceScore = function () {
   const referrals = this.getTotalReferrals();
@@ -1090,6 +1607,24 @@ customerSchema.methods.getForemanDashboard = function () {
     statusHistory: this.foremanStatusHistory || [],
   };
 };
+
+// Method to get support dashboard data
+customerSchema.methods.getSupportDashboard = function () {
+  return {
+    activeTickets:
+      this.supportTickets?.filter((t) => t.status === "open").length || 0,
+    totalTickets: this.supportTickets?.length || 0,
+    complaints: this.complaints?.length || 0,
+    paymentIssues:
+      this.paymentIssues?.filter((p) => p.status === "reported").length || 0,
+    addressChanges:
+      this.addressChangeHistory?.filter((a) => a.status === "pending").length ||
+      0,
+    supportPreferences: this.supportPreferences || {},
+    lastSupportInteraction: this.currentSupportFlow?.lastInteraction || null,
+  };
+};
+
 // Method to update order status
 customerSchema.methods.updateOrderStatus = function (orderId, status) {
   const orderIndex = this.orderHistory.findIndex(
@@ -1109,7 +1644,7 @@ function arrayLimit(val) {
   return val.length > 0;
 }
 
-// Then create a new model with the updated schema
+// Create the model
 const Customer = mongoose.model("Customer", customerSchema);
 
 module.exports = Customer;

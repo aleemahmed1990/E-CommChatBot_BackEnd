@@ -50,6 +50,127 @@ const uploadFields = upload.fields([
   { name: "moreImage5", maxCount: 1 },
 ]);
 
+// ─── 4) CREATE Endpoint with pricing sanitization ────────────────────────
+router.post("/", async (req, res) => {
+  try {
+    const d = req.body;
+
+    // 1) Child‐product shorthands:
+    const productName =
+      d.productType === "Child" ? d.varianceName : d.productName;
+    const description =
+      d.productType === "Child" ? d.subtitleDescription : d.description;
+
+    // 2) Pricing fields
+    const anyDiscount = parseOptionalNumber(d.anyDiscount);
+    const NormalPrice = parseOptionalNumber(d.NormalPrice);
+    const Stock = parseOptionalNumber(d.Stock);
+
+    // 3) Parse specs/tags
+    const specifications = d.specifications
+      ? typeof d.specifications === "string"
+        ? JSON.parse(d.specifications)
+        : d.specifications
+      : [];
+    const tags = d.tags
+      ? typeof d.tags === "string"
+        ? JSON.parse(d.tags)
+        : d.tags
+      : [];
+
+    // 4) Boolean flags
+    const onceShare = d.onceShare === "true" || d.onceShare === true;
+    const noChildHideParent =
+      d.noChildHideParent === "true" || d.noChildHideParent === true;
+
+    // 5) Inventory flags
+    const useAmountStockmintoReorder =
+      d.useAmountStockmintoReorder === "true" ||
+      d.useAmountStockmintoReorder === true;
+    const useSafetyDays =
+      d.useSafetyDays === "true" || d.useSafetyDays === true;
+    const noReorder = d.noReorder === "true" || d.noReorder === true;
+
+    // 6) Build and save the document
+    const product = new Product({
+      productType: d.productType,
+      productName,
+      description,
+      varianceName: d.varianceName,
+      subtitleDescription: d.subtitleDescription,
+
+      globalTradeItemNumber: d.globalTradeItemNumber,
+      k3lNumber: d.k3lNumber,
+      sniNumber: d.sniNumber,
+
+      specifications,
+
+      // Inventory
+      Stock: parseOptionalNumber(d.Stock),
+      minimumOrder: parseOptionalNumber(d.minimumOrder),
+      useAmountStockmintoReorder,
+      useSafetyDays,
+      noReorder,
+      AmountStockmintoReorder: parseOptionalNumber(d.AmountStockmintoReorder),
+      safetyDays: parseOptionalNumber(d.safetyDays),
+      safetyDaysStock: parseOptionalNumber(d.safetyDaysStock),
+      deliveryDays: d.deliveryDays,
+      deliveryTime: d.deliveryTime,
+      reOrderSetting: d.reOrderSetting,
+      inventoryInDays: d.inventoryInDays,
+      deliveryPeriod: d.deliveryPeriod,
+      orderTimeBackupInventory: d.orderTimeBackupInventory,
+
+      alternateSupplier: d.alternateSupplier,
+      supplierName: d.supplierName,
+      supplierContact: d.supplierContact,
+      supplierAddress: d.supplierAddress,
+      supplierEmail: d.supplierEmail,
+      supplierWebsite: d.supplierWebsite,
+      supplierInformation: d.supplierInformation,
+
+      // **Pricing**
+      anyDiscount,
+      NormalPrice,
+      Stock,
+
+      visibility: d.visibility,
+      onceShare,
+      noChildHideParent,
+
+      categories: d.categories,
+      subCategories: d.subCategories,
+      tags,
+      notes: d.notes,
+
+      // Images
+      masterImage: d.masterImage
+        ? {
+            data: Buffer.from(d.masterImage, "base64"),
+            contentType: d.masterImageType,
+          }
+        : null,
+      moreImages: Array.isArray(d.moreImages)
+        ? d.moreImages.map((img) => ({
+            data: Buffer.from(img.data, "base64"),
+            contentType: img.contentType,
+          }))
+        : [],
+    });
+
+    await product.save();
+
+    // 7) Extract weight from first specification
+    const out = product.toObject();
+    out.weight = out.specifications?.[0]?.weight ?? null;
+
+    return res.status(201).json({ success: true, data: out });
+  } catch (err) {
+    console.error("Error saving product:", err);
+    return res.status(400).json({ success: false, message: err.message });
+  }
+});
+
 // ============================================================================
 // MISSING DISCOUNT FETCH ROUTES - Add these to your products.js router
 // ============================================================================
@@ -1483,127 +1604,6 @@ router.get("/alerts/low-Stock", async (req, res) => {
       message: "Server error while fetching low Stock alerts",
       error: err.message,
     });
-  }
-});
-
-// ─── 4) CREATE Endpoint with pricing sanitization ────────────────────────
-router.post("/", async (req, res) => {
-  try {
-    const d = req.body;
-
-    // 1) Child‐product shorthands:
-    const productName =
-      d.productType === "Child" ? d.varianceName : d.productName;
-    const description =
-      d.productType === "Child" ? d.subtitleDescription : d.description;
-
-    // 2) Pricing fields
-    const anyDiscount = parseOptionalNumber(d.anyDiscount);
-    const NormalPrice = parseOptionalNumber(d.NormalPrice);
-    const Stock = parseOptionalNumber(d.Stock);
-
-    // 3) Parse specs/tags
-    const specifications = d.specifications
-      ? typeof d.specifications === "string"
-        ? JSON.parse(d.specifications)
-        : d.specifications
-      : [];
-    const tags = d.tags
-      ? typeof d.tags === "string"
-        ? JSON.parse(d.tags)
-        : d.tags
-      : [];
-
-    // 4) Boolean flags
-    const onceShare = d.onceShare === "true" || d.onceShare === true;
-    const noChildHideParent =
-      d.noChildHideParent === "true" || d.noChildHideParent === true;
-
-    // 5) Inventory flags
-    const useAmountStockmintoReorder =
-      d.useAmountStockmintoReorder === "true" ||
-      d.useAmountStockmintoReorder === true;
-    const useSafetyDays =
-      d.useSafetyDays === "true" || d.useSafetyDays === true;
-    const noReorder = d.noReorder === "true" || d.noReorder === true;
-
-    // 6) Build and save the document
-    const product = new Product({
-      productType: d.productType,
-      productName,
-      description,
-      varianceName: d.varianceName,
-      subtitleDescription: d.subtitleDescription,
-
-      globalTradeItemNumber: d.globalTradeItemNumber,
-      k3lNumber: d.k3lNumber,
-      sniNumber: d.sniNumber,
-
-      specifications,
-
-      // Inventory
-      Stock: parseOptionalNumber(d.Stock),
-      minimumOrder: parseOptionalNumber(d.minimumOrder),
-      useAmountStockmintoReorder,
-      useSafetyDays,
-      noReorder,
-      AmountStockmintoReorder: parseOptionalNumber(d.AmountStockmintoReorder),
-      safetyDays: parseOptionalNumber(d.safetyDays),
-      safetyDaysStock: parseOptionalNumber(d.safetyDaysStock),
-      deliveryDays: d.deliveryDays,
-      deliveryTime: d.deliveryTime,
-      reOrderSetting: d.reOrderSetting,
-      inventoryInDays: d.inventoryInDays,
-      deliveryPeriod: d.deliveryPeriod,
-      orderTimeBackupInventory: d.orderTimeBackupInventory,
-
-      alternateSupplier: d.alternateSupplier,
-      supplierName: d.supplierName,
-      supplierContact: d.supplierContact,
-      supplierAddress: d.supplierAddress,
-      supplierEmail: d.supplierEmail,
-      supplierWebsite: d.supplierWebsite,
-      supplierInformation: d.supplierInformation,
-
-      // **Pricing**
-      anyDiscount,
-      NormalPrice,
-      Stock,
-
-      visibility: d.visibility,
-      onceShare,
-      noChildHideParent,
-
-      categories: d.categories,
-      subCategories: d.subCategories,
-      tags,
-      notes: d.notes,
-
-      // Images
-      masterImage: d.masterImage
-        ? {
-            data: Buffer.from(d.masterImage, "base64"),
-            contentType: d.masterImageType,
-          }
-        : null,
-      moreImages: Array.isArray(d.moreImages)
-        ? d.moreImages.map((img) => ({
-            data: Buffer.from(img.data, "base64"),
-            contentType: img.contentType,
-          }))
-        : [],
-    });
-
-    await product.save();
-
-    // 7) Extract weight from first specification
-    const out = product.toObject();
-    out.weight = out.specifications?.[0]?.weight ?? null;
-
-    return res.status(201).json({ success: true, data: out });
-  } catch (err) {
-    console.error("Error saving product:", err);
-    return res.status(400).json({ success: false, message: err.message });
   }
 });
 

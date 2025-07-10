@@ -3,13 +3,15 @@ const router = express.Router();
 const mongoose = require("mongoose");
 const axios = require("axios"); // For HTTP requests to Ultramsg API
 const path = require("path");
+const PDFDocument = require("pdfkit");
 const fs = require("fs");
+const Video = require("../models/video"); // Add this with other requires
 const moment = require("moment");
 const Category = require("../models/Category");
 const Product = require("../models/Product");
 const Customer = require("../models/customer");
+
 const mkdirp = require("mkdirp");
-const sharp = require("sharp");
 
 // Ultramsg Configuration
 const ULTRAMSG_CONFIG = {
@@ -24,6 +26,13 @@ const ULTRAMSG_CONFIG = {
 const referralvideosDir = path.join(__dirname, "../referral_images");
 mkdirp.sync(referralvideosDir);
 
+const TEMP_DOCS_DIR = path.join(__dirname, "../temp_docs");
+
+// 2. Ensure temp directory exists on startup
+if (!fs.existsSync(TEMP_DOCS_DIR)) {
+  fs.mkdirSync(TEMP_DOCS_DIR, { recursive: true });
+  console.log(`📂 Created temp docs directory at ${TEMP_DOCS_DIR}`);
+}
 // MongoDB Connection
 const mongoURI =
   "mongodb+srv://realahmedali4:HcPqEvYvWK4Yvrgs@cluster0.cjdum.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
@@ -35,6 +44,13 @@ mongoose
   })
   .then(() => console.log("MongoDB connected successfully"))
   .catch((err) => console.error("MongoDB connection error:", err));
+
+// Start checking for confirmations every 1 minutes
+setInterval(checkAndSendConfirmations, 1 * 60 * 1000);
+console.log("🔄 Enabled automatic confirmation checks every 2 minutes");
+
+// Run initial check
+checkAndSendConfirmations();
 
 // Counter model for order IDs
 const Counter = mongoose.model(
@@ -331,11 +347,325 @@ router.get("/instance-info", async (req, res) => {
     res.status(500).json({ error: "Failed to get instance info" });
   }
 });
+// 5. Enhanced order status update endpoint
+router.put("/api/orders/:orderId/status", async (req, res) => {
+  const { orderId } = req.params;
+  const { status } = req.body;
 
+  console.log(`🔄 Processing status update for ${orderId} to ${status}`);
+
+  try {
+    // Find customer with this order
+    const customer = await Customer.findOne({
+      "orderHistory.orderId": orderId,
+    }).lean();
+
+    if (!customer) {
+      console.error(`❌ Order ${orderId} not found`);
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    // Update status in database
+    const updateResult = await Customer.updateOne(
+      { "orderHistory.orderId": orderId },
+      { $set: { "orderHistory.$.status": status } }
+    );
+
+    console.log(`✅ Database update result:`, updateResult);
+
+    // Trigger confirmation if status is order-confirmed
+    if (status === "order-confirmed") {
+      console.log(`📨 Triggering confirmation for ${orderId}`);
+
+      try {
+        const order = customer.orderHistory.find((o) => o.orderId === orderId);
+        const result = await sendOrderConfirmation(orderId, customer);
+
+        console.log(`📩 Confirmation result:`, result);
+      } catch (confirmationError) {
+        console.error(`❌ Confirmation failed:`, confirmationError);
+        // Continue even if confirmation fails
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error(`❌ Status update failed:`, error);
+    res.status(500).json({
+      error: error.message,
+      details: error.response?.data || "No additional details",
+    });
+  }
+});
+// Add this endpoint to trigger the check
+router.get("/send-confirmations", async (req, res) => {
+  try {
+    await checkAndSendConfirmations();
+    res.json({ success: true, message: "Confirmation check completed" });
+  } catch (err) {
+    console.error("❌ Error triggering confirmations:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
+// Add this new simplified function to your chatbot router
 
+function cleanNumberForUltraMSG(phone) {
+  // Remove all non-digit characters
+  let clean = phone.replace(/\D/g, "");
+
+  // Handle Indonesian numbers (replace leading 0 with 62)
+  if (clean.startsWith("0")) {
+    clean = "62" + clean.substring(1);
+  }
+
+  // Remove any country code prefix if already present
+  clean = clean.replace(/^\+?62/, "62");
+
+  return clean;
+}
+async function checkAndSendConfirmations() {
+  try {
+    console.log("🔍 Checking for orders needing confirmation...");
+
+    // Find all customers with confirmed orders
+    const customers = await Customer.find({
+      currentOrderStatus: "order-confirmed",
+      latestOrderId: { $exists: true },
+    });
+
+    console.log(`📊 Found ${customers.length} customers needing confirmation`);
+
+    for (const customer of customers) {
+      try {
+        console.log(`🔄 Processing customer: ${customer._id}`);
+
+        // Get their latest order
+        const order = customer.orderHistory.find(
+          (o) => o.orderId === customer.latestOrderId
+        );
+
+        if (!order) {
+          console.error(
+            `❌ Order ${customer.latestOrderId} not found for customer ${customer._id}`
+          );
+          continue;
+        }
+
+        // Send confirmation
+        await sendOrderConfirmation(order.orderId, customer);
+
+        // Update status to avoid resending
+        await Customer.updateOne(
+          { _id: customer._id },
+          { $set: { currentOrderStatus: "order-processed" } }
+        );
+
+        console.log(`✅ Confirmation sent for order ${order.orderId}`);
+      } catch (err) {
+        console.error(`❌ Failed to process customer ${customer._id}:`, err);
+      }
+    }
+  } catch (err) {
+    console.error("❌ Error in checkAndSendConfirmations:", err);
+  }
+}
+
+async function sendOrderConfirmation(orderId, customer) {
+  try {
+    console.log(`📨 Starting confirmation for order ${orderId}`);
+
+    const order = customer.orderHistory.find((o) => o.orderId === orderId);
+    if (!order) throw new Error(`Order ${orderId} not found`);
+
+    // Use the first phone number exactly as stored
+    const phone = customer.phoneNumber[0];
+    if (!phone) throw new Error("No phone number available");
+
+    console.log(`📞 Using phone number: ${phone}`);
+
+    // Generate PDF
+    const pdfPath = await generateOrderConfirmationPDF(order, customer);
+    console.log(`✅ PDF generated at ${pdfPath}`);
+
+    const message = `✅  Your Order has been Confirmed!\n\nOrder #${orderId}\nAmount: ${order.totalAmount}`;
+
+    // Send document with raw phone number
+    const result = await sendDocumentWithMessage(phone, pdfPath, message);
+    console.log(`📩 Confirmation sent to ${phone}`);
+
+    // Clean up
+    fs.unlinkSync(pdfPath);
+    return result;
+  } catch (error) {
+    console.error(`❌ Confirmation failed:`, error);
+
+    // Fallback to text message
+    try {
+      const fallbackMessage = `✅ Order Confirmed!\n\nOrder #${orderId}\nAmount: ${order.totalAmount}\n(Document unavailable)`;
+      await sendWhatsAppMessage(customer.phoneNumber[0], fallbackMessage);
+      console.log(`📩 Sent fallback text message`);
+    } catch (fallbackError) {
+      console.error(`❌ Fallback also failed:`, fallbackError);
+    }
+
+    throw error;
+  }
+}
+async function generateOrderConfirmationPDF(order, customer) {
+  return new Promise((resolve, reject) => {
+    console.log(
+      `🛠️ [${new Date().toISOString()}] Creating PDF for ${order.orderId}`
+    );
+
+    try {
+      const doc = new PDFDocument();
+      const fileName = `order_${order.orderId}_confirmation.pdf`;
+      const filePath = path.join(TEMP_DOCS_DIR, fileName);
+
+      console.log(`📂 [${new Date().toISOString()}] Target path: ${filePath}`);
+
+      const stream = fs.createWriteStream(filePath);
+      doc.pipe(stream);
+
+      // Header
+      doc.fontSize(18).text("Order Confirmation", { align: "center" });
+      doc.moveDown(0.5);
+
+      // Order Info
+      doc.fontSize(12).text(`Order #: ${order.orderId}`);
+      doc.text(`Date: ${new Date(order.orderDate).toLocaleString()}`);
+      doc.text(`Customer: ${customer.name}`);
+      doc.moveDown();
+
+      // Order Items
+      doc.fontSize(14).text("Order Items:", { underline: true });
+      doc.moveDown(0.3);
+
+      // Simple table for items
+      let startY = doc.y;
+      let itemNumber = 1;
+
+      order.items.forEach((item) => {
+        doc.text(`${itemNumber}. ${item.productName} (${item.weight})`);
+        doc.text(
+          `   Qty: ${item.quantity} × $${item.price.toFixed(
+            2
+          )} = $${item.totalPrice.toFixed(2)}`,
+          { indent: 20 }
+        );
+        doc.moveDown(0.3);
+        itemNumber++;
+      });
+
+      // Order Summary
+      doc.moveDown(0.5);
+      doc.fontSize(14).text("Order Summary:", { underline: true });
+      doc.moveDown(0.3);
+
+      doc.text(
+        `Subtotal: $${(order.totalAmount - order.deliveryCharge).toFixed(2)}`
+      );
+      doc.text(`Delivery Fee: $${order.deliveryCharge.toFixed(2)}`);
+
+      if (order.ecoDeliveryDiscount && order.ecoDeliveryDiscount > 0) {
+        doc.text(`Discount: -$${order.ecoDeliveryDiscount.toFixed(2)}`);
+      }
+
+      doc.moveDown(0.3);
+      doc.font("Helvetica-Bold");
+      doc.text(`Total: $${order.totalAmount.toFixed(2)}`);
+      doc.font("Helvetica");
+
+      // Footer
+      doc.moveDown(1);
+      doc.fontSize(10).text("Thank you for your order!", { align: "center" });
+
+      console.log(`✍️ [${new Date().toISOString()}] Writing PDF content...`);
+
+      stream.on("finish", () => {
+        console.log(
+          `✅ [${new Date().toISOString()}] PDF generated successfully`
+        );
+        resolve(filePath);
+      });
+
+      stream.on("error", (err) => {
+        console.error(
+          `❌ [${new Date().toISOString()}] PDF stream error:`,
+          err
+        );
+        reject(err);
+      });
+
+      doc.end();
+    } catch (err) {
+      console.error(
+        `💥 [${new Date().toISOString()}] PDF generation failed:`,
+        err
+      );
+      reject(err);
+    }
+  });
+}
+// Remove all phone number cleaning - just use the raw number from database
+async function sendDocumentWithMessage(to, filePath, message) {
+  try {
+    console.log(`📤 Preparing to send document to ${to}`);
+
+    // Verify document exists
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Document not found at ${filePath}`);
+    }
+
+    console.log(`📄 Document found at ${filePath}`);
+    const fileData = fs.readFileSync(filePath);
+    const base64Data = fileData.toString("base64");
+
+    // Prepare payload - use the number exactly as stored
+    const payload = new URLSearchParams();
+    payload.append("token", ULTRAMSG_CONFIG.token);
+    payload.append("to", to); // Use the raw number
+    payload.append("document", `data:application/pdf;base64,${base64Data}`);
+    payload.append("filename", `order_confirmation.pdf`);
+    payload.append("caption", message);
+
+    console.log(`⚡ Sending to UltraMSG API...`);
+    const response = await axios.post(
+      `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/document`,
+      payload,
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        timeout: 30000,
+      }
+    );
+
+    console.log(`✅ UltraMSG response:`, response.data);
+    return response.data;
+  } catch (error) {
+    console.error(`❌ Document send failed:`, error);
+    throw error;
+  }
+}
+// 4. Phone number normalizer for UltraMsg
+function normalizePhoneForUltraMsg(phone) {
+  // Remove all non-digit characters
+  let clean = phone.replace(/\D/g, "");
+
+  // Handle Indonesian numbers (replace leading 0 with 62)
+  if (clean.startsWith("0")) {
+    clean = "62" + clean.substring(1);
+  }
+
+  // Remove any country code prefix if already present
+  clean = clean.replace(/^\+?62/, "62");
+
+  return clean;
+}
 function normalizeWhatsAppId(rawPhone) {
   // For Ultramsg, we just need the clean phone number
   return rawPhone.replace(/\D/g, "");
@@ -573,14 +903,19 @@ const convertImage = async (imageBuffer) => {
 
 // ─── At final checkout, bump to "order-made-not-paid" ─────────────────────────
 async function createOrder(customer) {
+  console.log("Starting order creation for customer:", customer._id);
   const seq = await getNextSequence("orderId");
+  console.log("Generated sequence:", seq);
   const orderId = "ORD" + (10000 + seq);
+  console.log("Generated order ID:", orderId);
 
   const totalWithDiscounts =
     customer.cart.totalAmount +
     customer.cart.deliveryCharge -
     (customer.cart.firstOrderDiscount || 0) -
     (customer.cart.ecoDeliveryDiscount || 0);
+
+  console.log("Calculated total with discounts:", totalWithDiscounts);
 
   const newOrder = {
     orderId,
@@ -616,7 +951,6 @@ async function createOrder(customer) {
   customer.latestOrderId = orderId;
   customer.currentOrderStatus = "order-made-not-paid";
 
-  // clear customer.cart & context
   customer.cart = {
     items: [],
     totalAmount: 0,
@@ -625,8 +959,18 @@ async function createOrder(customer) {
     deliveryLocation: "",
     firstOrderDiscount: 0,
     ecoDeliveryDiscount: 0,
+    paymentMethod: "",
+    transactionId: "",
   };
-  customer.contextData = {};
+
+  customer.contextData = {
+    ...(customer.contextData || {}),
+    currentOrder: null,
+    transactionId: null,
+    paymentDetails: null,
+  };
+
+  customer.conversationState = "main_menu";
 
   await customer.save();
   return orderId;
@@ -766,21 +1110,22 @@ async function processChatMessage(phoneNumber, text, message) {
             await processChatMessage(phoneNumber, "", message);
             break;
           case "5":
-            // Support
+            // Support - Updated to match new comprehensive support system
             await customer.updateConversationState("support");
+            await customer.clearSupportFlow(); // Clear any existing support flow
             await sendWhatsAppMessage(
               phoneNumber,
               "📞 *Customer Support* 📞\n\n" +
-                "How can we assist you today?\n\n" +
-                "1. Delivery Issues\n" +
-                "2. Product Questions\n" +
+                "How can we help you today?\n\n" +
+                "1. Delivery & Product Issues\n" +
+                "2. Check My Delivery\n" +
                 "3. Payment Problems\n" +
                 "4. Speak to an Agent\n" +
-                "5. Submit a Complaint\n\n" +
-                "Type 0 to return to main menu."
+                "5. Submit a Complaint\n" +
+                "6. FAQs\n\n" +
+                "Type the number to continue or 0 to return to main menu."
             );
             break;
-
           case "6":
             // My profile
             await customer.updateConversationState("profile");
@@ -2878,436 +3223,2041 @@ async function processChatMessage(phoneNumber, text, message) {
         }
         break;
 
-      // Add to processChatMessage function - Update the case "support" section
+        // Enhanced Support System Case Handlers for processChatMessage function
+
+        // Helper function to process UltraMsg media
+        async function processUltraMsgMedia(
+          mediaId,
+          mediaType,
+          mimetype,
+          caption
+        ) {
+          try {
+            // Get media from UltraMsg
+            const mediaResponse = await fetch(
+              `https://api.ultramsg.com/instance${INSTANCE_ID}/media/download`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  token: ULTRAMSG_TOKEN,
+                  id: mediaId,
+                }),
+              }
+            );
+
+            if (mediaResponse.ok) {
+              const mediaBuffer = await mediaResponse.buffer();
+              const base64Data = mediaBuffer.toString("base64");
+
+              return {
+                mediaId: mediaId,
+                mediaType: mediaType,
+                mimetype: mimetype,
+                caption: caption || "",
+                base64Data: base64Data,
+                fileSize: Math.round(mediaBuffer.length / 1024), // Size in KB
+                uploadedAt: new Date(),
+              };
+            }
+          } catch (error) {
+            console.error("Error processing media:", error);
+          }
+          return null;
+        }
+
+        // 5. Format order list helper function - Fixed
+        function formatOrderList(orderHistory, customer) {
+          if (!orderHistory || orderHistory.length === 0) {
+            return "No orders found.";
+          }
+
+          return orderHistory
+            .sort((a, b) => new Date(b.orderDate) - new Date(a.orderDate))
+            .map((order, index) => {
+              const status =
+                order.status === "order-complete"
+                  ? "Delivered"
+                  : order.status === "on-way"
+                  ? "On the way"
+                  : order.status === "order-confirmed"
+                  ? "Confirmed"
+                  : "Pending";
+              const date = new Date(order.orderDate).toLocaleDateString();
+              const time = new Date(order.orderDate).toLocaleTimeString();
+
+              // FIXED: Properly access delivery address with multiple fallbacks
+              let deliveryAddress = "Address not specified";
+
+              // Try to get from contextData first, then order fields
+              if (customer?.contextData?.locationDetails) {
+                deliveryAddress = customer.contextData.locationDetails;
+              } else if (order.deliveryLocation) {
+                deliveryAddress = order.deliveryLocation;
+              } else if (order.deliveryAddress?.fullAddress) {
+                deliveryAddress = order.deliveryAddress.fullAddress;
+              }
+
+              // Truncate long addresses
+              if (deliveryAddress.length > 50) {
+                deliveryAddress = deliveryAddress.substring(0, 50) + "...";
+              }
+
+              return (
+                `${index + 1}. Order #${order.orderId}\n` +
+                `   Status: ${status}\n` +
+                `   Amount: Rp.${Math.round(
+                  order.totalAmount
+                ).toLocaleString()}\n` +
+                `   Date: ${date} at ${time}`
+              );
+            })
+            .join("\n\n");
+        }
+
       case "support":
-        // Handle support main menu selection
+        // Main support menu
         switch (text) {
           case "1":
-            // Track my order
-            await customer.updateConversationState("support_track_order");
+            // Delivery & Product Issues
+            await customer.updateSupportFlow({
+              mainCategory: "delivery_product",
+              currentStep: "category_selection",
+            });
+            await customer.updateConversationState("delivery_product_issues");
             await sendWhatsAppMessage(
               phoneNumber,
-              "Here are all of your orders\n\n" +
-                customer.orderHistory
-                  .map((order, index) => {
-                    const status =
-                      order.status === "delivered" ? "Delivered" : "Pending";
-                    const date = new Date(order.orderDate).toLocaleDateString();
-                    return `${index + 1}. Order #${
-                      order.orderId
-                    }: Rp.${Math.round(
-                      order.totalAmount
-                    ).toLocaleString()} (${status}) - placed on ${date}`;
-                  })
-                  .join("\n") +
-                "\n\nPlease enter your order id number."
+              "🚚 *Delivery & Product Issues*\n\n" +
+                "Please choose:\n\n" +
+                "1️⃣ Delivery Issue\n" +
+                "2️⃣ Product Issue\n\n" +
+                "Type the number to continue."
             );
             break;
 
           case "2":
-            // Report an issue with my order
-
-            // after you capture their issue and create a support ticket…
-            // **SET** “issue-customer”
-            const idxIssue = customer.orderHistory.length - 1;
-            customer.orderHistory[idxIssue].status = "issue-customer";
-            customer.currentOrderStatus = "issue-customer";
-            await customer.save();
-            await customer.updateConversationState("support_report_issue");
+            // Check My Delivery
+            await customer.updateSupportFlow({
+              mainCategory: "check_delivery",
+              currentStep: "order_id_input",
+            });
+            await customer.updateConversationState("check_delivery");
             await sendWhatsAppMessage(
               phoneNumber,
-              "Here are all of your orders\n\n" +
-                customer.orderHistory
-                  .map((order, index) => {
-                    const status =
-                      order.status === "delivered" ? "Delivered" : "Pending";
-                    const date = new Date(order.orderDate).toLocaleDateString();
-                    return `${index + 1}. Order #${
-                      order.orderId
-                    }: Rp.${Math.round(
-                      order.totalAmount
-                    ).toLocaleString()} (${status}) - placed on ${date}`;
-                  })
-                  .join("\n") +
-                "\n\nPlease enter your order id number."
+              "📦 *Check My Delivery*\n\n" +
+                "Here are your orders:\n\n" +
+                formatOrderList(customer.orderHistory) +
+                "\n\nPlease type your Order ID:"
             );
             break;
 
           case "3":
-            // Speak with an agent
-            await customer.updateConversationState("support_agent");
+            // Payment Problems
+            await customer.updateSupportFlow({
+              mainCategory: "payment_problems",
+              currentStep: "problem_selection",
+            });
+            await customer.updateConversationState("payment_problems");
             await sendWhatsAppMessage(
               phoneNumber,
-              "Our customer support team will contact you shortly. Is there anything specific you'd like assistance with?"
+              "💳 *Payment Problems*\n\n" +
+                "Please choose:\n\n" +
+                "1. I paid, but got no confirmation\n" +
+                "2. Payment failed\n" +
+                "3. Paid under a different name\n" +
+                "4. I was charged twice\n" +
+                "5. Unsure if payment went through\n" +
+                "6. Want to use credited funds\n\n" +
+                "Type the number to continue."
             );
             break;
 
           case "4":
-            // Read about return, replace or refund policy
-            await customer.updateConversationState("support_policy");
+            // Speak to an Agent
+            await customer.updateSupportFlow({
+              mainCategory: "speak_agent",
+              currentStep: "agent_request",
+            });
+            await customer.updateConversationState("speak_agent");
             await sendWhatsAppMessage(
               phoneNumber,
-              "*Return & Refund Policy*\n\n" +
-                "• All returns must be initiated within 3 days of delivery\n" +
-                "• Damaged products must be reported with photos\n" +
-                "• Refunds are processed within 5-7 business days\n" +
-                "• Replacements are subject to product availability\n" +
-                "• Custom orders cannot be returned or refunded\n\n" +
-                "For further assistance, please select an option:\n\n" +
-                "1. Track my order\n" +
-                "2. Report an issue with my order\n" +
-                "3. Speak with an agent\n" +
-                "4. Return to main menu"
+              "👨‍💼 *Speak to an Agent*\n\n" +
+                "Call us at: +62-XXX-XXXX-XXXX\n\n" +
+                "📝 *Note:* We do not take orders by phone.\n\n" +
+                "To speak about:\n" +
+                "• Order issues – go to your order and raise a support ticket\n" +
+                '• Payment issues – choose "Payment Problems" above\n\n' +
+                "Is there anything specific you'd like assistance with? Please describe your issue:"
             );
             break;
 
           case "5":
-            await customer.updateConversationState("support_complaint");
+            // Submit a Complaint
+            await customer.updateSupportFlow({
+              mainCategory: "submit_complaint",
+              currentStep: "media_upload",
+              mediaExpected: true,
+            });
+            await customer.updateConversationState("submit_complaint");
             await sendWhatsAppMessage(
               phoneNumber,
-              "Please describe your complaint in detail.\n\nOnce done, type *Submit* to send it to our support team."
+              "📝 *Submit a Complaint*\n\n" +
+                "Please attach a video or voice note to submit your complaint.\n\n" +
+                "We'll need this media first, then ask for additional details."
+            );
+            break;
+
+          case "6":
+            // FAQs
+            await customer.updateConversationState("faqs");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❓ *Frequently Asked Questions*\n\n" +
+                "*Can I order via WhatsApp?*\n" +
+                "Yes! Just message us here and follow the steps.\n\n" +
+                "*Do you offer COD?*\n" +
+                "No, we only accept bank transfers and payment links.\n\n" +
+                "*Can I track my order?*\n" +
+                "Yes! After your order, we'll keep you updated on dispatch & delivery.\n\n" +
+                "*Can I change/cancel my order?*\n" +
+                "Only possible within 12 hours or before dispatch. Refunds are via bank transfer (5–10 days).\n\n" +
+                "*Where do you deliver?*\n" +
+                "We deliver all over Bali. Confirm your location with us.\n\n" +
+                "*What materials can I order?*\n" +
+                "Cement, Bricks, Sand, Steel, Tiles, Paint, Plumbing, Electrical, and more!\n\n" +
+                "*Do I need to register?*\n" +
+                "No need to sign up. Just chat, send your details, and start ordering!\n\n" +
+                "Type 0 to return to main menu."
             );
             break;
 
           default:
             await sendWhatsAppMessage(
               phoneNumber,
-              "Please select a valid option (1-5) or type 0 to return to main menu."
+              "Please select a valid option (1-6) or type 0 to return to main menu."
             );
             break;
         }
         break;
 
-      // Add these new case handlers for support submenus
-      case "support_track_order":
-        // Validate if input is an order ID
+      case "delivery_product_issues":
+        switch (text) {
+          case "1":
+            // Delivery Issue selected
+            await customer.updateSupportFlow({
+              subCategory: "delivery_issue",
+              currentStep: "delivery_option_selection",
+            });
+            await customer.updateConversationState("delivery_issue_menu");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "🚚 *Delivery Issue*\n\n" +
+                "Please choose:\n\n" +
+                "1. Track my order\n" +
+                "2. My delivery is delayed\n" +
+                "3. Change delivery address\n" +
+                "4. The driver couldn't find my location\n" +
+                "5. Marked delivered but not received\n" +
+                "6. Reschedule my delivery\n\n" +
+                "Type the number to continue."
+            );
+            break;
+
+          case "2":
+            // Product Issue selected
+            await customer.updateSupportFlow({
+              subCategory: "product_issue",
+              currentStep: "product_option_selection",
+            });
+            await customer.updateConversationState("product_issue_menu");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "📦 *Product Issue*\n\n" +
+                "Please choose:\n\n" +
+                "1. Broken item\n" +
+                "2. Missing or wrong amount\n" +
+                "3. Received the wrong item\n" +
+                "4. Other\n\n" +
+                "Type the number to continue."
+            );
+            break;
+
+          default:
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Please select option 1 for Delivery Issue or 2 for Product Issue."
+            );
+            break;
+        }
+        break;
+
+      case "delivery_issue_menu":
+        const deliveryIssueTypes = {
+          1: "track_order",
+          2: "delivery_delayed",
+          3: "change_delivery_address",
+          4: "driver_location_issue",
+          5: "marked_delivered_not_received",
+          6: "reschedule_delivery",
+        };
+
+        const selectedDeliveryIssue = deliveryIssueTypes[text];
+
+        if (selectedDeliveryIssue) {
+          await customer.updateSupportFlow({
+            specificIssue: selectedDeliveryIssue,
+            currentStep: "order_id_input",
+          });
+
+          switch (selectedDeliveryIssue) {
+            case "track_order":
+              await customer.updateConversationState("track_order_delivery");
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "📍 *Track My Order*\n\n" +
+                  "Here are your orders:\n\n" +
+                  formatOrderList(customer.orderHistory) +
+                  "\n\nPlease type your Order ID:"
+              );
+              break;
+
+            case "delivery_delayed":
+              await customer.updateConversationState("delivery_delayed");
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "⏰ *Delivery Delayed*\n\n" +
+                  "Sorry for the delay! 😔\n\n" +
+                  "Here are your orders:\n\n" +
+                  formatOrderList(customer.orderHistory) +
+                  "\n\nPlease send your Order ID so we can check:"
+              );
+              break;
+
+            case "change_delivery_address":
+              await customer.updateConversationState("change_delivery_address");
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "📍 *Change Delivery Address*\n\n" +
+                  "You want to change the delivery address.\n\n" +
+                  "⚠️ *Note:* If your order hasn't been dispatched, we can update it.\n" +
+                  "If the order has already left, extra delivery costs may apply.\n\n" +
+                  "Here are your orders:\n\n" +
+                  formatOrderList(customer.orderHistory) +
+                  "\n\nPlease type your Order ID:"
+              );
+              break;
+
+            case "driver_location_issue":
+              await customer.updateConversationState("driver_location_issue");
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "🗺️ *Driver Location Issue*\n\n" +
+                  "Here are your orders:\n\n" +
+                  formatOrderList(customer.orderHistory) +
+                  "\n\nPlease type your Order ID:"
+              );
+              break;
+
+            case "marked_delivered_not_received":
+              await customer.updateConversationState(
+                "marked_delivered_not_received"
+              );
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "🚨 *Marked Delivered but Not Received*\n\n" +
+                  "That sounds serious! 😟\n\n" +
+                  "Here are your orders:\n\n" +
+                  formatOrderList(customer.orderHistory) +
+                  "\n\nPlease send your Order ID:"
+              );
+              break;
+
+            case "reschedule_delivery":
+              await customer.updateConversationState("reschedule_delivery");
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "📅 *Reschedule My Delivery*\n\n" +
+                  "Sure, we can reschedule! 📆\n\n" +
+                  "⚠️ *Note:*\n" +
+                  "• Changes outside our delivery rules may include extra charges\n" +
+                  "• If your delivery time is faster than 8-10 days, your 5% discount will be revoked\n" +
+                  "• Different locations may have new delivery charges\n\n" +
+                  "Here are your orders:\n\n" +
+                  formatOrderList(customer.orderHistory) +
+                  "\n\nPlease provide Order ID:"
+              );
+              break;
+          }
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Please select a valid option (1-6)."
+          );
+        }
+        break;
+
+      case "product_issue_menu":
+        const productIssueTypes = {
+          1: "broken_item",
+          2: "missing_wrong_amount",
+          3: "wrong_item",
+          4: "product_other",
+        };
+
+        const selectedProductIssue = productIssueTypes[text];
+
+        if (selectedProductIssue) {
+          await customer.updateSupportFlow({
+            specificIssue: selectedProductIssue,
+            currentStep: "order_id_input",
+          });
+          await customer.updateConversationState("product_issue_order_id");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `🔧 *${
+              selectedProductIssue === "broken_item"
+                ? "Broken Item"
+                : selectedProductIssue === "missing_wrong_amount"
+                ? "Missing or Wrong Amount"
+                : selectedProductIssue === "wrong_item"
+                ? "Received Wrong Item"
+                : "Other Product Issue"
+            }*\n\n` +
+              "Here are your orders:\n\n" +
+              formatOrderList(customer.orderHistory) +
+              "\n\nPlease type Order ID:"
+          );
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Please select a valid option (1-4)."
+          );
+        }
+        break;
+
+      // 1. In support system cases - Update delivery address fetching with null checks
+      case "check_delivery":
+        const orderToCheck = customer.orderHistory.find(
+          (order) => order.orderId === text.trim()
+        );
+
+        if (orderToCheck) {
+          const deliveryDate = new Date(
+            orderToCheck.deliveryDate
+          ).toLocaleDateString();
+          // FIXED: Properly access locationDetails from contextData with null checks
+          const deliveryAddress =
+            customer.contextData?.locationDetails ||
+            orderToCheck.deliveryLocation ||
+            "Address not specified";
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `📦 *Order #${orderToCheck.orderId}*\n\n` +
+              `Your order will be delivered on ${deliveryDate}, between 12–4 PM.\n\n` +
+              `📍 To: ${deliveryAddress}\n\n` +
+              `Status: ${orderToCheck.status}\n\n` +
+              "Type 0 to return to main menu."
+          );
+
+          // Return to main menu after 3 seconds
+          setTimeout(async () => {
+            await sendMainMenu(phoneNumber, customer);
+          }, 3000);
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+          );
+        }
+        break;
+
+      case "payment_problems":
+        const paymentIssueTypes = {
+          1: "paid_no_confirmation",
+          2: "payment_failed",
+          3: "paid_different_name",
+          4: "charged_twice",
+          5: "unsure_payment",
+          6: "use_credited_funds",
+        };
+
+        const selectedPaymentIssue = paymentIssueTypes[text];
+
+        if (selectedPaymentIssue) {
+          await customer.updateSupportFlow({
+            specificIssue: selectedPaymentIssue,
+            currentStep:
+              selectedPaymentIssue === "charged_twice"
+                ? "visit_required"
+                : "payment_screenshot",
+          });
+
+          if (selectedPaymentIssue === "charged_twice") {
+            await customer.updateConversationState("charged_twice");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "💳 *Charged Twice*\n\n" +
+                "Sorry to hear that! 😔\n\n" +
+                "Please visit us with:\n" +
+                "• Payment receipts\n" +
+                "• Any evidence\n\n" +
+                "We will process the refund in person.\n\n" +
+                "Type 0 to return to main menu."
+            );
+          } else {
+            await customer.updateConversationState(
+              "payment_screenshot_request"
+            );
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `💳 *${
+                selectedPaymentIssue === "paid_no_confirmation"
+                  ? "Paid but No Confirmation"
+                  : selectedPaymentIssue === "payment_failed"
+                  ? "Payment Failed"
+                  : selectedPaymentIssue === "paid_different_name"
+                  ? "Paid Under Different Name"
+                  : selectedPaymentIssue === "unsure_payment"
+                  ? "Unsure if Payment Went Through"
+                  : "Use Credited Funds"
+              }*\n\n` + "Please send a payment screenshot 📸"
+            );
+          }
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Please select a valid option (1-6)."
+          );
+        }
+        break;
+
+      case "payment_screenshot_request":
+        // Handle payment screenshot upload
+        if (message.hasMedia && message.type === "image") {
+          try {
+            // Read the downloaded image file (following your pattern)
+            const imageBuffer = fs.readFileSync(message.localMediaPath);
+            const base64Image = imageBuffer.toString("base64");
+            const imageSizeMB = (base64Image.length * 3) / 4 / (1024 * 1024);
+
+            // Validate size (max 10MB for images)
+            if (imageSizeMB > 10) {
+              await sendWhatsAppMessage(
+                phoneNumber,
+                `❌ Image too large (${imageSizeMB.toFixed(
+                  1
+                )}MB). Max 10MB allowed.`
+              );
+              break;
+            }
+
+            // Save payment screenshot
+            const paymentScreenshotData = {
+              base64Data: base64Image,
+              mimetype: message.mediaInfo.mimetype || "image/jpeg",
+              uploadedAt: new Date(),
+              fileSize: imageSizeMB,
+              filename: `payment_screenshot_${Date.now()}.jpg`,
+            };
+
+            await customer.updateSupportFlow({
+              currentStep: "payer_name_input",
+              tempData: {
+                ...customer.currentSupportFlow.tempData,
+                paymentScreenshot: paymentScreenshotData,
+              },
+            });
+
+            await customer.updateConversationState("payment_payer_name");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `✅ Payment screenshot received (${imageSizeMB.toFixed(
+                1
+              )}MB)!\n\n` + "Type Name used in payment:"
+            );
+
+            console.log(
+              `Payment screenshot saved for customer: ${phoneNumber}`
+            );
+          } catch (error) {
+            console.error("Error processing payment screenshot:", error);
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Failed to process the image. Please try sending the payment screenshot again."
+            );
+          }
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "📸 Please send a payment screenshot image."
+          );
+        }
+        break;
+
+      case "payment_payer_name":
+        const payerName = text.trim();
+        await customer.updateSupportFlow({
+          currentStep: "international_transfer_check",
+          tempData: {
+            ...customer.currentSupportFlow.tempData,
+            payerName: payerName,
+          },
+        });
+
+        await customer.updateConversationState("international_transfer_check");
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "Was this an international transfer? Type *Yes* or *No*"
+        );
+        break;
+
+      case "international_transfer_check":
+        const isInternational = text.toLowerCase().includes("yes");
+
+        // Create payment issue ticket
+        const paymentTicketData = {
+          type: "payment_problem",
+          subType: customer.currentSupportFlow.specificIssue,
+          paymentData: {
+            paymentScreenshot:
+              customer.currentSupportFlow.tempData.paymentScreenshot,
+            payerName: customer.currentSupportFlow.tempData.payerName,
+            isInternationalTransfer: isInternational,
+          },
+          status: "open",
+        };
+
+        await customer.createSupportTicket(paymentTicketData);
+
+        const responseMessage = isInternational
+          ? "💬 *Note:* International payments can take up to 14 days. Amount must fully match the invoice.\n\nOur agent will call you for further guidance shortly."
+          : "✅ Payment issue recorded successfully.\n\nOur agent will call you for further guidance shortly.";
+
+        await sendWhatsAppMessage(phoneNumber, responseMessage);
+
+        // Clear support flow and return to main menu
+        await customer.clearSupportFlow();
+        setTimeout(async () => {
+          await sendMainMenu(phoneNumber, customer);
+        }, 2000);
+        break;
+
+      case "speak_agent":
+        // Handle agent request - save any additional details provided
+        if (text && text.trim().length > 0) {
+          const agentTicketData = {
+            type: "agent_request",
+            issueDetails: text.trim(),
+            status: "open",
+            estimatedResolutionTime: "within 2 hours",
+          };
+
+          await customer.createSupportTicket(agentTicketData);
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "✅ Your request has been recorded. Our customer support agent will contact you shortly.\n\nThank you for providing the details!"
+          );
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "✅ Our customer support team will contact you shortly."
+          );
+        }
+
+        await customer.clearSupportFlow();
+        setTimeout(async () => {
+          await sendMainMenu(phoneNumber, customer);
+        }, 2000);
+        break;
+
+      case "submit_complaint":
+        // Handle complaint media upload (video or voice)
+        if (
+          message.hasMedia &&
+          (message.type === "video" || message.type === "voice")
+        ) {
+          try {
+            let mediaBuffer, base64Data, mediaSizeMB, filename, mediaType;
+
+            if (message.type === "video") {
+              // Handle video
+              const response = await axios.get(message.media.url, {
+                responseType: "arraybuffer",
+              });
+              mediaBuffer = Buffer.from(response.data, "binary");
+              base64Data = mediaBuffer.toString("base64");
+              mediaSizeMB = (base64Data.length * 3) / 4 / (1024 * 1024);
+              filename = `complaint_video_${Date.now()}.mp4`;
+              mediaType = "video";
+
+              // Validate video size (max 15MB)
+              if (mediaSizeMB > 15) {
+                await sendWhatsAppMessage(
+                  phoneNumber,
+                  `❌ Video too large (${mediaSizeMB.toFixed(
+                    1
+                  )}MB). Max 15MB allowed.`
+                );
+                break;
+              }
+            } else if (message.type === "voice") {
+              // Handle voice note
+              const response = await axios.get(message.media.url, {
+                responseType: "arraybuffer",
+              });
+              mediaBuffer = Buffer.from(response.data, "binary");
+              base64Data = mediaBuffer.toString("base64");
+              mediaSizeMB = (base64Data.length * 3) / 4 / (1024 * 1024);
+              filename = `complaint_voice_${Date.now()}.ogg`;
+              mediaType = "voice";
+
+              // Validate voice size (max 5MB)
+              if (mediaSizeMB > 5) {
+                await sendWhatsAppMessage(
+                  phoneNumber,
+                  `❌ Voice note too large (${mediaSizeMB.toFixed(
+                    1
+                  )}MB). Max 5MB allowed.`
+                );
+                break;
+              }
+            }
+
+            // Save complaint media
+            const complaintMediaData = {
+              mediaId: `COMP_${Date.now()}_${Math.random()
+                .toString(36)
+                .substr(2, 9)}`,
+              mediaType: mediaType,
+              mimetype:
+                message.media.mimetype ||
+                (mediaType === "video" ? "video/mp4" : "audio/ogg"),
+              filename: filename,
+              base64Data: base64Data,
+              fileSize: mediaSizeMB,
+              uploadedAt: new Date(),
+            };
+
+            await customer.updateSupportFlow({
+              currentStep: "text_summary_input",
+              tempData: {
+                ...customer.currentSupportFlow.tempData,
+                complaintMedia: complaintMediaData,
+              },
+              mediaExpected: false,
+            });
+
+            await customer.updateConversationState("complaint_text_summary");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `🎥 ${
+                mediaType === "video" ? "Video" : "Voice note"
+              } received (${mediaSizeMB.toFixed(1)}MB)!\n\n` +
+                "Add a short text summary about the complaint:"
+            );
+
+            console.log(
+              `Complaint ${mediaType} saved for customer: ${phoneNumber}`
+            );
+          } catch (error) {
+            console.error("Error processing complaint media:", error);
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Failed to process the media. Please try sending the video or voice note again."
+            );
+          }
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "🎥 Please attach a video or voice note to submit your complaint."
+          );
+        }
+        break;
+      case "complaint_text_summary":
+        const textSummary = text.trim();
+        await customer.updateSupportFlow({
+          currentStep: "order_relation_check",
+          tempData: {
+            ...customer.currentSupportFlow.tempData,
+            textSummary: textSummary,
+          },
+        });
+
+        await customer.updateConversationState("complaint_order_relation");
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "Is this problem related to your order? Type *yes* or *no*"
+        );
+        break;
+
+      case "complaint_order_relation":
+        const isOrderRelated = text.toLowerCase().includes("yes");
+
+        if (isOrderRelated) {
+          await customer.updateSupportFlow({
+            currentStep: "order_id_input",
+            tempData: {
+              ...customer.currentSupportFlow.tempData,
+              isOrderRelated: true,
+            },
+          });
+
+          await customer.updateConversationState("complaint_order_id");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Please include your Order ID:\n\n" +
+              formatOrderList(customer.orderHistory) +
+              "\n\nType your Order ID:"
+          );
+        } else {
+          // Create complaint without order ID
+          const complaintData = {
+            mediaAttachments: [
+              customer.currentSupportFlow.tempData.complaintMedia,
+            ],
+            textSummary: customer.currentSupportFlow.tempData.textSummary,
+            isOrderRelated: false,
+            status: "submitted",
+          };
+
+          await customer.createComplaint(complaintData);
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "✅ Your complaint has been submitted successfully. Our agent will call you shortly.\n\n" +
+              "Thank you for your feedback!"
+          );
+
+          await customer.clearSupportFlow();
+          setTimeout(async () => {
+            await sendMainMenu(phoneNumber, customer);
+          }, 2000);
+        }
+        break;
+
+      case "complaint_order_id":
+        const complaintOrderId = text.trim();
+        const relatedOrder = customer.orderHistory.find(
+          (order) => order.orderId === complaintOrderId
+        );
+
+        if (relatedOrder) {
+          // Create complaint with order ID
+          const complaintData = {
+            orderId: complaintOrderId,
+            mediaAttachments: [
+              customer.currentSupportFlow.tempData.complaintMedia,
+            ],
+            textSummary: customer.currentSupportFlow.tempData.textSummary,
+            isOrderRelated: true,
+            status: "submitted",
+          };
+
+          await customer.createComplaint(complaintData);
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `✅ Your complaint for Order #${complaintOrderId} has been submitted successfully. Our agent will call you shortly.\n\n` +
+              "Thank you for your feedback!"
+          );
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+          );
+          return; // Don't clear flow, let them try again
+        }
+
+        await customer.clearSupportFlow();
+        setTimeout(async () => {
+          await sendMainMenu(phoneNumber, customer);
+        }, 2000);
+        break;
+
+      // 2. Track order delivery case - Fixed
+      case "track_order_delivery":
         const trackOrderId = text.trim();
         const orderToTrack = customer.orderHistory.find(
           (order) => order.orderId === trackOrderId
         );
 
         if (orderToTrack) {
-          // Format date strings
           const orderDate = new Date(
             orderToTrack.orderDate
           ).toLocaleDateString();
           const deliveryDate = new Date(
             orderToTrack.deliveryDate
           ).toLocaleDateString();
-          const estimatedArrival = new Date(orderToTrack.deliveryDate);
+          // FIXED: Properly access locationDetails from contextData with fallbacks
+          const deliveryAddress =
+            customer.contextData?.locationDetails ||
+            orderToTrack.deliveryLocation ||
+            orderToTrack.deliveryAddress?.fullAddress ||
+            "Address not specified";
 
-          // Calculate shipping info based on current date
-          const shippedDate = new Date(orderToTrack.orderDate);
-          shippedDate.setDate(shippedDate.getDate() + 2); // Assume shipped 2 days after order
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `📦 *Order #${orderToTrack.orderId}*\n\n` +
+              `Your order will be delivered on ${deliveryDate}, between 12–4 PM.\n\n` +
+              `📍 To: ${deliveryAddress}\n\n` +
+              `Order placed: ${orderDate}\n` +
+              `Status: ${orderToTrack.status}\n` +
+              `Total: Rp.${Math.round(
+                orderToTrack.totalAmount
+              ).toLocaleString()}`
+          );
 
-          // Create order details message
-          const orderDetails =
-            `Order #${orderToTrack.orderId}\n\n` +
-            `Total Items: (${orderToTrack.items.length})\n` +
-            orderToTrack.items
-              .map(
-                (item) =>
-                  `${item.name}: ${item.quantity} × Rp.${Math.round(
-                    item.price
-                  ).toLocaleString()}`
-              )
-              .join("\n") +
-            `\nDelivery: ${orderToTrack.deliveryType}\n` +
-            `Total Price: Rp.${Math.round(
-              orderToTrack.totalAmount
-            ).toLocaleString()}\n\n` +
-            `Order placed on: ${orderDate}\n` +
-            `Status: ${orderToTrack.status}\n` +
-            `Customer email: ${
-              customer.contextData?.email || "Not provided"
-            }\n` +
-            `Delivery address: ${
-              orderToTrack.deliveryLocation || "self_pickup"
-            }\n\n` +
-            `Your order was shipped on ${shippedDate.toLocaleDateString()} and is\n` +
-            `expected to arrive on ${deliveryDate}.`;
-
-          await sendWhatsAppMessage(phoneNumber, orderDetails);
-
-          // Redirect back to support menu
+          await customer.clearSupportFlow();
           setTimeout(async () => {
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Redirecting to support menu"
-            );
-            await customer.updateConversationState("support");
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "📞 *Customer Support* 📞\n\n" +
-                "How can we assist you today?\n\n" +
-                "1. Track my order\n" +
-                "2. Report an issue with my order\n" +
-                "3. Speak with an agent\n" +
-                "4. Read about return, replace or refund policy\n\n" +
-                "Type 0 to return to main menu."
-            );
-          }, 1500);
+            await sendMainMenu(phoneNumber, customer);
+          }, 3000);
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Order ID not found. Please enter a valid order ID or type 0 to return to main menu."
+            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
           );
         }
         break;
 
-      case "support_report_issue":
-        // Validate if input is an order ID
-        const reportOrderId = text.trim();
-        const orderToReport = customer.orderHistory.find(
-          (order) => order.orderId === reportOrderId
+      case "delivery_delayed":
+        const delayedOrderId = text.trim();
+        const delayedOrder = customer.orderHistory.find(
+          (order) => order.orderId === delayedOrderId
         );
 
-        if (orderToReport) {
-          // Save order ID in context for next step
-          customer.contextData = {
-            ...customer.contextData,
-            reportingOrderId: reportOrderId,
+        if (delayedOrder) {
+          // Create support ticket for delayed delivery
+          const ticketData = {
+            type: "delivery_issue",
+            subType: "delivery_delayed",
+            orderId: delayedOrderId,
+            issueDetails: "Customer reported delivery delay",
+            status: "open",
           };
-          await customer.save();
 
-          await customer.updateConversationState("support_issue_type");
+          await customer.createSupportTicket(ticketData);
+
+          // Calculate new delivery date (add 1 day to original)
+          const newDeliveryDate = new Date(delayedOrder.deliveryDate);
+          newDeliveryDate.setDate(newDeliveryDate.getDate() + 1);
+
           await sendWhatsAppMessage(
             phoneNumber,
-            "What is the issue in order #" +
-              reportOrderId +
-              "\n\n" +
-              "[  wrong order  ]\n" +
-              "[ broken item/wrong amount ]\n" +
-              "[     other     ]"
+            `📦 *Order #${delayedOrderId}*\n\n` +
+              `Your delivery is delayed and will now arrive on ${newDeliveryDate.toLocaleDateString()}, between 12–4 PM.\n\n` +
+              "Thanks for your patience! 🙏\n\n" +
+              "Our team has been notified and will monitor your delivery closely."
           );
+
+          await customer.clearSupportFlow();
+          setTimeout(async () => {
+            await sendMainMenu(phoneNumber, customer);
+          }, 3000);
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Order ID not found. Please enter a valid order ID or type 0 to return to main menu."
+            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
           );
         }
         break;
 
-      case "support_issue_type":
-        // Process issue type selection
-        let issueType = text.toLowerCase().trim();
-
-        // Map button-like responses to standardized issue types
-        if (issueType.includes("wrong order")) {
-          issueType = "wrong_order";
-        } else if (
-          issueType.includes("broken") ||
-          issueType.includes("wrong amount")
-        ) {
-          issueType = "broken_or_wrong_amount";
-        } else {
-          issueType = "other";
-        }
-
-        // Store issue type in context
-        customer.contextData = {
-          ...customer.contextData,
-          issueType: issueType,
-        };
-        await customer.save();
-
-        // Move to issue details
-        await customer.updateConversationState("support_issue_details");
-        await sendWhatsAppMessage(
-          phoneNumber,
-          "Please write down the issue with the order .\n\n" +
-            'Once you are finished writing type "Submit".'
+      case "change_delivery_address":
+        const addressChangeOrderId = text.trim();
+        const addressOrder = customer.orderHistory.find(
+          (order) => order.orderId === addressChangeOrderId
         );
+
+        if (addressOrder) {
+          // Check if order is dispatched
+          const isDispatched = [
+            "on-way",
+            "driver-confirmed",
+            "order-pickuped-up",
+          ].includes(addressOrder.status);
+
+          // FIXED: Properly get current address with multiple fallbacks
+          const currentAddress =
+            customer.contextData?.locationDetails ||
+            addressOrder.deliveryLocation ||
+            addressOrder.deliveryAddress?.fullAddress ||
+            "Address not specified";
+
+          await customer.updateSupportFlow({
+            currentStep: "new_address_input",
+            tempData: {
+              ...customer.currentSupportFlow.tempData,
+              orderId: addressChangeOrderId,
+              isDispatched: isDispatched,
+              currentAddress: currentAddress,
+            },
+          });
+
+          await customer.updateConversationState("new_address_input");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `📍 *Change Address for Order #${addressChangeOrderId}*\n\n` +
+              `Current address: ${currentAddress}\n\n` +
+              (isDispatched
+                ? "⚠️ *Warning:* Your order has already been dispatched. Extra delivery charges may apply.\n\n"
+                : "✅ Your order hasn't been dispatched yet. We can update the address.\n\n") +
+              "Your new address:"
+          );
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+          );
+        }
         break;
 
-      case "support_issue_details":
-        // Process issue details
-        if (text.toLowerCase() === "submit") {
-          // Create a support ticket in customer data if it doesn't exist
-          if (!customer.supportTickets) {
-            customer.supportTickets = [];
+      case "new_address_input":
+        const newAddress = text.trim();
+        const flowData = customer.currentSupportFlow.tempData;
+
+        // Create address change ticket
+        const addressTicketData = {
+          type: "delivery_issue",
+          subType: "change_delivery_address",
+          orderId: flowData.orderId,
+          deliveryData: {
+            currentAddress: flowData.currentAddress,
+            newAddress: newAddress,
+            isOrderDispatched: flowData.isDispatched,
+            extraChargesApplicable: flowData.isDispatched,
+          },
+          issueDetails: `Customer requested address change from "${flowData.currentAddress}" to "${newAddress}"`,
+          status: "open",
+        };
+
+        await customer.createSupportTicket(addressTicketData);
+
+        // FIXED: Update both contextData.locationDetails AND order's deliveryLocation
+        const orderIndex = customer.orderHistory.findIndex(
+          (order) => order.orderId === flowData.orderId
+        );
+        if (orderIndex !== -1) {
+          // Update the order's deliveryLocation field
+          customer.orderHistory[orderIndex].deliveryLocation = newAddress;
+
+          // ALSO update contextData.locationDetails for current session
+          if (!customer.contextData) {
+            customer.contextData = {};
+          }
+          customer.contextData.locationDetails = newAddress;
+
+          // Add to address change history
+          if (!customer.addressChangeHistory) {
+            customer.addressChangeHistory = [];
           }
 
-          // Add the new ticket
-          customer.supportTickets.push({
-            orderId: customer.contextData.reportingOrderId,
-            issueType: customer.contextData.issueType,
-            issueDetails:
-              customer.contextData.issueDetails || "No details provided",
-            status: "open",
-            createdAt: new Date(),
-            lastUpdated: new Date(),
+          customer.addressChangeHistory.push({
+            orderId: flowData.orderId,
+            oldAddress: flowData.currentAddress,
+            newAddress: newAddress,
+            requestedAt: new Date(),
+            status: "pending",
           });
 
           await customer.save();
-
-          // Send confirmation
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Our staff will contact your shortly just save the order id"
-          );
-
-          setTimeout(async () => {
-            await sendWhatsAppMessage(phoneNumber, "Thank you for your time");
-
-            setTimeout(async () => {
-              await sendWhatsAppMessage(phoneNumber, "Returning to main menu");
-              await sendMainMenu(phoneNumber, customer);
-            }, 1000);
-          }, 1000);
-        } else {
-          // Save the issue details in context data
-          customer.contextData = {
-            ...customer.contextData,
-            issueDetails: text,
-          };
-          await customer.save();
-
-          // Confirm receipt of details
-          await sendWhatsAppMessage(
-            phoneNumber,
-            'I received the details. Type "Submit" to continue or provide more information.'
-          );
-        }
-        break;
-
-      case "support_agent":
-        // Process anything the user says as content for the agent
-
-        // Create a support ticket in customer data if it doesn't exist
-        if (!customer.supportTickets) {
-          customer.supportTickets = [];
         }
 
-        // Add the new ticket for agent contact
-        customer.supportTickets.push({
-          type: "agent_request",
-          details: text,
-          status: "open",
-          createdAt: new Date(),
-          lastUpdated: new Date(),
-        });
-
-        await customer.save();
-
-        // Send confirmation
         await sendWhatsAppMessage(
           phoneNumber,
-          "Thank you for your message. Our customer support agent will contact you shortly."
+          `✅ Address change request received!\n\n` +
+            `Order: #${flowData.orderId}\n` +
+            `New address: ${newAddress}\n\n` +
+            (flowData.isDispatched
+              ? "⚠️ Since your order is already dispatched, extra charges may apply. "
+              : "✅ We'll update your delivery address. ") +
+            "You'll receive a confirmation soon.\n\n" +
+            "Our team will contact you if any additional charges apply."
         );
 
-        // Return to main menu
+        await customer.clearSupportFlow();
         setTimeout(async () => {
           await sendMainMenu(phoneNumber, customer);
-        }, 1500);
+        }, 3000);
         break;
+      case "driver_location_issue":
+        const locationIssueOrderId = text.trim();
+        const locationOrder = customer.orderHistory.find(
+          (order) => order.orderId === locationIssueOrderId
+        );
 
-      case "support_policy":
-        // Handle policy submenu
-        switch (text) {
-          case "1":
-            // Track my order - reuse existing flow
-            await customer.updateConversationState("support_track_order");
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Here are all of your orders\n\n" +
-                customer.orderHistory
-                  .map((order, index) => {
-                    const status =
-                      order.status === "delivered" ? "Delivered" : "Pending";
-                    const date = new Date(order.orderDate).toLocaleDateString();
-                    return `${index + 1}. Order #${
-                      order.orderId
-                    }: Rp.${Math.round(
-                      order.totalAmount
-                    ).toLocaleString()} (${status}) - placed on ${date}`;
-                  })
-                  .join("\n") +
-                "\n\nPlease enter your order id number."
-            );
-            break;
-
-          case "2":
-            // Report an issue - reuse existing flow
-            await customer.updateConversationState("support_report_issue");
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Here are all of your orders\n\n" +
-                customer.orderHistory
-                  .map((order, index) => {
-                    const status =
-                      order.status === "delivered" ? "Delivered" : "Pending";
-                    const date = new Date(order.orderDate).toLocaleDateString();
-                    return `${index + 1}. Order #${
-                      order.orderId
-                    }: Rp.${Math.round(
-                      order.totalAmount
-                    ).toLocaleString()} (${status}) - placed on ${date}`;
-                  })
-                  .join("\n") +
-                "\n\nPlease enter your order id number."
-            );
-            break;
-
-          case "3":
-            // Speak with agent - reuse existing flow
-            await customer.updateConversationState("support_agent");
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Our customer support team will contact you shortly. Is there anything specific you'd like assistance with?"
-            );
-            break;
-
-          case "4":
-            // Return to main menu
-            await sendMainMenu(phoneNumber, customer);
-            break;
-
-          default:
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Please select a valid option (1-4) or type 0 to return to main menu."
-            );
-            break;
-        }
-        break;
-
-      case "support_complaint":
-        if (text.toLowerCase() === "submit") {
-          if (!customer.supportTickets) {
-            customer.supportTickets = [];
-          }
-
-          customer.supportTickets.push({
-            type: "complaint",
-            details:
-              customer.contextData?.complaintDetails || "No details provided",
-            status: "open",
-            createdAt: new Date(),
-            lastUpdated: new Date(),
+        if (locationOrder) {
+          await customer.updateSupportFlow({
+            currentStep: "landmark_input",
+            tempData: {
+              ...customer.currentSupportFlow.tempData,
+              orderId: locationIssueOrderId,
+            },
           });
 
-          await customer.save();
-
+          await customer.updateConversationState("landmark_input");
           await sendWhatsAppMessage(
             phoneNumber,
-            "Your complaint has been submitted. We’ll get back to you shortly."
+            `📍 *Driver Location Issue - Order #${locationIssueOrderId}*\n\n` +
+              "Please provide a nearby landmark or share your live location:"
           );
-          await sendMainMenu(phoneNumber, customer);
         } else {
-          // Store complaint details temporarily in context
-          customer.contextData = {
-            ...customer.contextData,
-            complaintDetails: text,
-          };
-          await customer.save();
-
           await sendWhatsAppMessage(
             phoneNumber,
-            "Got it. If you're finished, type *Submit* to send your complaint to our support team."
+            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
           );
         }
         break;
+
+      case "landmark_input":
+        const landmark = text.trim();
+        const locationFlowData = customer.currentSupportFlow.tempData;
+
+        // Create driver location issue ticket
+        const locationTicketData = {
+          type: "delivery_issue",
+          subType: "driver_location_issue",
+          orderId: locationFlowData.orderId,
+          deliveryData: {
+            nearbyLandmark: landmark,
+          },
+          issueDetails: `Customer provided landmark: "${landmark}" to help driver find location`,
+          status: "open",
+        };
+
+        await customer.createSupportTicket(locationTicketData);
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ Location details received!\n\n` +
+            `Order: #${locationFlowData.orderId}\n` +
+            `Landmark: ${landmark}\n\n` +
+            "📞 Call our delivery office: 08444444444\n\n" +
+            "The driver will also contact you shortly."
+        );
+
+        await customer.clearSupportFlow();
+        setTimeout(async () => {
+          await sendMainMenu(phoneNumber, customer);
+        }, 3000);
+        break;
+
+      case "marked_delivered_not_received":
+        const notReceivedOrderId = text.trim();
+        const notReceivedOrder = customer.orderHistory.find(
+          (order) => order.orderId === notReceivedOrderId
+        );
+
+        if (notReceivedOrder) {
+          // Create urgent support ticket
+          const urgentTicketData = {
+            type: "delivery_issue",
+            subType: "marked_delivered_not_received",
+            orderId: notReceivedOrderId,
+            issueDetails:
+              "Customer reports order marked as delivered but not received",
+            status: "open",
+            priority: "urgent",
+          };
+
+          await customer.createSupportTicket(urgentTicketData);
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `🚨 *URGENT - Order #${notReceivedOrderId}*\n\n` +
+              "Please contact our support line immediately:\n" +
+              "📞 08555555555\n\n" +
+              "We'll investigate right away.\n\n" +
+              "This issue has been flagged as HIGH PRIORITY and our team has been alerted."
+          );
+
+          await customer.clearSupportFlow();
+          setTimeout(async () => {
+            await sendMainMenu(phoneNumber, customer);
+          }, 3000);
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+          );
+        }
+        break;
+
+      case "reschedule_delivery":
+        const rescheduleOrderId = text.trim();
+        const rescheduleOrder = customer.orderHistory.find(
+          (order) => order.orderId === rescheduleOrderId
+        );
+
+        if (rescheduleOrder) {
+          await customer.updateSupportFlow({
+            currentStep: "new_date_input",
+            tempData: {
+              ...customer.currentSupportFlow.tempData,
+              orderId: rescheduleOrderId,
+            },
+          });
+
+          await customer.updateConversationState("reschedule_new_date");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `📅 *Reschedule Delivery - Order #${rescheduleOrderId}*\n\n` +
+              "New preferred date (e.g., 19 June, 2025):"
+          );
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+          );
+        }
+        break;
+
+      case "reschedule_new_date":
+        const newDate = text.trim();
+        await customer.updateSupportFlow({
+          currentStep: "new_time_input",
+          tempData: {
+            ...customer.currentSupportFlow.tempData,
+            newDate: newDate,
+          },
+        });
+
+        await customer.updateConversationState("reschedule_new_time");
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "New preferred time (e.g., 9:00 PM):"
+        );
+        break;
+
+      case "reschedule_new_time":
+        const newTime = text.trim();
+        await customer.updateSupportFlow({
+          currentStep: "new_location_input",
+          tempData: {
+            ...customer.currentSupportFlow.tempData,
+            newTime: newTime,
+          },
+        });
+
+        await customer.updateConversationState("reschedule_new_location");
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "Delivery location (or type 'same' to keep current address):"
+        );
+        break;
+
+      case "reschedule_new_location":
+        const newLocation = text.trim();
+        const rescheduleFlowData = customer.currentSupportFlow.tempData;
+
+        // Create reschedule ticket
+        const rescheduleTicketData = {
+          type: "delivery_issue",
+          subType: "reschedule_delivery",
+          orderId: rescheduleFlowData.orderId,
+          deliveryData: {
+            newDeliveryDate: rescheduleFlowData.newDate,
+            newDeliveryTime: rescheduleFlowData.newTime,
+            newAddress:
+              newLocation === "same" ? "Keep current address" : newLocation,
+            extraChargesApplicable: true, // Rescheduling usually involves charges
+          },
+          issueDetails: `Customer requested reschedule to ${rescheduleFlowData.newDate} at ${rescheduleFlowData.newTime}`,
+          status: "open",
+        };
+
+        await customer.createSupportTicket(rescheduleTicketData);
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ *Reschedule Request Submitted*\n\n` +
+            `Order: #${rescheduleFlowData.orderId}\n` +
+            `New Date: ${rescheduleFlowData.newDate}\n` +
+            `New Time: ${rescheduleFlowData.newTime}\n` +
+            `Location: ${
+              newLocation === "same" ? "Same as original" : newLocation
+            }\n\n` +
+            "⚠️ *Please note:*\n" +
+            "• Extra charges may apply for rescheduling\n" +
+            "• Our team will confirm availability and contact you\n" +
+            "• If delivery is expedited, discount may be revoked\n\n" +
+            "You'll receive confirmation within 24 hours."
+        );
+
+        await customer.clearSupportFlow();
+        setTimeout(async () => {
+          await sendMainMenu(phoneNumber, customer);
+        }, 3000);
+        break;
+
+      case "product_issue_order_id":
+        const productIssueOrderId = text.trim();
+        const productOrder = customer.orderHistory.find(
+          (order) => order.orderId === productIssueOrderId
+        );
+
+        if (productOrder) {
+          const currentProductIssue = customer.currentSupportFlow.specificIssue;
+
+          await customer.updateSupportFlow({
+            currentStep: "item_name_input",
+            tempData: {
+              ...customer.currentSupportFlow.tempData,
+              orderId: productIssueOrderId,
+              orderItems: productOrder.items,
+            },
+          });
+
+          // Show order items for selection
+          const itemsList = productOrder.items
+            .map(
+              (item, index) =>
+                `${index + 1}. ${item.productName} (${item.quantity}x)`
+            )
+            .join("\n");
+
+          await customer.updateConversationState("product_item_selection");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `🔧 *${
+              currentProductIssue === "broken_item"
+                ? "Broken Item"
+                : currentProductIssue === "missing_wrong_amount"
+                ? "Missing/Wrong Amount"
+                : currentProductIssue === "wrong_item"
+                ? "Wrong Item Received"
+                : "Other Product Issue"
+            }*\n\n` +
+              `Order #${productIssueOrderId} contains:\n\n${itemsList}\n\n` +
+              "Type the item name or number that has the issue:"
+          );
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+          );
+        }
+        break;
+
+      case "product_item_selection":
+        const itemInput = text.trim();
+        const productFlowData = customer.currentSupportFlow.tempData;
+        const selectedProductIssueType =
+          customer.currentSupportFlow.specificIssue;
+
+        // Find the item (by name or number)
+        let selectedItem = null;
+        if (!isNaN(itemInput)) {
+          const itemIndex = parseInt(itemInput) - 1;
+          if (itemIndex >= 0 && itemIndex < productFlowData.orderItems.length) {
+            selectedItem = productFlowData.orderItems[itemIndex];
+          }
+        } else {
+          selectedItem = productFlowData.orderItems.find((item) =>
+            item.productName.toLowerCase().includes(itemInput.toLowerCase())
+          );
+        }
+
+        if (selectedItem) {
+          await customer.updateSupportFlow({
+            currentStep: "issue_description_input",
+            tempData: {
+              ...productFlowData,
+              selectedItem: selectedItem,
+            },
+          });
+
+          await customer.updateConversationState("product_issue_description");
+
+          if (selectedProductIssueType === "wrong_item") {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `🔄 *Wrong Item: ${selectedItem.productName}*\n\n` +
+                "Would you like to:\n" +
+                "1. Keep the item and pay for it\n" +
+                "2. Replace it with what you ordered\n\n" +
+                "Type 1 or 2 to choose:"
+            );
+          } else {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `📝 *Issue with: ${selectedItem.productName}*\n\n` +
+                "What's the issue? Please describe:"
+            );
+          }
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Item not found. Please type the correct item name or number from the list above."
+          );
+        }
+        break;
+
+      case "product_issue_description":
+        const issueDescription = text.trim();
+        const descriptionFlowData = customer.currentSupportFlow.tempData;
+        const currentSpecificIssue = customer.currentSupportFlow.specificIssue;
+
+        if (
+          currentSpecificIssue === "wrong_item" &&
+          (text === "1" || text === "2")
+        ) {
+          const preference = text === "1" ? "keep_and_pay" : "replace";
+
+          // Create product issue ticket
+          const productTicketData = {
+            type: "product_issue",
+            subType: currentSpecificIssue,
+            orderId: descriptionFlowData.orderId,
+            productData: {
+              affectedItems: [descriptionFlowData.selectedItem.productName],
+              customerPreference: preference,
+            },
+            issueDetails: `Wrong item received: ${descriptionFlowData.selectedItem.productName}. Customer choice: ${preference}`,
+            status: "open",
+          };
+
+          await customer.createSupportTicket(productTicketData);
+
+          const responseMessage =
+            preference === "keep_and_pay"
+              ? "✅ You've chosen to keep the item and pay for it. Our billing team will contact you with payment details."
+              : "✅ You've chosen to replace the item. Our team will arrange the replacement and pickup of the wrong item.";
+
+          await sendWhatsAppMessage(phoneNumber, responseMessage);
+
+          await customer.clearSupportFlow();
+          setTimeout(async () => {
+            await sendMainMenu(phoneNumber, customer);
+          }, 3000);
+        } else if (currentSpecificIssue === "broken_item") {
+          await customer.updateSupportFlow({
+            currentStep: "damage_photo_input",
+            tempData: {
+              ...descriptionFlowData,
+              issueDescription: issueDescription,
+            },
+            mediaExpected: true,
+          });
+
+          await customer.updateConversationState("damage_photo_upload");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `📸 *Broken Item: ${descriptionFlowData.selectedItem.productName}*\n\n` +
+              `Issue: ${issueDescription}\n\n` +
+              "Share a video showing the damage:"
+          );
+        } else if (currentSpecificIssue === "missing_wrong_amount") {
+          await customer.updateSupportFlow({
+            currentStep: "missing_amount_video",
+            tempData: {
+              ...descriptionFlowData,
+              issueDescription: issueDescription,
+            },
+            mediaExpected: true,
+          });
+
+          await customer.updateConversationState("missing_amount_video");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `📦 *Missing/Wrong Amount: ${descriptionFlowData.selectedItem.productName}*\n\n` +
+              `Issue: ${issueDescription}\n\n` +
+              "Please attach a short video and a voice message explaining what is missing or wrong:"
+          );
+        } else {
+          // For "other" product issues
+          const productTicketData = {
+            type: "product_issue",
+            subType: "product_other",
+            orderId: descriptionFlowData.orderId,
+            productData: {
+              affectedItems: [descriptionFlowData.selectedItem.productName],
+              issueDescription: issueDescription,
+            },
+            issueDetails: `Product issue with ${descriptionFlowData.selectedItem.productName}: ${issueDescription}`,
+            status: "open",
+          };
+
+          await customer.createSupportTicket(productTicketData);
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "✅ Product issue reported successfully. Our team will assist you right away."
+          );
+
+          await customer.clearSupportFlow();
+          setTimeout(async () => {
+            await sendMainMenu(phoneNumber, customer);
+          }, 3000);
+        }
+        break;
+
+      case "damage_photo_upload":
+        // Handle damage photo/video upload
+        if (
+          message.hasMedia &&
+          (message.type === "video" || message.type === "image")
+        ) {
+          try {
+            let mediaBuffer, base64Data, mediaSizeMB, filename, mediaType;
+
+            if (message.type === "video") {
+              // Handle video
+              const response = await axios.get(message.media.url, {
+                responseType: "arraybuffer",
+              });
+              mediaBuffer = Buffer.from(response.data, "binary");
+              base64Data = mediaBuffer.toString("base64");
+              mediaSizeMB = (base64Data.length * 3) / 4 / (1024 * 1024);
+              filename = `damage_video_${Date.now()}.mp4`;
+              mediaType = "video";
+
+              // Validate video size (max 15MB)
+              if (mediaSizeMB > 15) {
+                await sendWhatsAppMessage(
+                  phoneNumber,
+                  `❌ Video too large (${mediaSizeMB.toFixed(
+                    1
+                  )}MB). Max 15MB allowed.`
+                );
+                break;
+              }
+            } else if (message.type === "image") {
+              // Handle image
+              mediaBuffer = fs.readFileSync(message.localMediaPath);
+              base64Data = mediaBuffer.toString("base64");
+              mediaSizeMB = (base64Data.length * 3) / 4 / (1024 * 1024);
+              filename = `damage_photo_${Date.now()}.jpg`;
+              mediaType = "image";
+
+              // Validate image size (max 10MB)
+              if (mediaSizeMB > 10) {
+                await sendWhatsAppMessage(
+                  phoneNumber,
+                  `❌ Image too large (${mediaSizeMB.toFixed(
+                    1
+                  )}MB). Max 10MB allowed.`
+                );
+                break;
+              }
+            }
+
+            const damageFlowData = customer.currentSupportFlow.tempData;
+
+            // Create damage media data
+            const damageMediaData = {
+              mediaId: `DAMAGE_${Date.now()}_${Math.random()
+                .toString(36)
+                .substr(2, 9)}`,
+              mediaType: mediaType,
+              mimetype:
+                message.media?.mimetype ||
+                message.mediaInfo?.mimetype ||
+                (mediaType === "video" ? "video/mp4" : "image/jpeg"),
+              filename: filename,
+              base64Data: base64Data,
+              fileSize: mediaSizeMB,
+              uploadedAt: new Date(),
+            };
+
+            // Create broken item ticket
+            const brokenItemTicketData = {
+              type: "product_issue",
+              subType: "broken_item",
+              orderId: damageFlowData.orderId,
+              productData: {
+                affectedItems: [damageFlowData.selectedItem.productName],
+                issueDescription: damageFlowData.issueDescription,
+                damagePhotos: [damageMediaData],
+              },
+              mediaAttachments: [damageMediaData],
+              issueDetails: `Broken item: ${damageFlowData.selectedItem.productName} - ${damageFlowData.issueDescription}`,
+              status: "open",
+            };
+
+            await customer.createSupportTicket(brokenItemTicketData);
+
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `✅ *Damage Report Submitted*\n\n` +
+                `${
+                  mediaType === "video" ? "Video" : "Photo"
+                } received (${mediaSizeMB.toFixed(1)}MB)\n` +
+                `Item: ${damageFlowData.selectedItem.productName}\n` +
+                `Issue: ${damageFlowData.issueDescription}\n\n` +
+                "Our team will contact you within 1 hour.\n\n" +
+                "💡 *Options available:*\n" +
+                "• Delivery replacement (₨20k–50k charge)\n" +
+                "• Bring to our facility for free replacement"
+            );
+
+            console.log(
+              `Damage ${mediaType} saved for customer: ${phoneNumber}`
+            );
+
+            await customer.clearSupportFlow();
+            setTimeout(async () => {
+              await sendMainMenu(phoneNumber, customer);
+            }, 3000);
+          } catch (error) {
+            console.error("Error processing damage media:", error);
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Failed to process the media. Please try sending the damage photo/video again."
+            );
+          }
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "📸 Please share a video or photo showing the damage to the item."
+          );
+        }
+        break;
+      case "missing_amount_video":
+        // Handle missing amount video/voice upload
+        if (
+          message.hasMedia &&
+          (message.type === "video" || message.type === "voice")
+        ) {
+          try {
+            let mediaBuffer, base64Data, mediaSizeMB, filename, mediaType;
+
+            if (message.type === "video") {
+              // Handle video
+              const response = await axios.get(message.media.url, {
+                responseType: "arraybuffer",
+              });
+              mediaBuffer = Buffer.from(response.data, "binary");
+              base64Data = mediaBuffer.toString("base64");
+              mediaSizeMB = (base64Data.length * 3) / 4 / (1024 * 1024);
+              filename = `missing_video_${Date.now()}.mp4`;
+              mediaType = "video";
+
+              // Validate video size (max 15MB)
+              if (mediaSizeMB > 15) {
+                await sendWhatsAppMessage(
+                  phoneNumber,
+                  `❌ Video too large (${mediaSizeMB.toFixed(
+                    1
+                  )}MB). Max 15MB allowed.`
+                );
+                break;
+              }
+            } else if (message.type === "voice") {
+              // Handle voice note
+              const response = await axios.get(message.media.url, {
+                responseType: "arraybuffer",
+              });
+              mediaBuffer = Buffer.from(response.data, "binary");
+              base64Data = mediaBuffer.toString("base64");
+              mediaSizeMB = (base64Data.length * 3) / 4 / (1024 * 1024);
+              filename = `missing_voice_${Date.now()}.ogg`;
+              mediaType = "voice";
+
+              // Validate voice size (max 5MB)
+              if (mediaSizeMB > 5) {
+                await sendWhatsAppMessage(
+                  phoneNumber,
+                  `❌ Voice note too large (${mediaSizeMB.toFixed(
+                    1
+                  )}MB). Max 5MB allowed.`
+                );
+                break;
+              }
+            }
+
+            const missingFlowData = customer.currentSupportFlow.tempData;
+
+            // Create missing media data
+            const missingMediaData = {
+              mediaId: `MISSING_${Date.now()}_${Math.random()
+                .toString(36)
+                .substr(2, 9)}`,
+              mediaType: mediaType,
+              mimetype:
+                message.media.mimetype ||
+                (mediaType === "video" ? "video/mp4" : "audio/ogg"),
+              filename: filename,
+              base64Data: base64Data,
+              fileSize: mediaSizeMB,
+              uploadedAt: new Date(),
+            };
+
+            // Create missing/wrong amount ticket
+            const missingItemTicketData = {
+              type: "product_issue",
+              subType: "missing_wrong_amount",
+              orderId: missingFlowData.orderId,
+              productData: {
+                affectedItems: [missingFlowData.selectedItem.productName],
+                issueDescription: missingFlowData.issueDescription,
+              },
+              mediaAttachments: [missingMediaData],
+              issueDetails: `Missing/Wrong amount: ${missingFlowData.selectedItem.productName} - ${missingFlowData.issueDescription}`,
+              status: "open",
+            };
+
+            await customer.createSupportTicket(missingItemTicketData);
+
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `✅ *Missing/Wrong Amount Report Submitted*\n\n` +
+                `${
+                  mediaType === "video" ? "Video" : "Voice note"
+                } received (${mediaSizeMB.toFixed(1)}MB)\n` +
+                `Item: ${missingFlowData.selectedItem.productName}\n` +
+                `Issue: ${missingFlowData.issueDescription}\n\n` +
+                "We'll ship the correct amount ASAP. 🚚\n\n" +
+                "Our team will contact you to arrange the correction."
+            );
+
+            console.log(
+              `Missing amount ${mediaType} saved for customer: ${phoneNumber}`
+            );
+
+            await customer.clearSupportFlow();
+            setTimeout(async () => {
+              await sendMainMenu(phoneNumber, customer);
+            }, 3000);
+          } catch (error) {
+            console.error("Error processing missing amount media:", error);
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Failed to process the media. Please try sending the video and voice message again."
+            );
+          }
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "🎥 Please attach a short video and voice message explaining what is missing or wrong."
+          );
+        }
+        break;
+
+      case "charged_twice":
+        // This case handles when user was charged twice - already handled in payment_problems
+        await customer.clearSupportFlow();
+        setTimeout(async () => {
+          await sendMainMenu(phoneNumber, customer);
+        }, 2000);
+        break;
+
+      case "faqs":
+        if (text === "0") {
+          await sendMainMenu(phoneNumber, customer);
+        } else {
+          // Track FAQ interaction
+          const faqInteraction = {
+            question: "FAQ page visited",
+            category: "general",
+            timestamp: new Date(),
+            helpful: true,
+          };
+
+          if (!customer.faqInteractions) {
+            customer.faqInteractions = [];
+          }
+          customer.faqInteractions.push(faqInteraction);
+          await customer.save();
+
+          // Return to main menu automatically after 10 seconds
+          setTimeout(async () => {
+            await sendMainMenu(phoneNumber, customer);
+          }, 10000);
+        }
+        break;
+
+      // Generic media handler case for any support context expecting media
+      case "support_media_handler":
+        if (message.hasMedia && customer.currentSupportFlow?.mediaExpected) {
+          try {
+            let mediaBuffer, base64Data, mediaSizeMB, filename, mediaType;
+
+            switch (message.type) {
+              case "video":
+                const videoResponse = await axios.get(message.media.url, {
+                  responseType: "arraybuffer",
+                });
+                mediaBuffer = Buffer.from(videoResponse.data, "binary");
+                base64Data = mediaBuffer.toString("base64");
+                mediaSizeMB = (base64Data.length * 3) / 4 / (1024 * 1024);
+                filename = `support_video_${Date.now()}.mp4`;
+                mediaType = "video";
+
+                if (mediaSizeMB > 15) {
+                  await sendWhatsAppMessage(
+                    phoneNumber,
+                    `❌ Video too large (${mediaSizeMB.toFixed(
+                      1
+                    )}MB). Max 15MB allowed.`
+                  );
+                  return;
+                }
+                break;
+
+              case "voice":
+                const voiceResponse = await axios.get(message.media.url, {
+                  responseType: "arraybuffer",
+                });
+                mediaBuffer = Buffer.from(voiceResponse.data, "binary");
+                base64Data = mediaBuffer.toString("base64");
+                mediaSizeMB = (base64Data.length * 3) / 4 / (1024 * 1024);
+                filename = `support_voice_${Date.now()}.ogg`;
+                mediaType = "voice";
+
+                if (mediaSizeMB > 5) {
+                  await sendWhatsAppMessage(
+                    phoneNumber,
+                    `❌ Voice note too large (${mediaSizeMB.toFixed(
+                      1
+                    )}MB). Max 5MB allowed.`
+                  );
+                  return;
+                }
+                break;
+
+              case "image":
+                mediaBuffer = fs.readFileSync(message.localMediaPath);
+                base64Data = mediaBuffer.toString("base64");
+                mediaSizeMB = (base64Data.length * 3) / 4 / (1024 * 1024);
+                filename = `support_image_${Date.now()}.jpg`;
+                mediaType = "image";
+
+                if (mediaSizeMB > 10) {
+                  await sendWhatsAppMessage(
+                    phoneNumber,
+                    `❌ Image too large (${mediaSizeMB.toFixed(
+                      1
+                    )}MB). Max 10MB allowed.`
+                  );
+                  return;
+                }
+                break;
+
+              default:
+                await sendWhatsAppMessage(
+                  phoneNumber,
+                  "❌ Unsupported media type. Please send an image, video, or voice note."
+                );
+                return;
+            }
+
+            // Store media in support media array
+            if (!customer.supportMedia) {
+              customer.supportMedia = [];
+            }
+
+            const supportMediaData = {
+              mediaId: `SUPPORT_${Date.now()}_${Math.random()
+                .toString(36)
+                .substr(2, 9)}`,
+              ticketId:
+                customer.currentSupportFlow.tempData?.ticketId || "pending",
+              mediaType: mediaType,
+              base64Data: base64Data,
+              mimetype: message.media?.mimetype || message.mediaInfo?.mimetype,
+              fileSize: mediaSizeMB,
+              uploadedAt: new Date(),
+              filename: filename,
+              description: `Support media for ${customer.currentSupportFlow.mainCategory}`,
+            };
+
+            customer.supportMedia.push(supportMediaData);
+            await customer.save();
+
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `✅ ${
+                mediaType === "video"
+                  ? "Video"
+                  : mediaType === "voice"
+                  ? "Voice note"
+                  : "Image"
+              } received and saved successfully (${mediaSizeMB.toFixed(1)}MB)!`
+            );
+
+            console.log(
+              `Support ${mediaType} saved for customer: ${phoneNumber}`
+            );
+          } catch (error) {
+            console.error("Error processing support media:", error);
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "❌ Failed to process media. Please try uploading again."
+            );
+          }
+        }
+        break;
+
+        // Additional utility functions to add to your code:
+
+        // Function to send main support menu
+        async function sendMainSupportMenu(phoneNumber, customer) {
+          await customer.updateConversationState("support");
+          await customer.clearSupportFlow();
+
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "📞 *Customer Support* 📞\n\n" +
+              "How can we help you today?\n\n" +
+              "1. Delivery & Product Issues\n" +
+              "2. Check My Delivery\n" +
+              "3. Payment Problems\n" +
+              "4. Speak to an Agent\n" +
+              "5. Submit a Complaint\n" +
+              "6. FAQs\n\n" +
+              "Type the number to continue or 0 to return to main menu."
+          );
+        }
+
+        // Function to handle timeout scenarios
+        async function handleSupportTimeout(phoneNumber, customer) {
+          if (
+            customer.currentSupportFlow &&
+            customer.currentSupportFlow.lastInteraction
+          ) {
+            const timeDiff =
+              new Date() -
+              new Date(customer.currentSupportFlow.lastInteraction);
+            const timeoutMinutes = 10; // 10 minutes timeout
+
+            if (timeDiff > timeoutMinutes * 60 * 1000) {
+              await sendWhatsAppMessage(
+                phoneNumber,
+                "⏰ Your support session has timed out due to inactivity. Returning to main menu."
+              );
+
+              await customer.clearSupportFlow();
+              await sendMainMenu(phoneNumber, customer);
+              return true;
+            }
+          }
+          return false;
+        }
+
+        // Function to create quick support ticket for urgent issues
+        async function createUrgentSupportTicket(
+          customer,
+          issueType,
+          orderId,
+          description
+        ) {
+          const urgentTicket = {
+            type: issueType,
+            orderId: orderId,
+            issueDetails: description,
+            status: "open",
+            priority: "urgent",
+            estimatedResolutionTime: "within 1 hour",
+            createdAt: new Date(),
+          };
+
+          const ticketId = await customer.createSupportTicket(urgentTicket);
+
+          // Also send notification to admin/support team
+          console.log(
+            `URGENT TICKET CREATED: ${ticketId} for customer ${customer.phoneNumber[0]}`
+          );
+
+          return ticketId;
+        }
+
+        // Function to save all conversation data for support analytics
+        async function logSupportInteraction(customer, action, details = {}) {
+          if (!customer.supportInteractionHistory) {
+            customer.supportInteractionHistory = [];
+          }
+
+          const currentSession = customer.supportInteractionHistory.find(
+            (session) =>
+              session.sessionId === customer.currentSupportFlow?.sessionId
+          );
+
+          if (currentSession) {
+            currentSession.totalMessages += 1;
+            currentSession.lastAction = action;
+            currentSession.lastActionTime = new Date();
+            if (details.mediaShared) {
+              currentSession.mediaShared += 1;
+            }
+          } else {
+            // Create new session
+            customer.supportInteractionHistory.push({
+              sessionId: "SESS" + Date.now(),
+              startTime: new Date(),
+              category: customer.currentSupportFlow?.mainCategory || "unknown",
+              totalMessages: 1,
+              mediaShared: details.mediaShared ? 1 : 0,
+              currentAction: action,
+            });
+          }
+
+          await customer.save();
+        }
+
+        // Enhanced error handling for media processing
+        async function handleMediaError(phoneNumber, mediaType, error) {
+          console.error(`Media processing error for ${mediaType}:`, error);
+
+          let errorMessage =
+            "❌ Sorry, there was an issue processing your media. ";
+
+          switch (mediaType) {
+            case "video":
+              errorMessage +=
+                "Please ensure your video is under 50MB and try again.";
+              break;
+            case "image":
+              errorMessage +=
+                "Please ensure your image is clear and under 10MB.";
+              break;
+            case "voice":
+              errorMessage +=
+                "Please ensure your voice note is clear and under 5MB.";
+              break;
+            default:
+              errorMessage += "Please try uploading the file again.";
+          }
+
+          await sendWhatsAppMessage(phoneNumber, errorMessage);
+        }
+
+        // Function to validate order ID format
+        function isValidOrderId(orderId) {
+          // Assuming order IDs follow pattern like "ORD12345678" or similar
+          return orderId && orderId.length > 3 && /^[A-Z0-9]+$/.test(orderId);
+        }
+
+        // Function to get order status in user-friendly format
+        function getUserFriendlyOrderStatus(status) {
+          const statusMap = {
+            "cart-not-paid": "Cart (Not Paid)",
+            "order-made-not-paid": "Order Created (Payment Pending)",
+            "pay-not-confirmed": "Payment Not Confirmed",
+            "order-confirmed": "Order Confirmed",
+            "order not picked": "Awaiting Pickup",
+            "issue-customer": "Issue Reported",
+            "customer-confirmed": "Customer Confirmed",
+            "order-refunded": "Refunded",
+            "picking-order": "Being Prepared",
+            "allocated-driver": "Driver Assigned",
+            "ready to pickup": "Ready for Pickup",
+            "order-not-pickedup": "Pickup Missed",
+            "order-pickuped-up": "Picked Up",
+            "on-way": "On the Way",
+            "driver-confirmed": "Driver Confirmed",
+            "order-processed": "Processed",
+            refund: "Refund in Progress",
+            "complain-order": "Complaint Filed",
+            "issue-driver": "Driver Issue",
+            "parcel-returned": "Returned",
+            "order-complete": "Delivered",
+          };
+
+          return statusMap[status] || status;
+        }
 
       // Modified account case to support the new menu structure
       case "profile":
@@ -3366,7 +5316,7 @@ async function processChatMessage(phoneNumber, text, message) {
                 ` *My Account* \n\n` +
                 `Please select an option:\n\n` +
                 `1. Funds\n` +
-                `2. Forman\n` +
+                `2. Forman (eligibility)\n` +
                 `3. Switch my number\n` +
                 `4. Return to Profile`;
               await sendWhatsAppMessage(phoneNumber, accountMessage);
@@ -4696,8 +6646,12 @@ async function processChatMessage(phoneNumber, text, message) {
                 ` *My Earnings (Forman)*: Rs. 5,200.00\n` +
                 ` *My Refunds*: Rs. 1,000.00\n` +
                 ` *Total Funds Available*: Rs. 6,200.00\n\n` +
-                `With these funds, you can buy anything you want from our shop — cement, bricks, paint, pipes... even dreams  \n\n` +
-                `4. Return to Main Menu`
+                `With these funds, you can buy anything you want from our shop — cement, bricks, paint, pipes... even dreams\n\n` +
+                `-------------------------------------------------------\n` +
+                `For your information :\n` +
+                `- how to use your funds , you need to go to our facility and meet with support and you can use your funds at our facility center by ordering products.\n` +
+                `------------------------------------------------------\n` +
+                `0. Return to Main Menu`
             );
             break;
 
@@ -4708,8 +6662,8 @@ async function processChatMessage(phoneNumber, text, message) {
               phoneNumber,
               `👨‍💼 *Forman Details* 👨‍💼\n\n` +
                 `Please select an option:\n\n` +
-                `1. Forman status\n` +
-                `2. Commission details\n` +
+                `1. Forman status(Active or not Active)\n` +
+                `2. Commission details(eligibilty)\n` +
                 `3. Return to Account Menu`
             );
             break;
@@ -4830,7 +6784,10 @@ async function processChatMessage(phoneNumber, text, message) {
                 `Commission rate: 0%\n` +
                 `Total commission earned: Rs. 0.00\n\n` +
                 `You haven't earned any commission yet.\n\n` +
-                `Type any key to return to Forman menu.`
+                `Type any key to return to Forman menu.\n` +
+                `---------------------------------------------------------\n` +
+                `For your information :\n` +
+                `- how to use your commission , you need to go to our facility and meet with support and you can use your commission at our facility center by ordering products.`
             );
             break;
           case "3":
@@ -6416,7 +8373,6 @@ async function processChatMessage(phoneNumber, text, message) {
       // SIMPLIFIED REFERRAL CASES - Clean and working
       // =============================================================================
 
-      // ─── CASE: referral ──────────────────────────────────────────────────────────
       case "referral":
         // Simple referral introduction and move to video creation
         await sendSequentialMessages(
@@ -6431,18 +8387,52 @@ async function processChatMessage(phoneNumber, text, message) {
             "• 3GP\n" +
             "• MKV\n\n" +
             "📏 Max size: 15MB\n" +
-            "⏱️ Keep it under 3 minutes for best results!",
+            "⏱️ Keep it under 1 minute for best results!"
+        );
+
+        await sendSequentialMessages(
+          phoneNumber,
           "📱 Send your video now or type '0' to return to main menu",
           1000
         );
+
+        // Third message (video reference)
+        await sendSequentialMessages(
+          phoneNumber,
+          "See the video below and follow the instructions to know better what to say",
+          1000
+        );
+
+        // Fourth message (talking points)
+        await sendSequentialMessages(
+          phoneNumber,
+          "What to mention in the video:\n- Mention Your Name\n- What you do\n- Why do you like us",
+          1000
+        );
+
+        // Send the activated demo video with custom message to the customer
+        try {
+          const videoSent = await sendActivatedDemoVideo(customer, phoneNumber);
+          if (!videoSent) {
+            await sendSequentialMessages(
+              phoneNumber,
+              "❌ No demo video available at the moment. Please proceed with creating your own video.",
+              1000
+            );
+          }
+        } catch (error) {
+          console.error("Error sending demo video:", error);
+          await sendSequentialMessages(
+            phoneNumber,
+            "❌ Unable to send demo video. Please proceed with creating your own video.",
+            1000
+          );
+        }
 
         // Move directly to video creation state
         await customer.updateConversationState("create_video");
         break;
 
-      // ─── CASE: create_video ──────────────────────────────────────────────────────
-      // ─── CASE: create_video (Updated) ────────────────────────────────────────────
-      // ─── CASE: create_video (Simplified) ──────────────────────────────────────
       case "create_video":
         if (message.hasMedia && message.type === "video") {
           try {
@@ -6637,17 +8627,153 @@ async function processChatMessage(phoneNumber, text, message) {
           }
         }
 
-        // ─── UPDATED sendReferralToContact ───────────────────────────────────────────
-        // ─── sendReferralToContact (UltraMsg Compatible) ───────────────────────────
+        // ─── FIXED sendActivatedDemoVideo - Removed problematic substring ───────────────────────────
+        async function sendActivatedDemoVideo(customer, phoneNumber) {
+          try {
+            const Video = require("../models/video"); // Import your Video model
+
+            // Check for expired videos first
+            await Video.checkExpiredVideos();
+            await Video.updateCurrentlyActiveStatus();
+
+            // Find the currently active referral demo video (159A)
+            const demoVideo = await Video.findOne({
+              videoType: "referral",
+              isActive: true,
+              isCurrentlyActive: true,
+            });
+
+            if (!demoVideo) {
+              console.log("No active referral demo video found in database");
+              return false;
+            }
+
+            // Check if the video is currently active based on schedule
+            if (!demoVideo.checkCurrentlyActive()) {
+              console.log(
+                "Demo video found but not currently active based on schedule"
+              );
+              return false;
+            }
+
+            // Validate video data
+            if (!demoVideo.base64Data || !demoVideo.mimetype) {
+              console.log("Demo video missing base64Data or mimetype");
+              return false;
+            }
+
+            // Prepare caption - use saved message if available, otherwise default
+            let caption = "";
+
+            if (
+              demoVideo.textBox &&
+              demoVideo.textBox.isActive &&
+              demoVideo.textBox.content
+            ) {
+              // Use the saved custom message from admin for 159A
+              caption = demoVideo.textBox.content;
+              console.log(
+                "Using custom demo message from admin:",
+                caption ? "Message found" : "No message"
+              );
+            } else {
+              // Default demo caption if no custom message is saved
+              caption =
+                `📹 Here's how to create your referral video:\n\n` +
+                `📝 What to mention:\n` +
+                `• Your name\n` +
+                `• What you do\n` +
+                `• Why you recommend us\n\n` +
+                `🎯 Keep it personal and authentic!`;
+              console.log("Using default demo video caption");
+            }
+
+            // Send via UltraMsg API
+            const result = await axios.post(
+              `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/video`,
+              new URLSearchParams({
+                token: ULTRAMSG_CONFIG.token,
+                to: phoneNumber + "@c.us",
+                video: `data:${demoVideo.mimetype};base64,${demoVideo.base64Data}`,
+                caption: caption,
+              }),
+              {
+                headers: {
+                  "Content-Type": "application/x-www-form-urlencoded",
+                },
+                timeout: 30000, // 30 second timeout
+              }
+            );
+
+            if (!result.data?.sent) {
+              throw new Error(
+                `UltraMsg demo video send failed: ${JSON.stringify(
+                  result.data
+                )}`
+              );
+            }
+
+            console.log("Demo video sent successfully:", {
+              videoId: demoVideo._id,
+              videoTitle: demoVideo.title,
+              fileSize: demoVideo.fileSize,
+              phoneNumber: phoneNumber,
+              videoType: "referral_demo",
+              messageType:
+                demoVideo.textBox &&
+                demoVideo.textBox.isActive &&
+                demoVideo.textBox.content
+                  ? "custom"
+                  : "default",
+              captionIncluded: !!caption,
+            });
+
+            // Record that the video was sent (for analytics)
+            await demoVideo.recordSent();
+
+            return true;
+          } catch (error) {
+            console.error("Error sending demo video:", {
+              error: error.message,
+              stack: error.stack,
+              phoneNumber: phoneNumber,
+            });
+
+            // Don't throw, just return false to allow graceful handling
+            return false;
+          }
+        }
+
+        // ─── UPDATED sendReferralToContact - Sends Introduction Video First, Then Referral ───────────────────────────
         async function sendReferralToContact(customer, video, contact) {
           try {
-            // 1. Prepare caption
-            const caption =
-              `🎉 Referral from ${customer.name}\n` +
-              `Use code: ${customer.referralCode || "WELCOME10"}\n` +
-              `for 10% first purchase discount!`;
+            console.log(
+              `🚀 Starting referral process for contact: ${contact.phoneNumber}`
+            );
 
-            // 2. Send via UltraMsg API
+            // STEP 1: Send Introduction Video (159B) first
+            const introVideoSent = await sendIntroductionVideo(
+              contact.phoneNumber,
+              customer
+            );
+
+            if (introVideoSent) {
+              console.log("✅ Introduction video sent successfully");
+              // Add delay between videos to ensure proper delivery
+              await new Promise((resolve) => setTimeout(resolve, 3000)); // Increased delay
+            } else {
+              console.log(
+                "⚠️ No introduction video available, proceeding with referral only"
+              );
+            }
+
+            // STEP 2: Send the user's referral video
+            const caption =
+              `🎉 Personal Referral from ${customer.name}\n` +
+              `💰 Use code: ${customer.referralCode || "WELCOME10"}\n` +
+              `for 10% first purchase discount!\n\n` +
+              `👆 ${customer.name} personally recommends us!`;
+
             const result = await axios.post(
               `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/video`,
               new URLSearchParams({
@@ -6660,17 +8786,181 @@ async function processChatMessage(phoneNumber, text, message) {
                 headers: {
                   "Content-Type": "application/x-www-form-urlencoded",
                 },
+                timeout: 30000,
               }
             );
 
             if (!result.data?.sent) {
-              throw new Error("UltraMsg send failed");
+              throw new Error(
+                `UltraMsg referral video send failed: ${JSON.stringify(
+                  result.data
+                )}`
+              );
             }
+
+            console.log("✅ Referral video sent successfully");
+
+            // STEP 3: Send follow-up welcome message
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+
+            const welcomeMessage =
+              `🙏 Welcome to our family!\n\n` +
+              `📞 ${customer.name} (${customer.phoneNumber}) referred you\n\n` +
+              `🎁 Your discount code: ${
+                customer.referralCode || "WELCOME10"
+              }\n\n` +
+              `💬 Reply with hi to start or visit our website!\n\n` +
+              `Thank you for trusting us! 🌟`;
+
+            await axios.post(
+              `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/chat`,
+              new URLSearchParams({
+                token: ULTRAMSG_CONFIG.token,
+                to: contact.phoneNumber + "@c.us",
+                body: welcomeMessage,
+              }),
+              {
+                headers: {
+                  "Content-Type": "application/x-www-form-urlencoded",
+                },
+              }
+            );
+
+            console.log("✅ Welcome message sent successfully");
+            return true;
+          } catch (error) {
+            console.error("❌ Error in sendReferralToContact:", {
+              error: error.message,
+              stack: error.stack,
+              contactPhone: contact.phoneNumber,
+              customerName: customer.name,
+            });
+            throw new Error("Failed to send complete referral package");
+          }
+        }
+
+        // ─── FIXED sendIntroductionVideo - Removed problematic substring ───────────────────────────
+        async function sendIntroductionVideo(phoneNumber, referringCustomer) {
+          try {
+            const Video = require("../models/video"); // Import your Video model
+
+            // Check for expired videos first
+            await Video.checkExpiredVideos();
+            await Video.updateCurrentlyActiveStatus();
+
+            // Find the currently active introduction video (159B)
+            const introVideo = await Video.findOne({
+              videoType: "introduction",
+              isActive: true,
+              isCurrentlyActive: true,
+            });
+
+            if (!introVideo) {
+              console.log("No active introduction video found in database");
+              return false;
+            }
+
+            // Check if the video is currently active based on schedule
+            if (!introVideo.checkCurrentlyActive()) {
+              console.log(
+                "Introduction video found but not currently active based on schedule"
+              );
+              return false;
+            }
+
+            // Validate video data
+            if (!introVideo.base64Data || !introVideo.mimetype) {
+              console.log("Introduction video missing base64Data or mimetype");
+              return false;
+            }
+
+            // Prepare caption for introduction video
+            let caption = "";
+
+            if (
+              introVideo.textBox &&
+              introVideo.textBox.isActive &&
+              introVideo.textBox.content
+            ) {
+              // Use the saved custom message from admin for 159B
+              caption = introVideo.textBox.content;
+
+              // Add referrer information to the custom message
+              if (referringCustomer && referringCustomer.name) {
+                caption += `\n\n👋 You were referred by: ${referringCustomer.name}`;
+              }
+
+              console.log("Using custom introduction message");
+            } else {
+              // Default introduction message if no custom message is saved
+              if (referringCustomer && referringCustomer.name) {
+                caption =
+                  `👋 Welcome! You were referred by ${referringCustomer.name}\n\n` +
+                  `🏢 Let us introduce ourselves and our services...\n\n` +
+                  `🌟 We're excited to serve you!`;
+              } else {
+                caption =
+                  `👋 Welcome to our family!\n\n` +
+                  `🏢 Let us introduce ourselves and our services...\n\n` +
+                  `🌟 We're excited to serve you!`;
+              }
+              console.log("Using default introduction message");
+            }
+
+            // Send introduction video via UltraMsg API
+            const result = await axios.post(
+              `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/video`,
+              new URLSearchParams({
+                token: ULTRAMSG_CONFIG.token,
+                to: phoneNumber + "@c.us",
+                video: `data:${introVideo.mimetype};base64,${introVideo.base64Data}`,
+                caption: caption,
+              }),
+              {
+                headers: {
+                  "Content-Type": "application/x-www-form-urlencoded",
+                },
+                timeout: 30000,
+              }
+            );
+
+            if (!result.data?.sent) {
+              throw new Error(
+                `UltraMsg introduction video send failed: ${JSON.stringify(
+                  result.data
+                )}`
+              );
+            }
+
+            console.log("Introduction video sent successfully:", {
+              videoId: introVideo._id,
+              videoTitle: introVideo.title,
+              fileSize: introVideo.fileSize,
+              phoneNumber: phoneNumber,
+              videoType: "introduction",
+              captionIncluded: !!caption,
+              referringCustomer: referringCustomer?.name || "unknown",
+              customMessage: !!(
+                introVideo.textBox &&
+                introVideo.textBox.isActive &&
+                introVideo.textBox.content
+              ),
+            });
+
+            // Record that the video was sent (for analytics)
+            await introVideo.recordSent();
 
             return true;
           } catch (error) {
-            console.error("Referral send error:", error);
-            throw new Error("Failed to send video referral");
+            console.error("Error sending introduction video:", {
+              error: error.message,
+              stack: error.stack,
+              phoneNumber: phoneNumber,
+              referringCustomer: referringCustomer?.name || "unknown",
+            });
+
+            // Don't throw, just return false to allow graceful handling
+            return false;
           }
         }
       // Simplified discount_products case (no more discounts state needed)
@@ -7059,7 +9349,8 @@ async function sendMainMenu(phoneNumber, customer) {
   // Send discount message first
   await sendWhatsAppMessage(
     phoneNumber,
-    "🏷️ *Get 10% discount on first order straight away* 💰"
+    `🏷 Get 10% discount on first order straight away 💰
+`
   );
 
   // Wait a moment to simulate natural conversation flow

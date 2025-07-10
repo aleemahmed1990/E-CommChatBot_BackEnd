@@ -5,6 +5,11 @@ const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
 const dotenv = require("dotenv");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const speakeasy = require("speakeasy");
+const QRCode = require("qrcode");
+const rateLimit = require("express-rate-limit");
 
 // Load environment variables
 dotenv.config();
@@ -13,32 +18,66 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// JWT Secrets (hardcoded as requested)
+const JWT_SECRET = "admin-dashboard-super-secret-jwt-key-2025-secure";
+const JWT_REFRESH_SECRET = "admin-dashboard-refresh-token-secret-2025";
+
+// Email configuration (using your email)
+const EMAIL_CONFIG = {
+  service: "gmail",
+  auth: {
+    user: "realahmedali4@gmail.com",
+    pass: "your-app-password", // You'll need to generate this in Gmail
+  },
+};
+
 // ========== MIDDLEWARE SETUP (MUST BE BEFORE ROUTES) ==========
 
-// CORS Configuration
-app.use(
-  cors({
-    origin: [
-      "http://localhost:3000",
-      "http://192.168.18.12:3000",
-      "http://127.0.0.1:3000",
-    ],
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
-
-// Handle preflight requests
-app.options("*", cors());
+app.use(cors()); // This allows all origins by default
 
 // ⭐ CRITICAL: Body parsing middleware MUST come before routes
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Replace multiple declarations with single configuration
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Static file serving
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use("/videos", express.static(path.join(__dirname, "videos")));
+
+// Rate limiting for login attempts
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 attempts per window
+  message: {
+    success: false,
+    message: "Too many login attempts, please try again later",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+});
+
+// Add at the top with other requires
+const multer = require("multer");
+
+// Configure multer for video uploads
+const videoUpload = multer({
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB
+  },
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, path.join(__dirname, "videos"));
+    },
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+      cb(
+        null,
+        file.fieldname + "-" + uniqueSuffix + path.extname(file.originalname)
+      );
+    },
+  }),
+});
 
 // ========== ROUTE IMPORTS ==========
 const { router: adminAuthRouter } = require("./routes/adminAuth");
@@ -53,6 +92,44 @@ const referralVideosRoutes = require("./routes/referralVideos");
 const chatbotRouter = require("./routes/chatbot-router");
 const referralDataRoutes = require("./routes/referralData");
 const foremanCustomersRoutes = require("./routes/foremanCustomers");
+const referralDemoRoutes = require("./routes/customerVideosRoutes");
+const supportRoutes = require("./routes/support");
+
+// ========== IMPORT YOUR NEW VIDEO ROUTES ==========
+const videoRoutes = require("./routes/videos"); // This should be your new video routes file
+
+// ========== NEW AUTH ROUTES IMPORT ==========
+const {
+  router: authRouter,
+  authenticateToken,
+  requireRole,
+} = require("./routes/auth");
+const { adminRouter } = require("./routes/admin");
+
+// Make JWT secrets and middleware available globally
+global.JWT_SECRET = JWT_SECRET;
+global.JWT_REFRESH_SECRET = JWT_REFRESH_SECRET;
+global.EMAIL_CONFIG = EMAIL_CONFIG;
+global.authenticateToken = authenticateToken;
+global.requireRole = requireRole;
+
+// ========== DATABASE SEEDING FUNCTION (PERMISSIONS ONLY) ==========
+const seedDatabase = async () => {
+  try {
+    console.log("🌱 Starting database seeding...");
+
+    // Import the models
+    const { Permission } = require("./models/Permission");
+
+    // Only seed permissions (removed role seeding)
+    console.log("📝 Seeding permissions...");
+    await Permission.seedDefaultPermissions();
+
+    console.log("✅ Database seeding completed successfully!");
+  } catch (error) {
+    console.error("❌ Database seeding failed:", error);
+  }
+};
 
 // ========== DATABASE CONNECTION ==========
 mongoose
@@ -65,31 +142,46 @@ mongoose
     }
   )
   .then(() => {
-    console.log("MongoDB connected successfully");
-    // Seed admin user on successful connection
+    console.log("✅ MongoDB connected successfully");
+
+    // Seed original admin user (keep existing functionality)
     Admin.seedAdmin();
+
+    // ✅ FIXED: Seed only permissions (removed role seeding)
+    seedDatabase();
   })
   .catch((err) => {
-    console.error("MongoDB connection error:", err);
+    console.error("❌ MongoDB connection error:", err);
   });
 
 // ========== API ROUTES (AFTER MIDDLEWARE) ==========
+
+// ⭐ ADD YOUR NEW VIDEO ROUTES FIRST (BEFORE OTHER CONFLICTING ROUTES)
+app.use("/api/videos", videoRoutes);
+
+// Original admin auth (keep existing path)
 app.use("/api/admin", adminAuthRouter);
+
+// Regular routes
 app.use("/api/employees", employeeRoutes);
 app.use("/api/suppliers", supplierRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api", chatbotRouter);
-
 app.use("/api/categories", categoryRoutes);
 app.use("/api", ordersRouter);
 app.use("/api", customersRouter);
 app.use("/api/referral-videos", referralVideosRoutes);
 app.use("/api/referral-data", referralDataRoutes);
 app.use("/api/foreman-customers", foremanCustomersRoutes);
+app.use("/api/referral-demos", referralDemoRoutes);
+app.use("/api/customer-videos", referralDemoRoutes);
+app.use("/api/support", supportRoutes);
 
-// ========== CUSTOM ENDPOINTS ==========
+// ========== NEW AUTH ROUTES ==========
+app.use("/api/auth", authRouter);
+app.use("/api/user-admin", adminRouter); // Changed path to avoid conflict
 
-// Video streaming endpoint
+// Video streaming endpoint (for old customer videos)
 app.get("/api/video/:videoId", async (req, res) => {
   try {
     const { videoId } = req.params;
@@ -635,6 +727,25 @@ app.use((err, req, res, next) => {
 });
 
 // ========== START SERVER ==========
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log("=".repeat(50));
+  console.log("🚀 Enhanced Admin Dashboard Server Started");
+  console.log("📧 Admin Email: realahmedali4@gmail.com");
+  console.log("🔐 JWT Secret: Configured");
+  console.log("🔒 2FA Support: Enabled");
+  console.log("🎭 Dynamic Role System: Active");
+  console.log("=".repeat(50));
+  console.log("🔗 API Endpoints:");
+  console.log("   Auth: /api/auth/*");
+  console.log("   User Management: /api/user-admin/*");
+  console.log("   Original Admin: /api/admin/*");
+  console.log("   ✨ NEW Videos: /api/videos/*");
+  console.log("=".repeat(50));
+  console.log("💡 Roles need to be created manually");
+  console.log("   (No automatic role seeding)");
+  console.log("🎬 Video Management: Ready for 159A & 159B");
+  console.log("=".repeat(50));
+});
 
 module.exports = app;
