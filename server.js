@@ -11,6 +11,10 @@ const speakeasy = require("speakeasy");
 const QRCode = require("qrcode");
 const rateLimit = require("express-rate-limit");
 const Admin = require("./models/admin");
+const Area = require("./models/Areas");
+const VehicleType = require("./models/VehicleType");
+const DeliveryPeriod = require("./models/DeliveryPeriod");
+const packingRoutes = require("./routes/packingRoutes");
 
 // Load environment variables
 dotenv.config();
@@ -95,6 +99,19 @@ const referralDataRoutes = require("./routes/referralData");
 const foremanCustomersRoutes = require("./routes/foremanCustomers");
 const referralDemoRoutes = require("./routes/customerVideosRoutes");
 const supportRoutes = require("./routes/support");
+const deliveryRoutes = require("./routes/deliveryRoutes");
+const storageRoutes = require("./routes/storageRoutes");
+const dispatchOfficer1Routes = require("./routes/dispatchOfficer1Routes");
+const dispatchOfficer2Routes = require("./routes/dispatchOfficer2Routes");
+const driverOnDeliveryRoutes = require("./routes/driverOnDeliveryRoutes");
+// Import the complaint routes
+const complaintRoutes = require("./routes/complaints");
+const driverRoutes = require("./routes/driverRoutes");
+app.use("/api/driver-on-delivery", driverOnDeliveryRoutes);
+
+// Also ensure your driver routes are included:
+
+app.use("/api/driver", driverRoutes);
 
 // ========== IMPORT YOUR NEW VIDEO ROUTES ==========
 const videoRoutes = require("./routes/videos"); // This should be your new video routes file
@@ -169,18 +186,526 @@ app.use("/api/suppliers", supplierRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api", chatbotRouter);
 app.use("/api/categories", categoryRoutes);
-app.use("/api", ordersRouter);
-app.use("/api", customersRouter);
+app.use("/api/orders", ordersRouter);
+app.use("/api/customers", customersRouter);
 app.use("/api/referral-videos", referralVideosRoutes);
 app.use("/api/referral-data", referralDataRoutes);
 app.use("/api/foreman-customers", foremanCustomersRoutes);
 app.use("/api/referral-demos", referralDemoRoutes);
 app.use("/api/customer-videos", referralDemoRoutes);
 app.use("/api/support", supportRoutes);
+app.use("/api/dispatch1", dispatchOfficer1Routes);
+// Routes
+app.use("/api/delivery", deliveryRoutes);
+app.use("/api/packing", packingRoutes);
+app.use("/api/dispatch2", dispatchOfficer2Routes);
+app.use("/api/driver-on-delivery", driverOnDeliveryRoutes);
+
+// Add the complaint routes to your server
+app.use("/api/complaints", complaintRoutes);
+
+// Also ensure your driver routes are included:
+
+app.use("/api/driver", driverRoutes);
+app.use("/api/storage", storageRoutes);
 
 // ========== NEW AUTH ROUTES ==========
 app.use("/api/auth", authRouter);
 app.use("/api/user-admin", adminRouter); // Changed path to avoid conflict
+
+// ========== AREAS API ENDPOINTS ==========
+
+// API endpoint to get all areas
+app.get("/api/areas", async (req, res) => {
+  try {
+    const areas = await Area.find().sort({ name: 1 });
+    res.json(areas);
+  } catch (error) {
+    console.error("Error fetching areas:", error);
+    res.status(500).json({ error: "Failed to fetch areas" });
+  }
+});
+
+// API endpoint to create a new area
+app.post("/api/areas", async (req, res) => {
+  try {
+    const { name, displayName, truckPrice, scooterPrice } = req.body;
+
+    // Validate required fields
+    if (!name || !displayName) {
+      return res
+        .status(400)
+        .json({ error: "Name and display name are required" });
+    }
+
+    // Check if area already exists
+    const existingArea = await Area.findOne({ name: name.toLowerCase() });
+    if (existingArea) {
+      return res
+        .status(400)
+        .json({ error: "Area with this name already exists" });
+    }
+
+    // Create new area
+    const newArea = new Area({
+      name: name.toLowerCase(),
+      displayName,
+      truckPrice: truckPrice || 0,
+      scooterPrice: scooterPrice || 0,
+      isActive: true,
+    });
+
+    const savedArea = await newArea.save();
+    res.status(201).json(savedArea);
+  } catch (error) {
+    console.error("Error creating area:", error);
+    res.status(500).json({ error: "Failed to create area" });
+  }
+});
+
+// API endpoint to update an area
+app.put("/api/areas/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+
+    // If name is being updated, make sure it's lowercase
+    if (updateData.name) {
+      updateData.name = updateData.name.toLowerCase();
+    }
+
+    const updatedArea = await Area.findByIdAndUpdate(
+      id,
+      { ...updateData, updatedAt: Date.now() },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedArea) {
+      return res.status(404).json({ error: "Area not found" });
+    }
+
+    res.json(updatedArea);
+  } catch (error) {
+    console.error("Error updating area:", error);
+    res.status(500).json({ error: "Failed to update area" });
+  }
+});
+
+// API endpoint to delete an area
+app.delete("/api/areas/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const deletedArea = await Area.findByIdAndDelete(id);
+
+    if (!deletedArea) {
+      return res.status(404).json({ error: "Area not found" });
+    }
+
+    res.json({ message: "Area deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting area:", error);
+    res.status(500).json({ error: "Failed to delete area" });
+  }
+});
+
+// API endpoint to get only active areas (for chatbot use)
+app.get("/api/areas/active", async (req, res) => {
+  try {
+    const activeAreas = await Area.find({ isActive: true }).sort({ name: 1 });
+    res.json(activeAreas);
+  } catch (error) {
+    console.error("Error fetching active areas:", error);
+    res.status(500).json({ error: "Failed to fetch active areas" });
+  }
+});
+
+// ========== VEHICLE TYPES API ENDPOINTS ==========
+
+// Get all vehicle types
+app.get("/api/vehicle-types", async (req, res) => {
+  try {
+    const vehicleTypes = await VehicleType.find().sort({ name: 1 });
+    res.json(vehicleTypes);
+  } catch (error) {
+    console.error("Error fetching vehicle types:", error);
+    res.status(500).json({ error: "Failed to fetch vehicle types" });
+  }
+});
+
+// Create a new vehicle type
+app.post("/api/vehicle-types", async (req, res) => {
+  try {
+    const {
+      name,
+      displayName,
+      category,
+      specifications,
+      description,
+      isActive,
+    } = req.body;
+
+    // Validate required fields
+    if (!name || !displayName) {
+      return res
+        .status(400)
+        .json({ error: "Name and display name are required" });
+    }
+
+    // Check if vehicle type already exists
+    const existingVehicleType = await VehicleType.findOne({
+      name: name.toLowerCase(),
+    });
+    if (existingVehicleType) {
+      return res
+        .status(400)
+        .json({ error: "Vehicle type with this name already exists" });
+    }
+
+    // Create new vehicle type
+    const newVehicleType = new VehicleType({
+      name: name.toLowerCase(),
+      displayName,
+      category: category || "truck",
+      specifications: specifications || {
+        maxVolume: 0,
+        maxWeight: 0,
+        maxPackages: 0,
+      },
+      description: description || "",
+      isActive: isActive !== undefined ? isActive : true,
+    });
+
+    const savedVehicleType = await newVehicleType.save();
+    res.status(201).json(savedVehicleType);
+  } catch (error) {
+    console.error("Error creating vehicle type:", error);
+    res.status(500).json({ error: "Failed to create vehicle type" });
+  }
+});
+
+// Update a vehicle type
+app.put("/api/vehicle-types/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+
+    // If name is being updated, make sure it's lowercase
+    if (updateData.name) {
+      updateData.name = updateData.name.toLowerCase();
+    }
+
+    const updatedVehicleType = await VehicleType.findByIdAndUpdate(
+      id,
+      { ...updateData, updatedAt: Date.now() },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedVehicleType) {
+      return res.status(404).json({ error: "Vehicle type not found" });
+    }
+
+    res.json(updatedVehicleType);
+  } catch (error) {
+    console.error("Error updating vehicle type:", error);
+    res.status(500).json({ error: "Failed to update vehicle type" });
+  }
+});
+
+// Delete a vehicle type
+app.delete("/api/vehicle-types/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Check if vehicle type is being used in delivery periods
+    const periodsUsingVehicle = await DeliveryPeriod.find({ vehicleType: id });
+    if (periodsUsingVehicle.length > 0) {
+      return res.status(400).json({
+        error:
+          "Cannot delete vehicle type that is being used in delivery periods",
+      });
+    }
+
+    const deletedVehicleType = await VehicleType.findByIdAndDelete(id);
+
+    if (!deletedVehicleType) {
+      return res.status(404).json({ error: "Vehicle type not found" });
+    }
+
+    res.json({ message: "Vehicle type deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting vehicle type:", error);
+    res.status(500).json({ error: "Failed to delete vehicle type" });
+  }
+});
+
+// Get only active vehicle types
+app.get("/api/vehicle-types/active", async (req, res) => {
+  try {
+    const activeVehicleTypes = await VehicleType.find({ isActive: true }).sort({
+      name: 1,
+    });
+    res.json(activeVehicleTypes);
+  } catch (error) {
+    console.error("Error fetching active vehicle types:", error);
+    res.status(500).json({ error: "Failed to fetch active vehicle types" });
+  }
+});
+
+// ========== DELIVERY PERIODS API ENDPOINTS ==========
+
+// Get all delivery periods with optional category filter
+app.get("/api/delivery-periods", async (req, res) => {
+  try {
+    const { category } = req.query;
+    const filter = category ? { category } : {};
+
+    const deliveryPeriods = await DeliveryPeriod.find(filter).sort({
+      category: 1,
+      name: 1,
+    });
+    res.json(deliveryPeriods);
+  } catch (error) {
+    console.error("Error fetching delivery periods:", error);
+    res.status(500).json({ error: "Failed to fetch delivery periods" });
+  }
+});
+
+// Create a new delivery period
+app.post("/api/delivery-periods", async (req, res) => {
+  try {
+    const {
+      category,
+      name,
+      timeFrame,
+      truckPricing,
+      scooterPricing,
+      invoicePercentage,
+      deliveryDiscount,
+      isActive,
+    } = req.body;
+
+    // Validate required fields
+    if (!name || !category) {
+      return res.status(400).json({ error: "Name and category are required" });
+    }
+
+    // Check if delivery period with same name and category already exists
+    const existingPeriod = await DeliveryPeriod.findOne({ name, category });
+    if (existingPeriod) {
+      return res.status(400).json({
+        error: "Delivery period with this name and category already exists",
+      });
+    }
+
+    // Create new delivery period
+    const newDeliveryPeriod = new DeliveryPeriod({
+      category: category || "day",
+      name,
+      timeFrame: timeFrame || {
+        hours: null,
+        fromDays: null,
+        toDays: null,
+        startTime: "09:00",
+        endTime: "21:00",
+      },
+      truckPricing: truckPricing || { price: 0, isFree: false },
+      scooterPricing: scooterPricing || { price: 0, isFree: false },
+      invoicePercentage: invoicePercentage || 5,
+      deliveryDiscount: deliveryDiscount || 30,
+      isActive: isActive !== undefined ? isActive : true,
+    });
+
+    const savedDeliveryPeriod = await newDeliveryPeriod.save();
+
+    res.status(201).json(savedDeliveryPeriod);
+  } catch (error) {
+    console.error("Error creating delivery period:", error);
+    res.status(500).json({ error: "Failed to create delivery period" });
+  }
+});
+
+// Update a delivery period
+app.put("/api/delivery-periods/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+
+    const updatedDeliveryPeriod = await DeliveryPeriod.findByIdAndUpdate(
+      id,
+      { ...updateData, updatedAt: Date.now() },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedDeliveryPeriod) {
+      return res.status(404).json({ error: "Delivery period not found" });
+    }
+
+    res.json(updatedDeliveryPeriod);
+  } catch (error) {
+    console.error("Error updating delivery period:", error);
+    res.status(500).json({ error: "Failed to update delivery period" });
+  }
+});
+
+// Delete a delivery period
+app.delete("/api/delivery-periods/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const deletedDeliveryPeriod = await DeliveryPeriod.findByIdAndDelete(id);
+
+    if (!deletedDeliveryPeriod) {
+      return res.status(404).json({ error: "Delivery period not found" });
+    }
+
+    res.json({ message: "Delivery period deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting delivery period:", error);
+    res.status(500).json({ error: "Failed to delete delivery period" });
+  }
+});
+
+// Get only active delivery periods
+app.get("/api/delivery-periods/active", async (req, res) => {
+  try {
+    const activeDeliveryPeriods = await DeliveryPeriod.find({
+      isActive: true,
+    }).sort({ category: 1, name: 1 });
+    res.json(activeDeliveryPeriods);
+  } catch (error) {
+    console.error("Error fetching active delivery periods:", error);
+    res.status(500).json({ error: "Failed to fetch active delivery periods" });
+  }
+});
+
+// Update a delivery period
+app.put("/api/delivery-periods/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+
+    // Validate vehicle type if it's being updated
+    if (updateData.vehicleType) {
+      const vehicleTypeExists = await VehicleType.findById(
+        updateData.vehicleType
+      );
+      if (!vehicleTypeExists) {
+        return res.status(400).json({ error: "Invalid vehicle type" });
+      }
+    }
+
+    const updatedDeliveryPeriod = await DeliveryPeriod.findByIdAndUpdate(
+      id,
+      { ...updateData, updatedAt: Date.now() },
+      { new: true, runValidators: true }
+    ).populate("vehicleType", "name displayName category");
+
+    if (!updatedDeliveryPeriod) {
+      return res.status(404).json({ error: "Delivery period not found" });
+    }
+
+    res.json(updatedDeliveryPeriod);
+  } catch (error) {
+    console.error("Error updating delivery period:", error);
+    res.status(500).json({ error: "Failed to update delivery period" });
+  }
+});
+
+// Delete a delivery period
+app.delete("/api/delivery-periods/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const deletedDeliveryPeriod = await DeliveryPeriod.findByIdAndDelete(id);
+
+    if (!deletedDeliveryPeriod) {
+      return res.status(404).json({ error: "Delivery period not found" });
+    }
+
+    res.json({ message: "Delivery period deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting delivery period:", error);
+    res.status(500).json({ error: "Failed to delete delivery period" });
+  }
+});
+
+// Get only active delivery periods
+app.get("/api/delivery-periods/active", async (req, res) => {
+  try {
+    const activeDeliveryPeriods = await DeliveryPeriod.find({ isActive: true })
+      .populate("vehicleType", "name displayName category")
+      .sort({ name: 1 });
+    res.json(activeDeliveryPeriods);
+  } catch (error) {
+    console.error("Error fetching active delivery periods:", error);
+    res.status(500).json({ error: "Failed to fetch active delivery periods" });
+  }
+});
+
+// Get delivery periods by category
+app.get("/api/delivery-periods/category/:category", async (req, res) => {
+  try {
+    const { category } = req.params;
+
+    if (!["day", "night"].includes(category)) {
+      return res
+        .status(400)
+        .json({ error: "Invalid category. Must be 'day' or 'night'" });
+    }
+
+    const deliveryPeriods = await DeliveryPeriod.find({
+      category,
+      isActive: true,
+    }).sort({ name: 1 });
+
+    res.json(deliveryPeriods);
+  } catch (error) {
+    console.error("Error fetching delivery periods by category:", error);
+    res
+      .status(500)
+      .json({ error: "Failed to fetch delivery periods by category" });
+  }
+});
+
+// Get delivery periods with pricing for specific vehicle type
+app.get("/api/delivery-periods/vehicle/:vehicleType", async (req, res) => {
+  try {
+    const { vehicleType } = req.params;
+
+    if (!["truck", "scooter"].includes(vehicleType.toLowerCase())) {
+      return res
+        .status(400)
+        .json({ error: "Invalid vehicle type. Must be 'truck' or 'scooter'" });
+    }
+
+    const deliveryPeriods = await DeliveryPeriod.find({ isActive: true }).sort({
+      category: 1,
+      name: 1,
+    });
+
+    // Transform the data to include pricing for the specific vehicle type
+    const periodsWithVehiclePricing = deliveryPeriods.map((period) => {
+      const vehiclePricing =
+        vehicleType.toLowerCase() === "truck"
+          ? period.truckPricing
+          : period.scooterPricing;
+
+      return {
+        ...period.toObject(),
+        vehiclePricing,
+        pricing: vehiclePricing, // For backward compatibility
+      };
+    });
+
+    res.json(periodsWithVehiclePricing);
+  } catch (error) {
+    console.error("Error fetching delivery periods by vehicle type:", error);
+    res
+      .status(500)
+      .json({ error: "Failed to fetch delivery periods by vehicle type" });
+  }
+});
 
 // Video streaming endpoint (for old customer videos)
 app.get("/api/video/:videoId", async (req, res) => {
@@ -252,7 +777,7 @@ app.get("/api/video/:videoId", async (req, res) => {
   }
 });
 
-// Debug routes
+// Debug routes (keeping existing ones)
 app.get("/api/debug/video-files", (req, res) => {
   try {
     const videosDir = path.join(__dirname, "videos");
@@ -292,58 +817,7 @@ app.get("/api/debug/video-files", (req, res) => {
   }
 });
 
-app.get("/api/debug/video/:videoId", async (req, res) => {
-  try {
-    const { videoId } = req.params;
-
-    const Customer = require("./models/customer");
-    const customer = await Customer.findOne({
-      "referralvideos.imageId": videoId,
-    });
-
-    if (!customer) {
-      return res.json({
-        error: "Video not found in database",
-        videoId,
-      });
-    }
-
-    const video = customer.referralvideos.find((v) => v.imageId === videoId);
-    const filename = video.imagePath.split("/").pop();
-    const fullPath = path.join(__dirname, "videos", filename);
-
-    const fileExists = fs.existsSync(fullPath);
-    let fileStats = null;
-
-    if (fileExists) {
-      fileStats = fs.statSync(fullPath);
-    }
-
-    res.json({
-      success: true,
-      videoId,
-      database: {
-        found: true,
-        storedPath: video.imagePath,
-        extractedFilename: filename,
-        expectedPath: fullPath,
-        customer: customer.name,
-      },
-      file: {
-        exists: fileExists,
-        stats: fileStats,
-        directUrl: `http://localhost:5000/videos/${filename}`,
-        apiUrl: `http://localhost:5000/api/video/${videoId}`,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: error.message,
-    });
-  }
-});
-
-// Analytics endpoints
+// Analytics endpoints (keeping existing ones)
 app.get("/api/analytics/summary", async (req, res) => {
   try {
     const Customer = require("./models/customer");
@@ -465,7 +939,7 @@ app.get("/api/analytics/trends", async (req, res) => {
   }
 });
 
-// Migration and bulk update endpoints
+// Migration and bulk update endpoints (keeping existing ones)
 app.post("/api/migrate-foreman-fields", async (req, res) => {
   try {
     const Customer = require("./models/customer");
@@ -573,7 +1047,7 @@ app.post("/api/foreman-customers/bulk-update", async (req, res) => {
   }
 });
 
-// Foreman analytics endpoint
+// Foreman analytics endpoint (keeping existing)
 app.get("/api/foreman-analytics", async (req, res) => {
   try {
     const Customer = require("./models/customer");
@@ -601,8 +1075,8 @@ app.get("/api/foreman-analytics", async (req, res) => {
                               initialValue: 0,
                               in: {
                                 $add: [
-                                  "$$value",
-                                  { $ifNull: ["$$this.totalAmount", 0] },
+                                  "$value",
+                                  { $ifNull: ["$this.totalAmount", 0] },
                                 ],
                               },
                             },
@@ -620,10 +1094,7 @@ app.get("/api/foreman-analytics", async (req, res) => {
                       input: { $ifNull: ["$orderHistory", []] },
                       initialValue: 0,
                       in: {
-                        $add: [
-                          "$$value",
-                          { $ifNull: ["$$this.totalAmount", 0] },
-                        ],
+                        $add: ["$value", { $ifNull: ["$this.totalAmount", 0] }],
                       },
                     },
                   },
@@ -644,10 +1115,7 @@ app.get("/api/foreman-analytics", async (req, res) => {
                       input: { $ifNull: ["$orderHistory", []] },
                       initialValue: 0,
                       in: {
-                        $add: [
-                          "$$value",
-                          { $ifNull: ["$$this.totalAmount", 0] },
-                        ],
+                        $add: ["$value", { $ifNull: ["$this.totalAmount", 0] }],
                       },
                     },
                   },
@@ -665,7 +1133,7 @@ app.get("/api/foreman-analytics", async (req, res) => {
                     input: { $ifNull: ["$orderHistory", []] },
                     initialValue: 0,
                     in: {
-                      $add: ["$$value", { $ifNull: ["$$this.totalAmount", 0] }],
+                      $add: ["$value", { $ifNull: ["$this.totalAmount", 0] }],
                     },
                   },
                 },
@@ -742,10 +1210,16 @@ app.listen(PORT, () => {
   console.log("   User Management: /api/user-admin/*");
   console.log("   Original Admin: /api/admin/*");
   console.log("   ✨ NEW Videos: /api/videos/*");
+  console.log("   📍 Areas Management: /api/areas/*");
+  console.log("   🚛 Vehicle Types: /api/vehicle-types/*");
+  console.log("   ⏰ Delivery Periods: /api/delivery-periods/*");
   console.log("=".repeat(50));
   console.log("💡 Roles need to be created manually");
   console.log("   (No automatic role seeding)");
   console.log("🎬 Video Management: Ready for 159A & 159B");
+  console.log("🚚 Areas Management: Truck & Scooter Pricing");
+  console.log("🚛 Vehicle Types: Full CRUD Operations");
+  console.log("⏰ Delivery Periods: Time-based Pricing System");
   console.log("=".repeat(50));
 });
 

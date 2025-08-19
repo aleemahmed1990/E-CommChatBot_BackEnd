@@ -4,13 +4,26 @@ const mongoose = require("mongoose");
 const axios = require("axios"); // For HTTP requests to Ultramsg API
 const path = require("path");
 const PDFDocument = require("pdfkit");
+const OrderProcessingMiddleware = require("../middleware/orderProcessing");
+
+// Import all static methods from OrderProcessingMiddleware
+const {
+  processReferralCommission,
+  updateReferrerRecord,
+  processOrderRefund,
+  adjustCommissionForRefund,
+  processOrderReplacement,
+  addOrderCorrection,
+  getOrderAnalytics,
+} = OrderProcessingMiddleware;
 const fs = require("fs");
 const Video = require("../models/video"); // Add this with other requires
 const moment = require("moment");
 const Category = require("../models/Category");
 const Product = require("../models/Product");
 const Customer = require("../models/customer");
-
+const { processNewOrder } = require("../utils/referralProcessing");
+const Area = require("../models/Areas");
 const mkdirp = require("mkdirp");
 
 // Ultramsg Configuration
@@ -473,6 +486,35 @@ async function checkAndSendConfirmations() {
   }
 }
 
+// Helper function to get active areas
+const getActiveAreas = async () => {
+  try {
+    return await Area.find({ isActive: true }).sort({ name: 1 });
+  } catch (error) {
+    console.error("Error fetching areas:", error);
+    // Fallback to default areas if database fails
+    return [
+      { _id: "1", name: "seminyak", displayName: "Seminyak", deliveryFee: 0 },
+      { _id: "2", name: "legian", displayName: "Legian", deliveryFee: 0 },
+      { _id: "3", name: "sanur", displayName: "Sanur", deliveryFee: 0 },
+      { _id: "4", name: "ubud", displayName: "Ubud", deliveryFee: 200000 },
+    ];
+  }
+};
+
+// Helper function to format areas for display
+const formatAreasForDisplay = (areas) => {
+  return areas
+    .map((area, index) => {
+      const feeText =
+        area.deliveryFee > 0
+          ? ` (extra charge ${formatRupiah(area.deliveryFee)})`
+          : "";
+      return `${index + 1}- ${area.displayName}${feeText}`;
+    })
+    .join("\n");
+};
+
 async function sendOrderConfirmation(orderId, customer) {
   try {
     console.log(`📨 Starting confirmation for order ${orderId}`);
@@ -490,9 +532,10 @@ async function sendOrderConfirmation(orderId, customer) {
     const pdfPath = await generateOrderConfirmationPDF(order, customer);
     console.log(`✅ PDF generated at ${pdfPath}`);
 
-    const message = `✅  Your Order has been Confirmed!\n\nOrder #${orderId}\nAmount: ${order.totalAmount}`;
+    // Build detailed order message
+    const message = buildDetailedOrderMessage(order, customer);
 
-    // Send document with raw phone number
+    // Send document with detailed message
     const result = await sendDocumentWithMessage(phone, pdfPath, message);
     console.log(`📩 Confirmation sent to ${phone}`);
 
@@ -504,7 +547,8 @@ async function sendOrderConfirmation(orderId, customer) {
 
     // Fallback to text message
     try {
-      const fallbackMessage = `✅ Order Confirmed!\n\nOrder #${orderId}\nAmount: ${order.totalAmount}\n(Document unavailable)`;
+      const order = customer.orderHistory.find((o) => o.orderId === orderId);
+      const fallbackMessage = buildDetailedOrderMessage(order, customer, true);
       await sendWhatsAppMessage(customer.phoneNumber[0], fallbackMessage);
       console.log(`📩 Sent fallback text message`);
     } catch (fallbackError) {
@@ -514,6 +558,104 @@ async function sendOrderConfirmation(orderId, customer) {
     throw error;
   }
 }
+
+// Helper function to build detailed order message
+function buildDetailedOrderMessage(order, customer, isFallback = false) {
+  // Format dates
+  const orderDate = new Date(order.orderDate);
+  const formattedOrderDate = orderDate.toLocaleDateString("en-GB");
+  const formattedOrderTime = orderDate.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  // Get delivery info
+  let deliveryDateInfo = "Date to be confirmed";
+  if (order.deliveryDate) {
+    const deliveryDate = new Date(order.deliveryDate);
+    deliveryDateInfo = deliveryDate.toLocaleDateString("en-GB");
+  } else if (order.deliveryTimeFrame) {
+    deliveryDateInfo = `Expected: ${order.deliveryTimeFrame}`;
+  }
+
+  const deliveryArea =
+    (
+      order.deliveryAddress?.area ||
+      order.deliveryLocation ||
+      "Area not specified"
+    )
+      .charAt(0)
+      .toUpperCase() +
+    (
+      order.deliveryAddress?.area ||
+      order.deliveryLocation ||
+      "area not specified"
+    ).slice(1);
+
+  const deliveryAddress =
+    order.deliveryAddress?.fullAddress ||
+    order.deliveryLocation ||
+    "Address not specified";
+  const googleMapLink =
+    order.deliveryAddress?.googleMapLink ||
+    customer?.contextData?.locationDetails ||
+    "";
+
+  const deliveryType =
+    order.deliveryType === "truck"
+      ? "Truck"
+      : order.deliveryType === "scooter"
+      ? "Scooter"
+      : order.deliveryType === "self_pickup"
+      ? "Self Pickup"
+      : "Standard";
+
+  const deliverySpeed =
+    order.deliverySpeed === "speed"
+      ? "Speed Delivery"
+      : order.deliverySpeed === "early_morning"
+      ? "Early Morning Delivery"
+      : order.deliverySpeed === "eco"
+      ? "Eco Delivery"
+      : "Normal Delivery";
+
+  // Build message
+  let message = isFallback
+    ? `⚠️ Order Confirmed! (PDF unavailable)\n\n`
+    : `🎉 *ORDER CONFIRMED!* 🎉\n\n📄 Please find your order confirmation PDF attached.\n\n`;
+
+  message += `Order #${order.orderId}\n`;
+  message += `📊 Status: ✅ Order Confirmed\n`;
+  message += `💰 Amount: Rp ${Math.round(order.totalAmount).toLocaleString(
+    "id-ID"
+  )}\n`;
+  message += `📅 Order Date: ${formattedOrderDate} at ${formattedOrderTime}\n`;
+  message += `🚚 Delivery: ${deliverySpeed}\n`;
+  message += `⏰ Delivery Date: ${deliveryDateInfo}\n`;
+  message += `🌍 Area: ${deliveryArea}\n`;
+
+  if (
+    deliveryAddress !== deliveryArea &&
+    deliveryAddress !== "Address not specified"
+  ) {
+    message += `📍 Address: ${deliveryAddress}\n`;
+  }
+
+  if (googleMapLink) {
+    message += `🗺️ Location: ${googleMapLink}\n`;
+  }
+
+  if (order.deliveryTimeFrame) {
+    message += `⏱️ Timeframe: ${order.deliveryTimeFrame}\n`;
+  }
+
+  message += `🚛 Type: ${deliveryType} - ${deliverySpeed}\n\n`;
+
+  message += `Thank you for choosing Construction Materials Hub! 🏗️`;
+
+  return message;
+}
+
 async function generateOrderConfirmationPDF(order, customer) {
   return new Promise((resolve, reject) => {
     console.log(
@@ -521,7 +663,7 @@ async function generateOrderConfirmationPDF(order, customer) {
     );
 
     try {
-      const doc = new PDFDocument();
+      const doc = new PDFDocument({ margin: 50 });
       const fileName = `order_${order.orderId}_confirmation.pdf`;
       const filePath = path.join(TEMP_DOCS_DIR, fileName);
 
@@ -530,58 +672,149 @@ async function generateOrderConfirmationPDF(order, customer) {
       const stream = fs.createWriteStream(filePath);
       doc.pipe(stream);
 
-      // Header
-      doc.fontSize(18).text("Order Confirmation", { align: "center" });
-      doc.moveDown(0.5);
+      // Add logo at the top with bottom margin
+      try {
+        const logoPath = path.join(__dirname, "../images/logo.png");
+        if (fs.existsSync(logoPath)) {
+          doc.image(logoPath, 50, 50, { width: 100, height: 100 });
+          doc.moveDown(8); // Increased margin from bottom of image
+        } else {
+          console.warn("Logo not found at ../images/logo.png");
+          doc.moveDown(3);
+        }
+      } catch (logoError) {
+        console.warn("Could not load logo:", logoError);
+        doc.moveDown(3);
+      }
 
-      // Order Info
-      doc.fontSize(12).text(`Order #: ${order.orderId}`);
+      // Header - Order Confirmation : paid (with red "paid" text)
+      doc.fontSize(20).font("Helvetica-Bold");
+      doc.fillColor("black").text("Order Confirmation : ", { continued: true });
+      doc.fillColor("red").text("paid");
+      doc.fillColor("black"); // Reset color to black for subsequent text
+      doc.moveDown(1);
+
+      // Order basic info
+      doc.fontSize(12).font("Helvetica");
+      doc.text(`Order #: ${order.orderId}`);
       doc.text(`Date: ${new Date(order.orderDate).toLocaleString()}`);
       doc.text(`Customer: ${customer.name}`);
-      doc.moveDown();
+      doc.moveDown(1);
 
-      // Order Items
-      doc.fontSize(14).text("Order Items:", { underline: true });
-      doc.moveDown(0.3);
+      // Order Items section
+      doc.fontSize(14).font("Helvetica-Bold").text("Order Items:");
+      doc.moveDown(0.5);
+      doc.font("Helvetica");
 
-      // Simple table for items
-      let startY = doc.y;
       let itemNumber = 1;
-
       order.items.forEach((item) => {
-        doc.text(`${itemNumber}. ${item.productName} (${item.weight})`);
+        const weight = item.weight ? `(${item.weight})` : "()";
+        doc.text(`${itemNumber}. ${item.productName} ${weight}`);
         doc.text(
-          `   Qty: ${item.quantity} × $${item.price.toFixed(
+          `   Qty: ${item.quantity} × ${item.price.toFixed(
             2
-          )} = $${item.totalPrice.toFixed(2)}`,
-          { indent: 20 }
+          )} = ${item.totalPrice.toFixed(2)}`
         );
         doc.moveDown(0.3);
         itemNumber++;
       });
 
-      // Order Summary
       doc.moveDown(0.5);
-      doc.fontSize(14).text("Order Summary:", { underline: true });
-      doc.moveDown(0.3);
 
-      doc.text(
-        `Subtotal: $${(order.totalAmount - order.deliveryCharge).toFixed(2)}`
-      );
-      doc.text(`Delivery Fee: $${order.deliveryCharge.toFixed(2)}`);
+      // Delivery Information - Get real details from customer schema
+      const deliveryAddress =
+        order.deliveryAddress?.fullAddress ||
+        customer.addresses?.find((addr) => addr.isDefault)?.fullAddress ||
+        customer.addresses?.[0]?.fullAddress ||
+        "N/A";
+
+      const deliveryArea =
+        order.deliveryAddress?.area ||
+        customer.addresses?.find((addr) => addr.isDefault)?.area ||
+        customer.addresses?.[0]?.area ||
+        "Area not specified";
+
+      const deliveryType =
+        order.deliveryType === "truck"
+          ? "Truck Delivery"
+          : order.deliveryType === "scooter"
+          ? "Scooter Delivery"
+          : order.deliveryType === "self_pickup"
+          ? "Self Pickup"
+          : order.deliveryType || "Standard Delivery";
+
+      const deliverySpeed =
+        order.deliverySpeed === "normal"
+          ? "Normal Delivery"
+          : order.deliverySpeed === "speed"
+          ? "Express Delivery"
+          : order.deliverySpeed === "early_morning"
+          ? "Early Morning Delivery"
+          : order.deliverySpeed === "eco"
+          ? "Eco Friendly Delivery"
+          : order.deliverySpeed || "Standard";
+
+      const timeSlot = order.timeSlot || "Time slot to be confirmed N/A";
+      const googlemaplink = customer.contextData.locationDetails;
+
+      doc.text(`Google Map Link Adress : ${googlemaplink}`);
+
+      doc.text(`Delivery: ${deliveryAddress}`);
+      doc.text(`Delivery Type: ${deliveryType}`);
+      doc.text(`Deliver time: ${timeSlot}`);
+      doc.text(`Delivery area: ${deliveryArea}`);
+      doc.text(`Deliver type: ${deliverySpeed}`);
+      doc.moveDown(1);
+
+      // Order Summary
+      doc.fontSize(14).font("Helvetica-Bold").text("Order Summary:");
+      doc.moveDown(0.3);
+      doc.font("Helvetica");
+
+      const subtotal = order.totalAmount - (order.deliveryCharge || 0);
+      doc.text(`Subtotal: ${subtotal.toFixed(2)}`);
+      doc.text(`Delivery Fee: ${(order.deliveryCharge || 0).toFixed(2)}`);
+
+      // ADD 10% FIRST ORDER DISCOUNT - ONLY ADDITION TO PDF
+      if (order.firstOrderDiscount && order.firstOrderDiscount > 0) {
+        doc.text(
+          `First Order Discount (10%): -${order.firstOrderDiscount.toFixed(2)}`
+        );
+      }
 
       if (order.ecoDeliveryDiscount && order.ecoDeliveryDiscount > 0) {
-        doc.text(`Discount: -$${order.ecoDeliveryDiscount.toFixed(2)}`);
+        doc.text(`Discount: -${order.ecoDeliveryDiscount.toFixed(2)}`);
       }
 
       doc.moveDown(0.3);
       doc.font("Helvetica-Bold");
-      doc.text(`Total: $${order.totalAmount.toFixed(2)}`);
-      doc.font("Helvetica");
+      doc.text(`Total: ${order.totalAmount.toFixed(2)}`);
 
-      // Footer
       doc.moveDown(1);
-      doc.fontSize(10).text("Thank you for your order!", { align: "center" });
+
+      // Thank you message
+      doc.font("Helvetica");
+      doc.text("Thank you for your order!");
+      doc.text("------------------------------------------------------");
+      doc.moveDown(1.5);
+
+      // Office section - exactly as provided
+      doc.fontSize(14).font("Helvetica-Bold").text("Office:");
+      doc.moveDown(0.3);
+      doc.fontSize(12).font("Helvetica");
+      doc.text("Address XXXX  XXXX");
+      doc.text(
+        "--------------------------------------------------------------"
+      );
+      doc.moveDown(1);
+
+      // Bank account details - exactly as provided
+      doc.fontSize(14).font("Helvetica-Bold").text("Bank account details:");
+      doc.moveDown(0.3);
+      doc.fontSize(12).font("Helvetica");
+      doc.text("BCA");
+      doc.text("# 555XXX XXXX");
+      doc.text("bank code 14 XXXX");
 
       console.log(`✍️ [${new Date().toISOString()}] Writing PDF content...`);
 
@@ -610,6 +843,7 @@ async function generateOrderConfirmationPDF(order, customer) {
     }
   });
 }
+
 // Remove all phone number cleaning - just use the raw number from database
 async function sendDocumentWithMessage(to, filePath, message) {
   try {
@@ -629,10 +863,12 @@ async function sendDocumentWithMessage(to, filePath, message) {
     payload.append("token", ULTRAMSG_CONFIG.token);
     payload.append("to", to); // Use the raw number
     payload.append("document", `data:application/pdf;base64,${base64Data}`);
-    payload.append("filename", `order_confirmation.pdf`);
+    payload.append("filename", `order_confirmation_${Date.now()}.pdf`);
     payload.append("caption", message);
 
-    console.log(`⚡ Sending to UltraMSG API...`);
+    console.log(`⚡ Sending to UltraMSG API for ${to}...`);
+    console.log(`📄 File size: ${Math.round(fileData.length / 1024)}KB`);
+
     const response = await axios.post(
       `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/document`,
       payload,
@@ -640,14 +876,27 @@ async function sendDocumentWithMessage(to, filePath, message) {
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
         },
-        timeout: 30000,
+        timeout: 60000, // Increased timeout for document uploads
       }
     );
 
     console.log(`✅ UltraMSG response:`, response.data);
+
+    // Check if response indicates success
+    if (response.data.sent === false || response.data.error) {
+      throw new Error(`UltraMSG API error: ${JSON.stringify(response.data)}`);
+    }
+
     return response.data;
   } catch (error) {
-    console.error(`❌ Document send failed:`, error);
+    console.error(`❌ Document send failed for ${to}:`, error.message);
+
+    // Log more details for debugging
+    if (error.response) {
+      console.error(`API Response Status: ${error.response.status}`);
+      console.error(`API Response Data:`, error.response.data);
+    }
+
     throw error;
   }
 }
@@ -682,34 +931,6 @@ function cleanPhoneNumber(phoneNumber) {
     cleanNumber = "62" + cleanNumber.substring(1); // Replace leading 0 with 62 for Indonesia
   }
   return cleanNumber;
-}
-
-// ─── When someone adds to cart, push a single "cart-not-paid" order ────────────
-async function recordCartOrder(customer) {
-  const seq = await getNextSequence("orderId");
-  const orderId = "ORD" + (10000 + seq);
-
-  // snapshot of cart
-  const total = customer.cart.items.reduce((sum, i) => sum + i.totalPrice, 0);
-
-  const cartOrder = {
-    orderId,
-    items: [...customer.cart.items],
-    totalAmount: total,
-    deliveryType: customer.cart.deliveryType,
-    deliveryLocation: customer.cart.deliveryLocation,
-    deliveryCharge: customer.cart.deliveryCharge,
-    paymentStatus: "pending",
-    status: "cart-not-paid",
-    orderDate: new Date(),
-    deliveryDate: null,
-  };
-
-  customer.orderHistory.push(cartOrder);
-  customer.latestOrderId = orderId;
-  customer.currentOrderStatus = "cart-not-paid";
-
-  await customer.save();
 }
 
 // Helper function for sending reliable sequential messages
@@ -901,7 +1122,7 @@ const convertImage = async (imageBuffer) => {
   }
 };
 
-// ─── At final checkout, bump to "order-made-not-paid" ─────────────────────────
+// ALSO FIX: createOrder function to save correct totalAmount
 async function createOrder(customer) {
   console.log("Starting order creation for customer:", customer._id);
   const seq = await getNextSequence("orderId");
@@ -909,58 +1130,134 @@ async function createOrder(customer) {
   const orderId = "ORD" + (10000 + seq);
   console.log("Generated order ID:", orderId);
 
-  const totalWithDiscounts =
+  // After an order is created for a customer who was referred:
+  if (customer.referredBy) {
+    const referrer = await Customer.findById(customer.referredBy.customerId);
+    if (referrer) {
+      await referrer.updateReferredCustomerOrder(
+        customer._id,
+        order.totalAmount
+      );
+    }
+  }
+
+  // Calculate first time customer discount (10% of subtotal)
+  let firstOrderDiscount = 0;
+  if (customer.isFirstTimeCustomer && customer.orderHistory.length === 0) {
+    firstOrderDiscount = Math.round(customer.cart.totalAmount * 0.1);
+    customer.cart.firstOrderDiscount = firstOrderDiscount;
+  }
+
+  // Calculate eco delivery discount (5% of subtotal)
+  let ecoDeliveryDiscount = 0;
+  if (customer.cart.deliverySpeed === "eco") {
+    ecoDeliveryDiscount = Math.round(customer.cart.totalAmount * 0.05);
+    customer.cart.ecoDeliveryDiscount = ecoDeliveryDiscount;
+  }
+
+  // FIX: Calculate the FINAL total including delivery charges and discounts
+  const finalTotalAmount =
     customer.cart.totalAmount +
     customer.cart.deliveryCharge -
-    (customer.cart.firstOrderDiscount || 0) -
-    (customer.cart.ecoDeliveryDiscount || 0);
+    firstOrderDiscount -
+    ecoDeliveryDiscount;
 
-  console.log("Calculated total with discounts:", totalWithDiscounts);
+  console.log("Calculated final total amount:", finalTotalAmount);
+
+  // Calculate delivery date based on delivery type
+  let deliveryDays = 5; // default
+  let deliveryTimeFrame = "";
+
+  switch (customer.cart.deliverySpeed) {
+    case "speed":
+      deliveryDays = 2;
+      deliveryTimeFrame = "24-48 hours";
+      break;
+    case "early_morning":
+      deliveryDays = 2;
+      deliveryTimeFrame = "4:00 AM–9:00 AM within 24-48 hours";
+      break;
+    case "eco":
+      deliveryDays = 10;
+      deliveryTimeFrame = "8-10 days";
+      break;
+    case "normal":
+    default:
+      deliveryDays = 5;
+      deliveryTimeFrame = "3-5 days";
+      break;
+  }
+
+  // For scooter delivery
+  if (customer.cart.deliveryType === "scooter") {
+    if (customer.cart.deliverySpeed === "speed") {
+      deliveryDays = 0;
+      deliveryTimeFrame = "30 minutes - 1 hour";
+    } else {
+      deliveryDays = 0;
+      deliveryTimeFrame = "within 2.5 hours";
+    }
+  }
+
+  // Store time frame in cart for reference
+  customer.cart.deliveryTimeFrame = deliveryTimeFrame;
 
   const newOrder = {
     orderId,
     items: [...customer.cart.items],
-    totalAmount: totalWithDiscounts,
+    // FIX: Save the complete calculated total as totalAmount
+    totalAmount: finalTotalAmount,
     deliveryType: customer.cart.deliveryType,
+    deliverySpeed: customer.cart.deliverySpeed,
+    deliveryOption: customer.cart.deliveryOption,
     deliveryLocation: customer.cart.deliveryLocation,
     deliveryCharge: customer.cart.deliveryCharge,
-    firstOrderDiscount: customer.cart.firstOrderDiscount || 0,
-    ecoDeliveryDiscount: customer.cart.ecoDeliveryDiscount || 0,
+    deliveryTimeFrame: deliveryTimeFrame,
+    deliveryAddress: customer.cart.deliveryAddress
+      ? {
+          nickname: customer.cart.deliveryAddress.nickname || "",
+          area:
+            customer.cart.deliveryAddress.area ||
+            customer.cart.deliveryLocation ||
+            "",
+          fullAddress: customer.cart.deliveryAddress.fullAddress || "",
+          googleMapLink: customer.cart.deliveryAddress.googleMapLink || "",
+        }
+      : {
+          area: customer.cart.deliveryLocation || "",
+        },
+    firstOrderDiscount: firstOrderDiscount,
+    ecoDeliveryDiscount: ecoDeliveryDiscount,
     paymentStatus: "pending",
     status: "order-made-not-paid",
     paymentMethod: "Bank Transfer",
     transactionId: customer.contextData.transactionId || "Pending verification",
     orderDate: new Date(),
-    deliveryDate: new Date(
-      Date.now() +
-        (customer.cart.deliveryType === "Speed Delivery"
-          ? 2
-          : customer.cart.deliveryType === "Normal Delivery"
-          ? 5
-          : customer.cart.deliveryType === "Eco Delivery"
-          ? 10
-          : /* fallback: */ 5) *
-          24 *
-          60 *
-          60 *
-          1000
-    ),
+    deliveryDate: new Date(Date.now() + deliveryDays * 24 * 60 * 60 * 1000),
   };
 
   customer.orderHistory.push(newOrder);
   customer.latestOrderId = orderId;
   customer.currentOrderStatus = "order-made-not-paid";
 
+  // Mark customer as no longer first time after creating order
+  if (customer.isFirstTimeCustomer) {
+    customer.isFirstTimeCustomer = false;
+  }
+
+  // Clear cart completely
   customer.cart = {
     items: [],
     totalAmount: 0,
     deliveryCharge: 0,
-    deliveryType: "Normal Delivery",
+    deliveryType: "truck",
+    deliverySpeed: "normal",
+    deliveryOption: "Normal Delivery",
     deliveryLocation: "",
+    deliveryTimeFrame: "",
     firstOrderDiscount: 0,
     ecoDeliveryDiscount: 0,
-    paymentMethod: "",
-    transactionId: "",
+    deliveryAddress: {},
   };
 
   customer.contextData = {
@@ -975,7 +1272,6 @@ async function createOrder(customer) {
   await customer.save();
   return orderId;
 }
-
 async function processChatMessage(phoneNumber, text, message) {
   try {
     // Handle "0" to return to main menu from anywhere
@@ -1921,10 +2217,10 @@ async function processChatMessage(phoneNumber, text, message) {
         }
         break;
 
+      // ENHANCED cart_delete_item case
       case "cart_delete_item":
         const itemIndex = parseInt(text) - 1;
         if (itemIndex >= 0 && itemIndex < customer.cart.items.length) {
-          // Get the item to delete for the confirmation message
           const itemToDelete = customer.cart.items[itemIndex];
 
           // Remove the item
@@ -1935,12 +2231,47 @@ async function processChatMessage(phoneNumber, text, message) {
             (total, item) => total + item.totalPrice,
             0
           );
+
+          // Recalculate discounts
+          if (
+            customer.isFirstTimeCustomer &&
+            customer.orderHistory.length === 0
+          ) {
+            customer.cart.firstOrderDiscount = Math.round(
+              customer.cart.totalAmount * 0.1
+            );
+          }
+
+          if (customer.cart.deliverySpeed === "eco") {
+            customer.cart.ecoDeliveryDiscount = Math.round(
+              customer.cart.totalAmount * 0.05
+            );
+          }
+
+          // Update corresponding order in history
+          const idx = customer.orderHistory.findIndex(
+            (o) => o.orderId === customer.latestOrderId
+          );
+          if (idx >= 0) {
+            customer.orderHistory[idx].items = [...customer.cart.items];
+            customer.orderHistory[idx].totalAmount =
+              customer.cart.totalAmount +
+              customer.cart.deliveryCharge -
+              customer.cart.firstOrderDiscount -
+              customer.cart.ecoDeliveryDiscount;
+            customer.orderHistory[idx].firstOrderDiscount =
+              customer.cart.firstOrderDiscount;
+            customer.orderHistory[idx].ecoDeliveryDiscount =
+              customer.cart.ecoDeliveryDiscount;
+          }
+
           await customer.save();
 
-          // Confirm deletion
           await sendWhatsAppMessage(
             phoneNumber,
-            `Removed ${itemToDelete.productName} (${itemToDelete.weight}) from your cart.`
+            `✅ Removed ${itemToDelete.productName}${
+              itemToDelete.weight ? ` (${itemToDelete.weight})` : ""
+            } from your cart.`
           );
 
           // Return to cart view
@@ -1955,27 +2286,48 @@ async function processChatMessage(phoneNumber, text, message) {
 
       case "cart_confirm_empty":
         if (text === "1") {
-          // Empty the cart
-          customer.cart.items = [];
-          customer.cart.totalAmount = 0;
-          await customer.save();
+          // Empty the cart using the new method
+          await customer.clearCart();
 
-          await sendWhatsAppMessage(phoneNumber, "Your cart has been emptied.");
-          await sendMainMenu(phoneNumber, customer);
-        } else if (text === "2") {
-          // Keep items
           await sendWhatsAppMessage(
             phoneNumber,
-            "Your cart items have been kept."
+            "🗑️ Your cart has been completely emptied."
+          );
+          await sendMainMenu(phoneNumber, customer);
+        } else if (text === "2") {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "✅ Your cart items have been kept."
           );
           await goToCart(phoneNumber, customer);
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Please select a valid option (1 or 2), or type 0 to return to the main menu."
+            "Please select 1 to empty cart or 2 to keep items, or type 0 for main menu."
           );
         }
         break;
+
+        function logCartState(customer, action) {
+          console.log(
+            `[CART DEBUG - ${action}] Customer: ${customer.phoneNumber[0]}`
+          );
+          console.log(`Items: ${customer.cart.items.length}`);
+          console.log(`Subtotal: ${customer.cart.totalAmount}`);
+          console.log(`Delivery Charge: ${customer.cart.deliveryCharge}`);
+          console.log(
+            `First Order Discount: ${customer.cart.firstOrderDiscount}`
+          );
+          console.log(
+            `Eco Delivery Discount: ${customer.cart.ecoDeliveryDiscount}`
+          );
+          console.log(`Delivery Type: ${customer.cart.deliveryType}`);
+          console.log(`Delivery Speed: ${customer.cart.deliverySpeed}`);
+          console.log(`Delivery Location: ${customer.cart.deliveryLocation}`);
+          console.log(`Time Frame: ${customer.cart.deliveryTimeFrame}`);
+          console.log(`Latest Order ID: ${customer.latestOrderId}`);
+          console.log("---");
+        }
 
       case "cart_view_details":
         const detailsIndex = parseInt(text) - 1;
@@ -2006,6 +2358,7 @@ async function processChatMessage(phoneNumber, text, message) {
         }
         break;
 
+      // UPDATED checkout_delivery case
       case "checkout_delivery":
         // Handle delivery option selection
         if (["1", "2", "3", "4", "5", "6", "7"].includes(text)) {
@@ -2018,17 +2371,28 @@ async function processChatMessage(phoneNumber, text, message) {
             6: "Normal Scooter Delivery",
             7: "Direct Speed Scooter Delivery",
           };
+
           const deliveryCharges = {
-            1: 0,
-            2: 50,
-            3: 50,
-            4: 0,
-            5: 0,
-            6: 20,
-            7: 40,
+            1: 0, // Normal Delivery - Free
+            2: 50000, // Speed Delivery - 50k extra
+            3: 50000, // Early Morning - 50k extra
+            4: 0, // Eco Delivery - Free (but 5% discount)
+            5: 0, // Self Pickup - Free
+            6: 20000, // Normal Scooter - 20k
+            7: 40000, // Speed Scooter - 40k
           };
 
-          // Figure out type/speed
+          const deliveryTimeFrames = {
+            1: "3-5 days",
+            2: "24-48 hours",
+            3: "4:00 AM–9:00 AM within 24-48 hours",
+            4: "8-10 days",
+            5: "Self pickup - schedule your time",
+            6: "within 2.5 hours",
+            7: "30 minutes - 1 hour",
+          };
+
+          // Set delivery details
           let deliveryType, deliverySpeed;
           switch (text) {
             case "1":
@@ -2046,6 +2410,9 @@ async function processChatMessage(phoneNumber, text, message) {
             case "4":
               deliveryType = "truck";
               deliverySpeed = "eco";
+              customer.cart.ecoDeliveryDiscount = Math.round(
+                customer.cart.totalAmount * 0.05
+              );
               break;
             case "5":
               deliveryType = "self_pickup";
@@ -2061,7 +2428,24 @@ async function processChatMessage(phoneNumber, text, message) {
               break;
           }
 
-          // write into the *current* orderHistory entry
+          // Update cart with delivery information
+          customer.cart.deliveryOption = deliveryOptions[text];
+          customer.cart.deliveryType = deliveryType;
+          customer.cart.deliverySpeed = deliverySpeed;
+          customer.cart.deliveryCharge = deliveryCharges[text];
+          customer.cart.deliveryTimeFrame = deliveryTimeFrames[text];
+
+          // Apply first time customer discount (10% of subtotal)
+          if (
+            customer.isFirstTimeCustomer &&
+            customer.orderHistory.length === 0
+          ) {
+            customer.cart.firstOrderDiscount = Math.round(
+              customer.cart.totalAmount * 0.1
+            );
+          }
+
+          // Update current order in orderHistory if exists
           const idx = customer.orderHistory.findIndex(
             (o) => o.orderId === customer.latestOrderId
           );
@@ -2070,54 +2454,63 @@ async function processChatMessage(phoneNumber, text, message) {
             customer.orderHistory[idx].deliverySpeed = deliverySpeed;
             customer.orderHistory[idx].deliveryOption = deliveryOptions[text];
             customer.orderHistory[idx].deliveryCharge = deliveryCharges[text];
-            // if you also want to update ecoDiscount on the order itself:
+            customer.orderHistory[idx].deliveryTimeFrame =
+              deliveryTimeFrames[text];
             customer.orderHistory[idx].ecoDeliveryDiscount =
-              text === "4" ? customer.cart.totalAmount * 0.05 : 0;
+              customer.cart.ecoDeliveryDiscount;
+            customer.orderHistory[idx].firstOrderDiscount =
+              customer.cart.firstOrderDiscount;
           }
 
           await customer.save();
 
-          // Confirm back to user
-          if (["2", "3"].includes(text)) {
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `You've chosen ${deliveryOptions[text]}. A ${formatRupiah(
-                deliveryCharges[text]
-              )} charge will be added.`
-            );
-          } else if (text === "4") {
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `You've chosen ${deliveryOptions[text]}. 5% eco‐discount applied! Delivery in 8–10 days.`
-            );
-            await customer.updateConversationState(
-              "checkout_eco_delivery_date"
-            );
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Please select a delivery date for your Eco Delivery (8-10 days from now).\n\nFormat: YYYY-MM-DD"
-            );
-            return; // bail early
-          } else {
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `You've chosen ${deliveryOptions[text]}.`
-            );
+          // Provide confirmation message
+          let confirmationMsg = `You've chosen ${deliveryOptions[text]}.`;
+
+          if (deliveryCharges[text] > 0) {
+            confirmationMsg += ` A ${formatRupiah(
+              deliveryCharges[text]
+            )} charge will be added.`;
           }
 
-          // advance the flow
+          if (text === "4") {
+            confirmationMsg += ` 5% eco-discount applied! Delivery in 8-10 days.`;
+          }
+
+          if (customer.cart.firstOrderDiscount > 0) {
+            confirmationMsg += ` First order 10% discount applied!`;
+          }
+
+          confirmationMsg += ` Estimated delivery: ${deliveryTimeFrames[text]}.`;
+
+          await sendWhatsAppMessage(phoneNumber, confirmationMsg);
+
+          // Move to next step based on delivery type
           if (text === "5") {
-            await customer.updateConversationState("checkout_summary");
-            await sendOrderSummary(phoneNumber, customer);
+            // Self pickup - go to date selection
+            await customer.updateConversationState("pickup_date_select");
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "📅 When would you like to pick up your order?\n\n" +
+                "1. Today\n" +
+                "2. Tomorrow\n" +
+                "3. Later (choose from calendar)"
+            );
           } else {
+            // Delivery options - go to location selection
             await customer.updateConversationState("checkout_location");
+
+            // Get active areas from database
+            const activeAreas = await getActiveAreas();
+            const areasDisplay = formatAreasForDisplay(activeAreas);
+
             const locPrompt = customer.addresses?.length
-              ? "Select a drop-off location or type 'saved' to use a saved address."
-              : "Select drop-off location:\n1- Seminyak\n2- Legian\n3- Sanur\n4- Ubud (extra charge 200k)";
+              ? `Select a drop-off location:\n\n${areasDisplay}\n\nOr type 'saved' to use a saved address.`
+              : `Select drop-off location:\n\n${areasDisplay}`;
+
             await sendWhatsAppMessage(phoneNumber, locPrompt);
           }
         } else {
-          // invalid choice
           await sendWhatsAppMessage(
             phoneNumber,
             "Please choose a valid delivery option (1–7), or type 0 to return to main menu."
@@ -2125,17 +2518,68 @@ async function processChatMessage(phoneNumber, text, message) {
         }
         break;
 
-      // Modify the checkout_location case to include saved addresses option
+      case "checkout_eco_delivery_date":
+        // Validate date format (YYYY-MM-DD)
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dateRegex.test(text)) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Please enter date in YYYY-MM-DD format (e.g., 2025-01-20)"
+          );
+          return;
+        }
+
+        const selectedDate = new Date(text);
+        const today = new Date();
+        const minDate = new Date(today.getTime() + 8 * 24 * 60 * 60 * 1000);
+        const maxDate = new Date(today.getTime() + 10 * 24 * 60 * 60 * 1000);
+
+        if (selectedDate < minDate || selectedDate > maxDate) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `Please select a date between ${
+              minDate.toISOString().split("T")[0]
+            } and ${maxDate.toISOString().split("T")[0]} for Eco Delivery.`
+          );
+          return;
+        }
+
+        // Save eco delivery date
+        customer.cart.deliveryDate = selectedDate;
+
+        // Update order if exists
+        const idx1 = customer.orderHistory.findIndex(
+          (o) => o.orderId === customer.latestOrderId
+        );
+        if (idx1 >= 0) {
+          customer.orderHistory[idx1].deliveryDate = selectedDate;
+        }
+
+        await customer.save();
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `✅ Eco delivery scheduled for ${text}. 5% discount applied!`
+        );
+
+        // Now ask for delivery location with dynamic areas
+        await customer.updateConversationState("checkout_location");
+        const activeAreas2 = await getActiveAreas();
+        const areasDisplay = formatAreasForDisplay(activeAreas2);
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          `Select drop-off location:\n\n${areasDisplay}`
+        );
+        break;
+
       case "checkout_location":
-        // First check if the customer has saved addresses
+        // Check if customer has saved addresses
         if (customer.addresses && customer.addresses.length > 0) {
-          // If they select to use a saved address - case insensitive
           if (text.toLowerCase() === "saved") {
-            // Update state to select from saved addresses
             await customer.updateConversationState(
               "checkout_select_saved_address"
             );
-            // Display the saved addresses for selection
             let addressMessage =
               "Please select one of your saved addresses:\n\n";
 
@@ -2143,7 +2587,6 @@ async function processChatMessage(phoneNumber, text, message) {
               const nickname = addr.nickname || "Address";
               const area = addr.area ? ` (${addr.area})` : "";
               const fullAddress = addr.fullAddress || "No detail address";
-
               addressMessage += `${
                 index + 1
               }. ${nickname}: ${fullAddress}${area}\n`;
@@ -2154,107 +2597,74 @@ async function processChatMessage(phoneNumber, text, message) {
             await sendWhatsAppMessage(phoneNumber, addressMessage);
             return;
           }
+        }
 
-          // If they choose to enter a new address but select a predefined area
-          if (["1", "2", "3", "4"].includes(text)) {
-            const locations = {
-              1: "seminyak",
-              2: "legian",
-              3: "sannur",
-              4: "ubud",
-            };
+        // Get active areas from database
+        const activeAreas = await getActiveAreas();
+        const selectedIndex = parseInt(text) - 1;
 
-            const extraCharges = {
-              1: 0,
-              2: 0,
-              3: 0,
-              4: 200,
-            };
+        if (selectedIndex >= 0 && selectedIndex < activeAreas.length) {
+          const selectedArea = activeAreas[selectedIndex];
+          const extraCharge = selectedArea.deliveryFee;
 
-            // Save location and add any extra charges
-            customer.cart.deliveryLocation = locations[text];
-            customer.cart.deliveryCharge += extraCharges[text];
-            await customer.save();
+          // Save location in cart
+          customer.cart.deliveryLocation = selectedArea.name;
+          customer.cart.deliveryCharge += extraCharge;
 
-            // Confirmation message
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `You selected ${locations[text]}\n` +
-                (extraCharges[text] > 0
-                  ? `Additional charge of ${extraCharges[text]} will be applied.`
-                  : "The area will be free of charge under normal delivery.")
-            );
-
-            // Ask for Google Map location
-            await customer.updateConversationState("checkout_map_location");
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Enter Google Map location link for precise delivery."
-            );
-          } else {
-            // Invalid selection, show options again with saved addresses option
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Select a drop off location or use a saved address:\n\n" +
-                "These areas will be free of charge under normal delivery:\n\n" +
-                "1- seminyak\n" +
-                "2- legian\n" +
-                "3- sannur\n" +
-                "4- ubud (extra charge apply 200k)\n\n" +
-                "Type 'saved' to use one of your saved addresses."
-            );
+          // Initialize delivery address if not exists
+          if (!customer.cart.deliveryAddress) {
+            customer.cart.deliveryAddress = {};
           }
+          customer.cart.deliveryAddress.area = selectedArea.name;
+
+          // Update order history if order exists
+          const idx = customer.orderHistory.findIndex(
+            (o) => o.orderId === customer.latestOrderId
+          );
+          if (idx >= 0) {
+            customer.orderHistory[idx].deliveryLocation = selectedArea.name;
+            customer.orderHistory[idx].deliveryCharge =
+              customer.cart.deliveryCharge;
+            if (!customer.orderHistory[idx].deliveryAddress) {
+              customer.orderHistory[idx].deliveryAddress = {};
+            }
+            customer.orderHistory[idx].deliveryAddress.area = selectedArea.name;
+          }
+
+          await customer.save();
+
+          // Confirmation message
+          let confirmationMsg = `You selected ${selectedArea.displayName}.`;
+          if (extraCharge > 0) {
+            confirmationMsg += ` Additional charge of ${formatRupiah(
+              extraCharge
+            )} will be applied.`;
+          } else {
+            confirmationMsg += " Free delivery to this area.";
+          }
+
+          await sendWhatsAppMessage(phoneNumber, confirmationMsg);
+
+          // Ask for Google Map location
+          await customer.updateConversationState("checkout_map_location");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "📍 Please provide your exact location using Google Maps link for precise delivery."
+          );
         } else {
-          // Regular flow for customers without saved addresses
-          if (["1", "2", "3", "4"].includes(text)) {
-            const locations = {
-              1: "seminyak",
-              2: "legian",
-              3: "sannur",
-              4: "ubud",
-            };
-
-            const extraCharges = {
-              1: 0,
-              2: 0,
-              3: 0,
-              4: 200,
-            };
-
-            // Save location and add any extra charges
-            customer.cart.deliveryLocation = locations[text];
-            customer.cart.deliveryCharge += extraCharges[text];
-            await customer.save();
-
-            // Confirmation message
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `You selected ${locations[text]}\n` +
-                (extraCharges[text] > 0
-                  ? `Additional charge of ${extraCharges[text]} will be applied.`
-                  : "The area will be free of charge under normal delivery.")
-            );
-
-            // Ask for Google Map location
-            await customer.updateConversationState("checkout_map_location");
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Enter Google Map location link for precise delivery."
-            );
-          } else {
-            await sendWhatsAppMessage(
-              phoneNumber,
-              "Please select a valid location (1, 2, 3, or 4), or type 0 to return to the main menu."
-            );
-          }
+          const activeAreas = await getActiveAreas();
+          const areasDisplay = formatAreasForDisplay(activeAreas);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `Please select a valid location (1-${activeAreas.length}) or type 'saved' for saved addresses.\n\n${areasDisplay}`
+          );
         }
         break;
 
+      // UPDATED checkout_select_saved_address case
       case "checkout_select_saved_address":
-        // Parse the selected address index
         const addressIndex = parseInt(text) - 1;
 
-        // Validate the selection
         if (
           isNaN(addressIndex) ||
           addressIndex < 0 ||
@@ -2268,7 +2678,6 @@ async function processChatMessage(phoneNumber, text, message) {
           return;
         }
 
-        // Get the selected address
         const selectedAddress = customer.addresses[addressIndex];
 
         // Use the selected address details for delivery
@@ -2280,125 +2689,182 @@ async function processChatMessage(phoneNumber, text, message) {
           selectedAddress.area &&
           selectedAddress.area.toLowerCase() === "ubud"
         ) {
-          customer.cart.deliveryCharge += 200;
+          customer.cart.deliveryCharge += 200000; // 200k for Ubud
           await sendWhatsAppMessage(
             phoneNumber,
             `Additional charge of ${formatRupiah(
-              200
+              200000
             )} will be applied for delivery to Ubud.`
           );
         }
 
-        // Store address details in cart
+        // Store complete address details in cart
         customer.cart.deliveryAddress = {
           nickname: selectedAddress.nickname || "Saved Address",
           area: selectedAddress.area || "Not specified",
+          fullAddress: selectedAddress.fullAddress || "",
           googleMapLink: selectedAddress.googleMapLink || "",
         };
 
-        await customer.save();
-
-        // Confirm the address selection
-        await sendWhatsAppMessage(
-          phoneNumber,
-          `You've selected the address: ${
-            selectedAddress.nickname || "Saved Address"
-          }\n` + `Area: ${selectedAddress.area || "Not specified"}`
+        // Update order history if order exists
+        const idx3 = customer.orderHistory.findIndex(
+          (o) => o.orderId === customer.latestOrderId
         );
-
-        // Show delivery charges
-        let deliveryMessage = `Your delivery charges will be ${formatRupiah(
-          customer.cart.deliveryCharge
-        )}`;
-        if (
-          customer.cart.deliveryType !== "Normal Delivery" &&
-          customer.cart.deliveryType !== "self_pickup"
-        ) {
-          deliveryMessage += ` (including ${customer.cart.deliveryType} fee)`;
-        }
-
-        await sendWhatsAppMessage(phoneNumber, deliveryMessage);
-
-        // Proceed directly to order summary
-        await customer.updateConversationState("checkout_summary");
-        await sendOrderSummary(phoneNumber, customer);
-        break;
-      // Modified checkout_map_location case to properly save Google Maps link
-      case "checkout_map_location":
-        // Basic validation for Google Maps link
-        if (
-          !text.includes("maps.google") &&
-          !text.includes("goo.gl") &&
-          !text.startsWith("https://maps")
-        ) {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Please send a valid Google Maps link. It should include 'maps.google' or similar."
-          );
-          return;
-        }
-
-        // First, save to contextData for backward compatibility
-        customer.contextData.locationDetails = text;
-
-        // Check if customer has active delivery address in cart
-        if (!customer.cart.deliveryAddress) {
-          // Initialize deliveryAddress object if it doesn't exist
-          customer.cart.deliveryAddress = {
-            nickname: "Current Address",
-            area: customer.cart.deliveryLocation || "",
-            fullAddress: "",
-            googleMapLink: text,
+        if (idx >= 0) {
+          customer.orderHistory[idx3].deliveryLocation =
+            selectedAddress.area || "Not specified";
+          customer.orderHistory[idx3].deliveryCharge =
+            customer.cart.deliveryCharge;
+          customer.orderHistory[idx3].deliveryAddress = {
+            nickname: selectedAddress.nickname || "Saved Address",
+            area: selectedAddress.area || "Not specified",
+            fullAddress: selectedAddress.fullAddress || "",
+            googleMapLink: selectedAddress.googleMapLink || "",
           };
-        } else {
-          // Update the existing deliveryAddress with the Google Maps link
-          customer.cart.deliveryAddress.googleMapLink = text;
-        }
-
-        // Also update the corresponding saved address if it matches the current delivery location
-        if (
-          customer.addresses &&
-          customer.addresses.length > 0 &&
-          customer.cart.deliveryLocation
-        ) {
-          const matchingAddressIndex = customer.addresses.findIndex(
-            (addr) =>
-              addr.area &&
-              addr.area.toLowerCase() ===
-                customer.cart.deliveryLocation.toLowerCase()
-          );
-
-          if (matchingAddressIndex >= 0) {
-            customer.addresses[matchingAddressIndex].googleMapLink = text;
-          }
         }
 
         await customer.save();
 
-        // Confirm the Google Maps link was saved
         await sendWhatsAppMessage(
           phoneNumber,
-          "Thank you! Your location has been saved."
+          `✅ Address selected: ${
+            selectedAddress.nickname || "Saved Address"
+          }\n` +
+            `Area: ${selectedAddress.area || "Not specified"}\n` +
+            `Delivery charge: ${formatRupiah(customer.cart.deliveryCharge)}`
         );
 
         // Proceed to order summary
         await customer.updateConversationState("checkout_summary");
         await sendOrderSummary(phoneNumber, customer);
         break;
-      // ─── CASE: checkout_summary ─────────────────────────────────
-      case "checkout_summary": {
-        // Move into the "waiting for receipt" step
-        await customer.updateConversationState("checkout_wait_receipt");
+      // UPDATED checkout_map_location case
+      case "checkout_map_location":
+        // Basic validation for Google Maps link
+        if (
+          !text.includes("maps.google") &&
+          !text.includes("goo.gl") &&
+          !text.startsWith("https://maps") &&
+          !text.includes("maps.app.goo.gl")
+        ) {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Please send a valid Google Maps link. It should include 'maps.google' or 'goo.gl'."
+          );
+          return;
+        }
 
-        // Prompt for the screenshot
-        await sendSequentialMessages(
-          phoneNumber,
-          "📸 Please send a screenshot of your payment transfer receipt to continue.",
-          "💡 Make sure the *bank name*, *account holder*, and *amount paid* are clearly visible.",
-          1000
+        // Save Google Maps link
+        customer.contextData.locationDetails = text;
+
+        // Update cart delivery address
+        if (!customer.cart.deliveryAddress) {
+          customer.cart.deliveryAddress = {
+            area: customer.cart.deliveryLocation || "",
+          };
+        }
+        customer.cart.deliveryAddress.googleMapLink = text;
+
+        // Update order history if order exists
+        const idx2 = customer.orderHistory.findIndex(
+          (o) => o.orderId === customer.latestOrderId
         );
+        if (idx2 >= 0) {
+          if (!customer.orderHistory[idx2].deliveryAddress) {
+            customer.orderHistory[idx2].deliveryAddress = {
+              area: customer.cart.deliveryLocation || "",
+            };
+          }
+          customer.orderHistory[idx2].deliveryAddress.googleMapLink = text;
+        }
+
+        await customer.save();
+
+        await sendWhatsAppMessage(
+          phoneNumber,
+          "✅ Location saved successfully!"
+        );
+
+        // Proceed to order summary
+        await customer.updateConversationState("checkout_summary");
+        await sendOrderSummary(phoneNumber, customer);
         break;
-      }
+
+      case "checkout_summary":
+        switch (text) {
+          case "1": // Yes, proceed to payment
+            // Move to payment receipt upload
+            await customer.updateConversationState("checkout_wait_receipt");
+            await sendSequentialMessages(
+              phoneNumber,
+              "💳 *Payment Information* 💳\n\n" +
+                "Please transfer to this bank:\n" +
+                "🏦 BCA\n" +
+                "📋 Account #: 555XXX XXX\n" +
+                "🔢 Bank Code: 14 XXX\n" +
+                "⚠️ We don't accept international payments",
+
+              "📸 Please send a screenshot of your payment transfer receipt to continue.",
+
+              "💡 Make sure the *bank name*, *account holder*, and *amount paid* are clearly visible in the screenshot.",
+              1000
+            );
+            break;
+
+          case "2": // Modify cart
+            await goToCart(phoneNumber, customer);
+            break;
+
+          case "3": // I'll pay later
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "⏰ No problem! Your cart is saved. You can return anytime to complete your order.\n\n" +
+                "Just type *menu* when you're ready to proceed with payment."
+            );
+            await sendMainMenu(phoneNumber, customer);
+            break;
+
+          case "4": // Cancel and empty cart
+            // Clear cart completely
+            customer.cart = {
+              items: [],
+              totalAmount: 0,
+              deliveryCharge: 0,
+              deliveryType: "truck",
+              deliverySpeed: "normal",
+              deliveryOption: "Normal Delivery",
+              deliveryLocation: "",
+              deliveryTimeFrame: "",
+              firstOrderDiscount: 0,
+              ecoDeliveryDiscount: 0,
+              deliveryAddress: {},
+            };
+
+            // Remove cart order from history
+            customer.orderHistory = customer.orderHistory.filter(
+              (o) => o.status !== "cart-not-paid"
+            );
+
+            customer.latestOrderId = null;
+            customer.currentOrderStatus = "cart-not-paid";
+
+            await customer.save();
+
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "🗑️ Cart emptied successfully. Returning to main menu."
+            );
+            await sendMainMenu(phoneNumber, customer);
+            break;
+
+          default:
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "Please select a valid option (1-4) or type 0 to return to main menu."
+            );
+            break;
+        }
+        break;
 
       // ─── CASE: checkout_wait_receipt ────────────────────────────
       case "checkout_wait_receipt": {
@@ -3268,7 +3734,7 @@ async function processChatMessage(phoneNumber, text, message) {
           return null;
         }
 
-        // 5. Format order list helper function - Fixed
+        // Enhanced formatOrderList function with delivery area, delivery date, and Google Maps link
         function formatOrderList(orderHistory, customer) {
           if (!orderHistory || orderHistory.length === 0) {
             return "No orders found.";
@@ -3277,46 +3743,203 @@ async function processChatMessage(phoneNumber, text, message) {
           return orderHistory
             .sort((a, b) => new Date(b.orderDate) - new Date(a.orderDate))
             .map((order, index) => {
-              const status =
-                order.status === "order-complete"
-                  ? "Delivered"
-                  : order.status === "on-way"
-                  ? "On the way"
-                  : order.status === "order-confirmed"
-                  ? "Confirmed"
-                  : "Pending";
-              const date = new Date(order.orderDate).toLocaleDateString();
-              const time = new Date(order.orderDate).toLocaleTimeString();
+              // Format status with more readable names
+              const status = getReadableStatus(order.status);
 
-              // FIXED: Properly access delivery address with multiple fallbacks
-              let deliveryAddress = "Address not specified";
+              // Format order date
+              const orderDate = new Date(order.orderDate);
+              const formattedOrderDate = orderDate.toLocaleDateString("en-GB"); // DD/MM/YYYY format
+              const formattedOrderTime = orderDate.toLocaleTimeString("en-GB", {
+                hour: "2-digit",
+                minute: "2-digit",
+              });
 
-              // Try to get from contextData first, then order fields
-              if (customer?.contextData?.locationDetails) {
-                deliveryAddress = customer.contextData.locationDetails;
+              // Format delivery date with fallback
+              let deliveryDateInfo = "Not specified";
+              if (order.deliveryDate) {
+                const deliveryDate = new Date(order.deliveryDate);
+                deliveryDateInfo = deliveryDate.toLocaleDateString("en-GB");
+              } else if (order.deliveryTimeFrame) {
+                // If no specific date, show the time frame
+                deliveryDateInfo = `Expected: ${order.deliveryTimeFrame}`;
+              }
+
+              // Get delivery area with multiple fallbacks
+              let deliveryArea = "Area not specified";
+              if (order.deliveryAddress?.area) {
+                deliveryArea = order.deliveryAddress.area;
+              } else if (order.deliveryLocation) {
+                deliveryArea = order.deliveryLocation;
+              }
+
+              // Capitalize first letter of area
+              deliveryArea =
+                deliveryArea.charAt(0).toUpperCase() + deliveryArea.slice(1);
+
+              // Get full delivery address
+              let deliveryAddress = "Address not provided";
+              if (order.deliveryAddress?.fullAddress) {
+                deliveryAddress = order.deliveryAddress.fullAddress;
               } else if (order.deliveryLocation) {
                 deliveryAddress = order.deliveryLocation;
-              } else if (order.deliveryAddress?.fullAddress) {
-                deliveryAddress = order.deliveryAddress.fullAddress;
               }
 
-              // Truncate long addresses
-              if (deliveryAddress.length > 50) {
-                deliveryAddress = deliveryAddress.substring(0, 50) + "...";
+              // Truncate long addresses for display
+              if (deliveryAddress.length > 60) {
+                deliveryAddress = deliveryAddress.substring(0, 60) + "...";
               }
+
+              // Get Google Maps link with multiple fallbacks
+              let googleMapLink = "";
+              if (order.deliveryAddress?.googleMapLink) {
+                googleMapLink = order.deliveryAddress.googleMapLink;
+              } else if (customer?.contextData?.locationDetails) {
+                googleMapLink = customer.contextData.locationDetails;
+              }
+
+              // Build the order information string
+              let orderInfo =
+                `${index + 1}. Order #${order.orderId}\n` +
+                `   📊 Status: ${status}\n` +
+                `   💰 Amount: Rp ${Math.round(
+                  order.totalAmount
+                ).toLocaleString("id-ID")}\n` +
+                `   📅 Order Date: ${formattedOrderDate} at ${formattedOrderTime}\n` +
+                `   🚚 Delivery: ${
+                  order.deliveryOption || order.deliveryType || "Standard"
+                }\n` +
+                `   ⏰ Delivery Date: ${deliveryDateInfo}\n` +
+                `   🌍 Area: ${deliveryArea}`;
+
+              // Add full address if different from area
+              if (
+                deliveryAddress !== deliveryArea &&
+                deliveryAddress !== "Address not provided"
+              ) {
+                orderInfo += `\n   📍 Address: ${deliveryAddress}`;
+              }
+
+              // Always add Google Maps link if available
+              if (googleMapLink) {
+                orderInfo += `\n   🗺️ Location: ${googleMapLink}`;
+              }
+
+              // Add delivery time frame if available and different from delivery date
+              if (order.deliveryTimeFrame && !order.deliveryDate) {
+                orderInfo += `\n   ⏱️ Timeframe: ${order.deliveryTimeFrame}`;
+              }
+
+              // Add delivery type details if available
+              if (order.deliveryType && order.deliverySpeed) {
+                const deliveryDetails = getDeliveryTypeDetails(
+                  order.deliveryType,
+                  order.deliverySpeed
+                );
+                if (deliveryDetails) {
+                  orderInfo += `\n   🚛 Type: ${deliveryDetails}`;
+                }
+              }
+
+              return orderInfo;
+            })
+            .join("\n\n" + "─".repeat(40) + "\n\n");
+        }
+
+        // Helper function to get readable status names
+        function getReadableStatus(status) {
+          const statusMap = {
+            "cart-not-paid": "🛒 Cart (Not Paid)",
+            "order-made-not-paid": "📝 Order Created (Awaiting Payment)",
+            "pay-not-confirmed": "💳 Payment Submitted (Pending Confirmation)",
+            "order-confirmed": "✅ Order Confirmed",
+            "order not picked": "📦 Ready for Pickup",
+            "issue-customer": "⚠️ Customer Issue",
+            "customer-confirmed": "👤 Customer Confirmed",
+            "order-refunded": "💸 Refunded",
+            "picking-order": "🔄 Preparing Order",
+            "allocated-driver": "🚚 Driver Assigned",
+            "ready to pickup": "📦 Ready for Pickup",
+            "order-not-pickedup": "❌ Not Picked Up",
+            "order-pickuped-up": "✅ Picked Up",
+            "on-way": "🚛 On the Way",
+            "driver-confirmed": "✅ Driver Confirmed",
+            "order-processed": "⚙️ Processing",
+            refund: "💸 Refund",
+            "complain-order": "⚠️ Complaint Filed",
+            "issue-driver": "⚠️ Driver Issue",
+            "parcel-returned": "↩️ Returned",
+            "order-complete": "🎉 Delivered",
+          };
+
+          return statusMap[status] || status || "Unknown Status";
+        }
+
+        // Helper function to get delivery type details
+        function getDeliveryTypeDetails(deliveryType, deliverySpeed) {
+          const typeSpeedMap = {
+            "truck-normal": "Truck - Normal Delivery",
+            "truck-speed": "Truck - Speed Delivery",
+            "truck-early_morning": "Truck - Early Morning",
+            "truck-eco": "Truck - Eco Delivery (Discount Applied)",
+            "scooter-normal": "Scooter - Standard",
+            "scooter-speed": "Scooter - Express",
+            "self_pickup-normal": "Self Pickup",
+          };
+
+          const key = `${deliveryType}-${deliverySpeed}`;
+          return typeSpeedMap[key] || `${deliveryType} - ${deliverySpeed}`;
+        }
+
+        // Alternative compact version for mobile-friendly display
+        function formatOrderListCompact(orderHistory, customer) {
+          if (!orderHistory || orderHistory.length === 0) {
+            return "No orders found.";
+          }
+
+          return orderHistory
+            .sort((a, b) => new Date(b.orderDate) - new Date(a.orderDate))
+            .map((order, index) => {
+              const status = getReadableStatus(order.status);
+              const orderDate = new Date(order.orderDate).toLocaleDateString(
+                "en-GB"
+              );
+
+              // Get delivery area
+              const deliveryArea =
+                order.deliveryAddress?.area ||
+                order.deliveryLocation ||
+                "Area not specified";
+
+              // Get delivery date or timeframe
+              let deliveryInfo = "TBD";
+              if (order.deliveryDate) {
+                deliveryInfo = new Date(order.deliveryDate).toLocaleDateString(
+                  "en-GB"
+                );
+              } else if (order.deliveryTimeFrame) {
+                deliveryInfo = order.deliveryTimeFrame;
+              }
+
+              // Get Google Maps link
+              const googleMapLink =
+                order.deliveryAddress?.googleMapLink ||
+                customer?.contextData?.locationDetails ||
+                "";
 
               return (
-                `${index + 1}. Order #${order.orderId}\n` +
-                `   Status: ${status}\n` +
-                `   Amount: Rp.${Math.round(
-                  order.totalAmount
-                ).toLocaleString()}\n` +
-                `   Date: ${date} at ${time}`
+                `${index + 1}. #${order.orderId} - ${status}\n` +
+                `   💰 Rp ${Math.round(order.totalAmount).toLocaleString(
+                  "id-ID"
+                )}\n` +
+                `   📅 ${orderDate} → 🚚 ${deliveryInfo}\n` +
+                `   🌍 ${
+                  deliveryArea.charAt(0).toUpperCase() + deliveryArea.slice(1)
+                }` +
+                (googleMapLink ? `\n   🗺️ ${googleMapLink}` : "")
               );
             })
             .join("\n\n");
         }
-
       case "support":
         // Main support menu
         switch (text) {
@@ -3405,7 +4028,10 @@ async function processChatMessage(phoneNumber, text, message) {
               phoneNumber,
               "📝 *Submit a Complaint*\n\n" +
                 "Please attach a video or voice note to submit your complaint.\n\n" +
-                "We'll need this media first, then ask for additional details."
+                "We'll need this media first, then ask for additional details.\n\n" +
+                "----------------------------------\n\n" +
+                "If the video is large, please allow a little extra time for it to load or upload. Thank you for your patience!\n\n" +
+                `Don’t worry, it’s uploading — please wait up to 3 minutes`
             );
             break;
 
@@ -3519,7 +4145,7 @@ async function processChatMessage(phoneNumber, text, message) {
                 "📍 *Track My Order*\n\n" +
                   "Here are your orders:\n\n" +
                   formatOrderList(customer.orderHistory) +
-                  "\n\nPlease type your Order ID:"
+                  "\n\nPlease type your Order ID or select by number (1, 2, 3...):"
               );
               break;
 
@@ -3553,7 +4179,7 @@ async function processChatMessage(phoneNumber, text, message) {
               await customer.updateConversationState("driver_location_issue");
               await sendWhatsAppMessage(
                 phoneNumber,
-                "🗺️ *Driver Location Issue*\n\n" +
+                "🗺️ *Driver couldn't find my Location*\n\n" +
                   "Here are your orders:\n\n" +
                   formatOrderList(customer.orderHistory) +
                   "\n\nPlease type your Order ID:"
@@ -3637,11 +4263,29 @@ async function processChatMessage(phoneNumber, text, message) {
         }
         break;
 
-      // 1. In support system cases - Update delivery address fetching with null checks
+        // Helper function to find order by ID or index
+        function findOrderByIdOrIndex(orderHistory, userInput) {
+          const trimmedInput = userInput.trim();
+
+          // Check if input is a number (index selection)
+          if (/^\d+$/.test(trimmedInput)) {
+            const index = parseInt(trimmedInput) - 1; // Convert to 0-based index
+            if (index >= 0 && index < orderHistory.length) {
+              return orderHistory[index];
+            }
+          } else {
+            // Search by order ID (case-insensitive)
+            return orderHistory.find(
+              (order) =>
+                order.orderId.toLowerCase() === trimmedInput.toLowerCase()
+            );
+          }
+
+          return null;
+        }
+
       case "check_delivery":
-        const orderToCheck = customer.orderHistory.find(
-          (order) => order.orderId === text.trim()
-        );
+        const orderToCheck = findOrderByIdOrIndex(customer.orderHistory, text);
 
         if (orderToCheck) {
           const deliveryDate = new Date(
@@ -3669,7 +4313,10 @@ async function processChatMessage(phoneNumber, text, message) {
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+            "❌ Order not found. Please:\n" +
+              "• Enter a valid Order ID\n" +
+              "• Select by number (1, 2, 3...)\n" +
+              "• Type 0 to return to main menu"
           );
         }
         break;
@@ -3723,7 +4370,10 @@ async function processChatMessage(phoneNumber, text, message) {
                   : selectedPaymentIssue === "unsure_payment"
                   ? "Unsure if Payment Went Through"
                   : "Use Credited Funds"
-              }*\n\n` + "Please send a payment screenshot 📸"
+              }*\n\n` +
+                "Please note: During holidays and peak periods, our response time may be longer than usual. It can take up to 48 hours for us to get back to you. We appreciate your patience and understanding.\n\n" +
+                "Need urgent help?\nIf you're in a hurry or need immediate assistance, please call us directly at our payment number. We're here to help!\n\n" +
+                "Please send a payment screenshot 📸"
             );
           }
         } else {
@@ -4040,15 +4690,12 @@ async function processChatMessage(phoneNumber, text, message) {
         break;
 
       case "complaint_order_id":
-        const complaintOrderId = text.trim();
-        const relatedOrder = customer.orderHistory.find(
-          (order) => order.orderId === complaintOrderId
-        );
+        const relatedOrder = findOrderByIdOrIndex(customer.orderHistory, text);
 
         if (relatedOrder) {
           // Create complaint with order ID
           const complaintData = {
-            orderId: complaintOrderId,
+            orderId: relatedOrder.orderId,
             mediaAttachments: [
               customer.currentSupportFlow.tempData.complaintMedia,
             ],
@@ -4061,13 +4708,16 @@ async function processChatMessage(phoneNumber, text, message) {
 
           await sendWhatsAppMessage(
             phoneNumber,
-            `✅ Your complaint for Order #${complaintOrderId} has been submitted successfully. Our agent will call you shortly.\n\n` +
+            `✅ Your complaint for Order #${relatedOrder.orderId} has been submitted successfully. Our agent will call you shortly.\n\n` +
               "Thank you for your feedback!"
           );
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+            "❌ Order not found. Please:\n" +
+              "• Enter a valid Order ID\n" +
+              "• Select by number (1, 2, 3...)\n" +
+              "• Type 0 to return to main menu"
           );
           return; // Don't clear flow, let them try again
         }
@@ -4077,13 +4727,23 @@ async function processChatMessage(phoneNumber, text, message) {
           await sendMainMenu(phoneNumber, customer);
         }, 2000);
         break;
-
-      // 2. Track order delivery case - Fixed
+      // 2. Track order delivery case - Enhanced with flexible selection
       case "track_order_delivery":
-        const trackOrderId = text.trim();
-        const orderToTrack = customer.orderHistory.find(
-          (order) => order.orderId === trackOrderId
-        );
+        const userInput = text.trim();
+        let orderToTrack = null;
+
+        // Check if input is a number (index selection)
+        if (/^\d+$/.test(userInput)) {
+          const index = parseInt(userInput) - 1; // Convert to 0-based index
+          if (index >= 0 && index < customer.orderHistory.length) {
+            orderToTrack = customer.orderHistory[index];
+          }
+        } else {
+          // Search by order ID (case-insensitive)
+          orderToTrack = customer.orderHistory.find(
+            (order) => order.orderId.toLowerCase() === userInput.toLowerCase()
+          );
+        }
 
         if (orderToTrack) {
           const orderDate = new Date(
@@ -4108,7 +4768,9 @@ async function processChatMessage(phoneNumber, text, message) {
               `Status: ${orderToTrack.status}\n` +
               `Total: Rp.${Math.round(
                 orderToTrack.totalAmount
-              ).toLocaleString()}`
+              ).toLocaleString()}` +
+              `Please keep in touch with the driver and he will deliver. 
+Don't be scared call us and we will help you xxx-xxx`
           );
 
           await customer.clearSupportFlow();
@@ -4118,23 +4780,23 @@ async function processChatMessage(phoneNumber, text, message) {
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+            "❌ Order not found. Please:\n" +
+              "• Enter a valid Order ID\n" +
+              "• Select by number (1, 2, 3...)\n" +
+              "• Type 0 to return to main menu"
           );
         }
         break;
 
       case "delivery_delayed":
-        const delayedOrderId = text.trim();
-        const delayedOrder = customer.orderHistory.find(
-          (order) => order.orderId === delayedOrderId
-        );
+        const delayedOrder = findOrderByIdOrIndex(customer.orderHistory, text);
 
         if (delayedOrder) {
           // Create support ticket for delayed delivery
           const ticketData = {
             type: "delivery_issue",
             subType: "delivery_delayed",
-            orderId: delayedOrderId,
+            orderId: delayedOrder.orderId,
             issueDetails: "Customer reported delivery delay",
             status: "open",
           };
@@ -4147,7 +4809,7 @@ async function processChatMessage(phoneNumber, text, message) {
 
           await sendWhatsAppMessage(
             phoneNumber,
-            `📦 *Order #${delayedOrderId}*\n\n` +
+            `📦 *Order #${delayedOrder.orderId}*\n\n` +
               `Your delivery is delayed and will now arrive on ${newDeliveryDate.toLocaleDateString()}, between 12–4 PM.\n\n` +
               "Thanks for your patience! 🙏\n\n" +
               "Our team has been notified and will monitor your delivery closely."
@@ -4160,16 +4822,16 @@ async function processChatMessage(phoneNumber, text, message) {
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+            "❌ Order not found. Please:\n" +
+              "• Enter a valid Order ID\n" +
+              "• Select by number (1, 2, 3...)\n" +
+              "• Type 0 to return to main menu"
           );
         }
         break;
 
       case "change_delivery_address":
-        const addressChangeOrderId = text.trim();
-        const addressOrder = customer.orderHistory.find(
-          (order) => order.orderId === addressChangeOrderId
-        );
+        const addressOrder = findOrderByIdOrIndex(customer.orderHistory, text);
 
         if (addressOrder) {
           // Check if order is dispatched
@@ -4190,7 +4852,7 @@ async function processChatMessage(phoneNumber, text, message) {
             currentStep: "new_address_input",
             tempData: {
               ...customer.currentSupportFlow.tempData,
-              orderId: addressChangeOrderId,
+              orderId: addressOrder.orderId,
               isDispatched: isDispatched,
               currentAddress: currentAddress,
             },
@@ -4199,21 +4861,30 @@ async function processChatMessage(phoneNumber, text, message) {
           await customer.updateConversationState("new_address_input");
           await sendWhatsAppMessage(
             phoneNumber,
-            `📍 *Change Address for Order #${addressChangeOrderId}*\n\n` +
+            `📍 *Change Address for Order #${addressOrder.orderId}*\n\n` +
               `Current address: ${currentAddress}\n\n` +
               (isDispatched
                 ? "⚠️ *Warning:* Your order has already been dispatched. Extra delivery charges may apply.\n\n"
                 : "✅ Your order hasn't been dispatched yet. We can update the address.\n\n") +
-              "Your new address:"
+              `-------------------------------------------------------------------\n\n` +
+              "If your delivery is scheduled in less than 24 hours, we recommend calling our agent directly for assistance and to confirm all details.\n\n" +
+              "**Please note**: Additional charges may apply if the delivery location is further than originally stated.\n\n"
+          );
+          await sendWhatsAppMessage(
+            phoneNumber,
+
+            "Plz provide your new adress :"
           );
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+            "❌ Order not found. Please:\n" +
+              "• Enter a valid Order ID\n" +
+              "• Select by number (1, 2, 3...)\n" +
+              "• Type 0 to return to main menu"
           );
         }
         break;
-
       case "new_address_input":
         const newAddress = text.trim();
         const flowData = customer.currentSupportFlow.tempData;
@@ -4283,61 +4954,40 @@ async function processChatMessage(phoneNumber, text, message) {
         }, 3000);
         break;
       case "driver_location_issue":
-        const locationIssueOrderId = text.trim();
-        const locationOrder = customer.orderHistory.find(
-          (order) => order.orderId === locationIssueOrderId
-        );
+        const locationOrder = findOrderByIdOrIndex(customer.orderHistory, text);
 
         if (locationOrder) {
           await customer.updateSupportFlow({
             currentStep: "landmark_input",
             tempData: {
               ...customer.currentSupportFlow.tempData,
-              orderId: locationIssueOrderId,
+              orderId: locationOrder.orderId,
             },
           });
 
           await customer.updateConversationState("landmark_input");
           await sendWhatsAppMessage(
             phoneNumber,
-            `📍 *Driver Location Issue - Order #${locationIssueOrderId}*\n\n` +
-              "Please provide a nearby landmark or share your live location:"
+            `📍 *Driver couldn't find my Location - Order #${locationOrder.orderId}*\n\n`
+          );
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `If you're already in contact with the driver, please share your location and include a nearby landmark to help him find you easily.
+Don't worry — the driver will reach you and deliver the products safely..` +
+              `plz communicate with the driver`
           );
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+            "❌ Order not found. Please:\n" +
+              "• Enter a valid Order ID\n" +
+              "• Select by number (1, 2, 3...)\n" +
+              "• Type 0 to return to main menu"
           );
         }
         break;
 
       case "landmark_input":
-        const landmark = text.trim();
-        const locationFlowData = customer.currentSupportFlow.tempData;
-
-        // Create driver location issue ticket
-        const locationTicketData = {
-          type: "delivery_issue",
-          subType: "driver_location_issue",
-          orderId: locationFlowData.orderId,
-          deliveryData: {
-            nearbyLandmark: landmark,
-          },
-          issueDetails: `Customer provided landmark: "${landmark}" to help driver find location`,
-          status: "open",
-        };
-
-        await customer.createSupportTicket(locationTicketData);
-
-        await sendWhatsAppMessage(
-          phoneNumber,
-          `✅ Location details received!\n\n` +
-            `Order: #${locationFlowData.orderId}\n` +
-            `Landmark: ${landmark}\n\n` +
-            "📞 Call our delivery office: 08444444444\n\n" +
-            "The driver will also contact you shortly."
-        );
-
         await customer.clearSupportFlow();
         setTimeout(async () => {
           await sendMainMenu(phoneNumber, customer);
@@ -4345,9 +4995,9 @@ async function processChatMessage(phoneNumber, text, message) {
         break;
 
       case "marked_delivered_not_received":
-        const notReceivedOrderId = text.trim();
-        const notReceivedOrder = customer.orderHistory.find(
-          (order) => order.orderId === notReceivedOrderId
+        const notReceivedOrder = findOrderByIdOrIndex(
+          customer.orderHistory,
+          text
         );
 
         if (notReceivedOrder) {
@@ -4355,7 +5005,7 @@ async function processChatMessage(phoneNumber, text, message) {
           const urgentTicketData = {
             type: "delivery_issue",
             subType: "marked_delivered_not_received",
-            orderId: notReceivedOrderId,
+            orderId: notReceivedOrder.orderId,
             issueDetails:
               "Customer reports order marked as delivered but not received",
             status: "open",
@@ -4366,7 +5016,7 @@ async function processChatMessage(phoneNumber, text, message) {
 
           await sendWhatsAppMessage(
             phoneNumber,
-            `🚨 *URGENT - Order #${notReceivedOrderId}*\n\n` +
+            `🚨 *URGENT - Order #${notReceivedOrder.orderId}*\n\n` +
               "Please contact our support line immediately:\n" +
               "📞 08555555555\n\n" +
               "We'll investigate right away.\n\n" +
@@ -4380,15 +5030,18 @@ async function processChatMessage(phoneNumber, text, message) {
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+            "❌ Order not found. Please:\n" +
+              "• Enter a valid Order ID\n" +
+              "• Select by number (1, 2, 3...)\n" +
+              "• Type 0 to return to main menu"
           );
         }
         break;
 
       case "reschedule_delivery":
-        const rescheduleOrderId = text.trim();
-        const rescheduleOrder = customer.orderHistory.find(
-          (order) => order.orderId === rescheduleOrderId
+        const rescheduleOrder = findOrderByIdOrIndex(
+          customer.orderHistory,
+          text
         );
 
         if (rescheduleOrder) {
@@ -4396,20 +5049,23 @@ async function processChatMessage(phoneNumber, text, message) {
             currentStep: "new_date_input",
             tempData: {
               ...customer.currentSupportFlow.tempData,
-              orderId: rescheduleOrderId,
+              orderId: rescheduleOrder.orderId,
             },
           });
 
           await customer.updateConversationState("reschedule_new_date");
           await sendWhatsAppMessage(
             phoneNumber,
-            `📅 *Reschedule Delivery - Order #${rescheduleOrderId}*\n\n` +
+            `📅 *Reschedule Delivery - Order #${rescheduleOrder.orderId}*\n\n` +
               "New preferred date (e.g., 19 June, 2025):"
           );
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+            "❌ Order not found. Please:\n" +
+              "• Enter a valid Order ID\n" +
+              "• Select by number (1, 2, 3...)\n" +
+              "• Type 0 to return to main menu"
           );
         }
         break;
@@ -4493,10 +5149,7 @@ async function processChatMessage(phoneNumber, text, message) {
         break;
 
       case "product_issue_order_id":
-        const productIssueOrderId = text.trim();
-        const productOrder = customer.orderHistory.find(
-          (order) => order.orderId === productIssueOrderId
-        );
+        const productOrder = findOrderByIdOrIndex(customer.orderHistory, text);
 
         if (productOrder) {
           const currentProductIssue = customer.currentSupportFlow.specificIssue;
@@ -4505,7 +5158,7 @@ async function processChatMessage(phoneNumber, text, message) {
             currentStep: "item_name_input",
             tempData: {
               ...customer.currentSupportFlow.tempData,
-              orderId: productIssueOrderId,
+              orderId: productOrder.orderId,
               orderItems: productOrder.items,
             },
           });
@@ -4530,17 +5183,19 @@ async function processChatMessage(phoneNumber, text, message) {
                 ? "Wrong Item Received"
                 : "Other Product Issue"
             }*\n\n` +
-              `Order #${productIssueOrderId} contains:\n\n${itemsList}\n\n` +
+              `Order #${productOrder.orderId} contains:\n\n${itemsList}\n\n` +
               "Type the item name or number that has the issue:"
           );
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "Order ID not found. Please enter a valid Order ID or type 0 to return to main menu."
+            "❌ Order not found. Please:\n" +
+              "• Enter a valid Order ID\n" +
+              "• Select by number (1, 2, 3...)\n" +
+              "• Type 0 to return to main menu"
           );
         }
         break;
-
       case "product_item_selection":
         const itemInput = text.trim();
         const productFlowData = customer.currentSupportFlow.tempData;
@@ -4584,7 +5239,8 @@ async function processChatMessage(phoneNumber, text, message) {
             await sendWhatsAppMessage(
               phoneNumber,
               `📝 *Issue with: ${selectedItem.productName}*\n\n` +
-                "What's the issue? Please describe:"
+                "What's the issue? Please describe in text:" +
+                "And in next step we will ask you to submit a video"
             );
           }
         } else {
@@ -4649,6 +5305,11 @@ async function processChatMessage(phoneNumber, text, message) {
               `Issue: ${issueDescription}\n\n` +
               "Share a video showing the damage:"
           );
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `If the video is large, please allow a little extra time for it to load or upload. Thank you for your patience!` +
+              `Don’t worry, it’s uploading — please wait up to 3 minutes`
+          );
         } else if (currentSpecificIssue === "missing_wrong_amount") {
           await customer.updateSupportFlow({
             currentStep: "missing_amount_video",
@@ -4664,7 +5325,10 @@ async function processChatMessage(phoneNumber, text, message) {
             phoneNumber,
             `📦 *Missing/Wrong Amount: ${descriptionFlowData.selectedItem.productName}*\n\n` +
               `Issue: ${issueDescription}\n\n` +
-              "Please attach a short video and a voice message explaining what is missing or wrong:"
+              "Please attach a short video and a voice message explaining what is missing or wrong:" +
+              "----------------------------------\n\n" +
+              "If the video is large, please allow a little extra time for it to load or upload. Thank you for your patience!\n\n" +
+              `Don’t worry, it’s uploading — please wait up to 3 minutes`
           );
         } else {
           // For "other" product issues
@@ -4813,6 +5477,11 @@ async function processChatMessage(phoneNumber, text, message) {
             phoneNumber,
             "📸 Please share a video or photo showing the damage to the item."
           );
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `If the video is large, please allow a little extra time for it to load or upload. Thank you for your patience!` +
+              `Don’t worry, it’s uploading — please wait up to 3 minutes`
+          );
         }
         break;
       case "missing_amount_video":
@@ -4931,7 +5600,10 @@ async function processChatMessage(phoneNumber, text, message) {
         } else {
           await sendWhatsAppMessage(
             phoneNumber,
-            "🎥 Please attach a short video and voice message explaining what is missing or wrong."
+            "🎥 Please attach a short video and voice message explaining what is missing or wrong." +
+              "----------------------------------\n\n" +
+              "If the video is large, please allow a little extra time for it to load or upload. Thank you for your patience!\n\n" +
+              `Don’t worry, it’s uploading — please wait up to 3 minutes`
           );
         }
         break;
@@ -6634,40 +7306,79 @@ async function processChatMessage(phoneNumber, text, message) {
         await sendWhatsAppMessage(phoneNumber, Message);
         break;
 
-      // New main account menu
+      // Enhanced main account menu
       case "account_main":
         switch (text) {
           case "1":
-            // Go straight to funds summary
+            // Enhanced funds display with real data
+            const refundAmount =
+              customer.shoppingHistory?.reduce((sum, order) => {
+                return (
+                  sum +
+                  (order.refunds?.reduce(
+                    (refSum, refund) => refSum + refund.refundAmount,
+                    0
+                  ) || 0)
+                );
+              }, 0) || 0;
+
+            const foremanEarnings =
+              customer.commissionTracking?.availableCommission || 0;
+            const totalFunds = refundAmount + foremanEarnings;
+
             await customer.updateConversationState("account_funds");
             await sendWhatsAppMessage(
               phoneNumber,
-              ` *My Funds* \n\n` +
-                ` *My Earnings (Forman)*: Rs. 5,200.00\n` +
-                ` *My Refunds*: Rs. 1,000.00\n` +
-                ` *Total Funds Available*: Rs. 6,200.00\n\n` +
-                `With these funds, you can buy anything you want from our shop — cement, bricks, paint, pipes... even dreams\n\n` +
+              `💰 *My Funds* 💰\n\n` +
+                `💼 *My Earnings (Foreman)*: Rs. ${foremanEarnings.toFixed(
+                  2
+                )}\n` +
+                `🔄 *My Refunds*: Rs. ${refundAmount.toFixed(2)}\n` +
+                `💰 *Total Funds Available*: Rs. ${totalFunds.toFixed(2)}\n\n` +
+                `With these funds, you can buy anything you want from our shop — cement, bricks, paint, pipes... even your dreams! 🏗️\n\n` +
                 `-------------------------------------------------------\n` +
-                `For your information :\n` +
-                `- how to use your funds , you need to go to our facility and meet with support and you can use your funds at our facility center by ordering products.\n` +
-                `------------------------------------------------------\n` +
+                `ℹ️ *How to use your funds:*\n` +
+                `- Visit our facility center\n` +
+                `- Meet with our support team\n` +
+                `- Use your funds to order products directly\n` +
+                `-------------------------------------------------------\n\n` +
                 `0. Return to Main Menu`
             );
             break;
 
           case "2":
-            // Forman submenu
+            // Enhanced Foreman submenu with real status
             await customer.updateConversationState("account_forman");
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `👨‍💼 *Forman Details* 👨‍💼\n\n` +
-                `Please select an option:\n\n` +
-                `1. Forman status(Active or not Active)\n` +
-                `2. Commission details(eligibilty)\n` +
-                `3. Return to Account Menu`
-            );
+
+            const isForemanApproved =
+              customer.foremanStatus?.isForemanApproved || false;
+            const isCommissionEligible =
+              customer.foremanStatus?.isCommissionEligible || false;
+
+            let foremanMenuText = `👨‍💼 *Foreman Details* 👨‍💼\n\n`;
+
+            if (isForemanApproved) {
+              foremanMenuText += `✅ *Status*: Approved Foreman\n`;
+              if (customer.foremanStatus.foremanApprovalDate) {
+                foremanMenuText += `📅 *Approved*: ${new Date(
+                  customer.foremanStatus.foremanApprovalDate
+                ).toLocaleDateString()}\n`;
+              }
+            } else {
+              foremanMenuText += `⏳ *Status*: Not yet approved as Foreman\n`;
+            }
+
+            foremanMenuText +=
+              `\nPlease select an option:\n\n` +
+              `1. Foreman Status Details\n` +
+              `2. Commission Details\n` +
+              `3. Return to Account Menu`;
+
+            await sendWhatsAppMessage(phoneNumber, foremanMenuText);
             break;
+
           case "3":
+            // Number switching functionality (unchanged)
             if (!customer.phoneNumber || customer.phoneNumber.length === 0) {
               await sendWhatsAppMessage(
                 phoneNumber,
@@ -6679,31 +7390,28 @@ async function processChatMessage(phoneNumber, text, message) {
             await customer.updateConversationState(
               "universal_number_switch_select"
             );
-
             let switchListMsg = `🔁 *Switch your Number* 🔁\n`;
-
             customer.phoneNumber.forEach((num, index) => {
-              const label = index === 0 ? " " : "";
+              const label = index === 0 ? " (Current)" : "";
               switchListMsg += `${index + 1}. ${cleanPhoneNumber(
                 num
               )}${label}\n`;
             });
-
-            switchListMsg += `\nReply with the  index of the number  you want to replace.\n\n ----------------------------------------------------\nAll the information related to this number will be switched to the new number and the account and information will no longer be available to you on this number
-`;
-
+            switchListMsg +=
+              `\nReply with the index of the number you want to replace.\n\n` +
+              `----------------------------------------------------\n` +
+              `⚠️ All information will be transferred to the new number and this number will lose access.`;
             await sendWhatsAppMessage(phoneNumber, switchListMsg);
             break;
 
           case "4":
-            // Return to profile
+            // Return to profile (unchanged functionality)
             await customer.updateConversationState("profile");
             await sendWhatsAppMessage(
               phoneNumber,
               "Returning to your profile..."
             );
 
-            // Display the profile menu after a short delay
             setTimeout(async () => {
               let updatedProfileMessage =
                 `👤 *Your Profile* 👤\n\n` +
@@ -6723,22 +7431,20 @@ async function processChatMessage(phoneNumber, text, message) {
 
               updatedProfileMessage +=
                 `Email: ${customer.contextData?.email || "Not provided"}\n\n` +
-                `Total Orders: ${customer.orderHistory.length}\n` +
-                `Referral Code: ${
-                  customer.referralCode ||
-                  "CM" + customer._id.toString().substring(0, 6)
-                }\n\n` +
+                `Total Orders: ${customer.shoppingHistory?.length || 0}\n` +
+                `Referral Code: ${customer.referralCode}\n\n` +
                 `What would you like to do?\n\n` +
                 `1. Update Name\n` +
                 `2. Update Email\n` +
                 `3. Manage Addresses\n` +
-                `4. My Account \n` +
+                `4. My Account\n` +
                 `5. Manage Bank Accounts\n` +
                 `6. Return to Main Menu`;
 
               await sendWhatsAppMessage(phoneNumber, updatedProfileMessage);
             }, 500);
             break;
+
           default:
             await sendWhatsAppMessage(
               phoneNumber,
@@ -6762,55 +7468,164 @@ async function processChatMessage(phoneNumber, text, message) {
         );
         break;
 
-      // Forman submenu handling
+      // Enhanced Foreman submenu handling
       case "account_forman":
         switch (text) {
           case "1":
-            // Forman status
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `👨‍💼 *Forman Status* 👨‍💼\n\n` +
-                `Status: Not active\n\n` +
-                `You are not currently registered as a Forman.\n` +
-                `To become a Forman, please contact support.\n\n` +
-                `Type any key to return to Forman menu.`
-            );
+            // Enhanced Foreman status with real data
+            const isForemanApproved =
+              customer.foremanStatus?.isForemanApproved || false;
+            const foremanApprovalDate =
+              customer.foremanStatus?.foremanApprovalDate;
+
+            let statusMessage = `👨‍💼 *Foreman Status* 👨‍💼\n\n`;
+
+            if (isForemanApproved) {
+              statusMessage += `✅ *Status*: Approved Foreman\n`;
+              if (foremanApprovalDate) {
+                statusMessage += `📅 *Approved on*: ${new Date(
+                  foremanApprovalDate
+                ).toLocaleDateString()}\n`;
+              }
+              statusMessage += `🎯 *Commission Rate*: ${
+                customer.foremanStatus.commissionRate || 5
+              }%\n\n`;
+              statusMessage += `🎉 Congratulations! You are an approved Foreman.\n`;
+              statusMessage += `You can now refer customers and earn rewards!\n\n`;
+            } else {
+              statusMessage += `⏳ *Status*: Not approved as Foreman\n\n`;
+              statusMessage += `You are not currently registered as a Foreman.\n`;
+              statusMessage += `To become a Foreman:\n`;
+              statusMessage += `• Continue being an active customer\n`;
+              statusMessage += `• Refer friends and family\n`;
+              statusMessage += `• Contact our support team\n\n`;
+            }
+
+            statusMessage += `Type any key to return to Foreman menu.`;
+            await sendWhatsAppMessage(phoneNumber, statusMessage);
             break;
+
           case "2":
-            // Commission details
-            await sendWhatsAppMessage(
-              phoneNumber,
-              `💼 *Commission Details* 💼\n\n` +
-                `Commission rate: 0%\n` +
-                `Total commission earned: Rs. 0.00\n\n` +
-                `You haven't earned any commission yet.\n\n` +
-                `Type any key to return to Forman menu.\n` +
-                `---------------------------------------------------------\n` +
-                `For your information :\n` +
-                `- how to use your commission , you need to go to our facility and meet with support and you can use your commission at our facility center by ordering products.`
-            );
+            // Enhanced Commission details with real data
+            const isCommissionEligible =
+              customer.foremanStatus?.isCommissionEligible || false;
+            const commissionData = customer.commissionTracking || {
+              totalCommissionEarned: 0,
+              totalCommissionPaid: 0,
+              availableCommission: 0,
+            };
+
+            let commissionMessage = `💼 *Commission Details* 💼\n\n`;
+
+            if (isCommissionEligible) {
+              commissionMessage += `✅ *Status*: Commission Eligible\n`;
+              if (customer.foremanStatus.commissionEligibilityDate) {
+                commissionMessage += `📅 *Eligible since*: ${new Date(
+                  customer.foremanStatus.commissionEligibilityDate
+                ).toLocaleDateString()}\n`;
+              }
+              commissionMessage += `💰 *Commission Rate*: ${
+                customer.foremanStatus.commissionRate || 5
+              }%\n\n`;
+              commissionMessage += `📊 *Your Commission Summary*:\n`;
+              commissionMessage += `• Total Earned: Rs. ${commissionData.totalCommissionEarned.toFixed(
+                2
+              )}\n`;
+              commissionMessage += `• Already Paid: Rs. ${commissionData.totalCommissionPaid.toFixed(
+                2
+              )}\n`;
+              commissionMessage += `• Available: Rs. ${commissionData.availableCommission.toFixed(
+                2
+              )}\n\n`;
+
+              const successfulReferrals =
+                customer.customersReferred?.filter((r) => r.hasPlacedOrder)
+                  .length || 0;
+              commissionMessage += `👥 *Successful Referrals*: ${successfulReferrals}\n`;
+              commissionMessage += `🎯 *Total Referrals*: ${
+                customer.customersReferred?.length || 0
+              }\n\n`;
+
+              if (commissionData.availableCommission > 0) {
+                commissionMessage += `💰 You have commission available for withdrawal!\n`;
+              }
+            } else {
+              commissionMessage += `⏳ *Status*: Not eligible for commission yet\n\n`;
+              commissionMessage += `You haven't been approved for commission earning yet.\n`;
+              commissionMessage += `Requirements:\n`;
+              commissionMessage += `• Must be an approved Foreman\n`;
+              commissionMessage += `• Must be manually approved by admin\n`;
+              commissionMessage += `• Contact support for eligibility review\n\n`;
+              commissionMessage += `💡 *Current Stats*:\n`;
+              commissionMessage += `• Referrals Made: ${
+                customer.customersReferred?.length || 0
+              }\n`;
+              commissionMessage += `• Videos Uploaded: ${
+                customer.referralvideos?.length || 0
+              }\n`;
+            }
+
+            commissionMessage += `\n---------------------------------------------------------\n`;
+            commissionMessage += `ℹ️ *How to use your commission*:\n`;
+            commissionMessage += `- Visit our facility center\n`;
+            commissionMessage += `- Meet with support team\n`;
+            commissionMessage += `- Use commission to order products\n\n`;
+            commissionMessage += `Type any key to return to Foreman menu.`;
+
+            await sendWhatsAppMessage(phoneNumber, commissionMessage);
             break;
+
           case "3":
             // Return to Account Menu
             await customer.updateConversationState("account_main");
+            const refundAmount =
+              customer.shoppingHistory?.reduce((sum, order) => {
+                return (
+                  sum +
+                  (order.refunds?.reduce(
+                    (refSum, refund) => refSum + refund.refundAmount,
+                    0
+                  ) || 0)
+                );
+              }, 0) || 0;
+            const foremanEarnings =
+              customer.commissionTracking?.availableCommission || 0;
+
             await sendWhatsAppMessage(
               phoneNumber,
-              ` *My Account* \n\n` +
+              `💰 *My Account* 💰\n\n` +
                 `Please select an option:\n\n` +
-                `1. Funds\n` +
-                `2. Forman( eligibility)\n` +
+                `1. Funds (Rs. ${(refundAmount + foremanEarnings).toFixed(
+                  2
+                )} available)\n` +
+                `2. Foreman (${
+                  customer.foremanStatus?.isForemanApproved
+                    ? "Approved"
+                    : "Not Approved"
+                })\n` +
                 `3. Switch my number\n` +
                 `4. Return to Profile`
             );
             break;
+
           default:
-            // Return to Forman menu
+            // Return to Foreman menu with current status
+            const currentStatus = customer.foremanStatus?.isForemanApproved
+              ? "Approved"
+              : "Not Approved";
+            const commissionStatus = customer.foremanStatus
+              ?.isCommissionEligible
+              ? "Eligible"
+              : "Not Eligible";
+
             await sendWhatsAppMessage(
               phoneNumber,
-              `👨‍💼 *Forman Details* 👨‍💼\n\n` +
+              `👨‍💼 *Foreman Details* 👨‍💼\n\n` +
+                `Current Status: ${currentStatus}\n` +
+                `Commission: ${commissionStatus}\n\n` +
                 `Please select an option:\n\n` +
-                `1. Forman (eligibility)\n` +
-                `2. Commission ( eligibility)\n` +
+                `1. Foreman Status Details\n` +
+                `2. Commission Details\n` +
                 `3. Return to Account Menu`
             );
             break;
@@ -7507,7 +8322,7 @@ async function processChatMessage(phoneNumber, text, message) {
         }
         break;
 
-      // Step 2: Collect full address
+      // UPDATED add_address_fulladdress_step case (modified to show dynamic areas)
       case "add_address_fulladdress_step":
         try {
           // Make sure contextData and tempAddress exist
@@ -7521,6 +8336,8 @@ async function processChatMessage(phoneNumber, text, message) {
               nickname: "Address",
               fullAddress: "",
               area: "",
+              areaDisplayName: "",
+              areaDeliveryFee: 0,
               googleMapLink: "",
             };
           }
@@ -7530,11 +8347,16 @@ async function processChatMessage(phoneNumber, text, message) {
           await customer.save();
           console.log("Saved full address to tempAddress:", text);
 
-          // Move to next step - asking for area
+          // Move to next step - asking for area with dynamic areas
           await customer.updateConversationState("add_address_area_step");
+
+          // Get active areas and display them
+          const activeAreas = await getActiveAreas();
+          const areasDisplay = formatAreasForDisplay(activeAreas);
+
           await sendWhatsAppMessage(
             phoneNumber,
-            "Please select your area  \n1.seminyak \n2.legian \n3.ubud  \n4.uluwatu \n5.sannur  \n6.amed:"
+            `Please select your area:\n\n${areasDisplay}`
           );
         } catch (error) {
           console.error("Error saving address fullAddress:", error);
@@ -7548,24 +8370,19 @@ async function processChatMessage(phoneNumber, text, message) {
         }
         break;
 
-      // Updated case in the router file for add_address_area_step
+      // UPDATED add_address_area_step case
       case "add_address_area_step":
         try {
-          // Validate the area selection
-          const areaOptions = {
-            1: "seminyak",
-            2: "legian",
-            3: "ubud",
-            4: "uluwatu",
-            5: "sannur",
-            6: "amed",
-          };
+          // Get active areas from database
+          const activeAreas = await getActiveAreas();
+          const selectedIndex = parseInt(text) - 1;
 
           // Check if the selected area is valid
-          if (!areaOptions[text]) {
+          if (selectedIndex < 0 || selectedIndex >= activeAreas.length) {
+            const areasDisplay = formatAreasForDisplay(activeAreas);
             await sendWhatsAppMessage(
               phoneNumber,
-              "Please select a valid area number (1-6)."
+              `Please select a valid area number (1-${activeAreas.length}).\n\n${areasDisplay}`
             );
             return;
           }
@@ -7575,10 +8392,16 @@ async function processChatMessage(phoneNumber, text, message) {
             throw new Error("Address information was lost. Please start over.");
           }
 
-          // Save the area using the mapped value
-          customer.contextData.tempAddress.area = areaOptions[text];
+          // Save the area using the selected area
+          const selectedArea = activeAreas[selectedIndex];
+          customer.contextData.tempAddress.area = selectedArea.name;
+          customer.contextData.tempAddress.areaDisplayName =
+            selectedArea.displayName;
+          customer.contextData.tempAddress.areaDeliveryFee =
+            selectedArea.deliveryFee;
+
           await customer.save();
-          console.log("Saved area to tempAddress:", areaOptions[text]);
+          console.log("Saved area to tempAddress:", selectedArea.name);
 
           // Move to final step - asking for Google Maps link
           await customer.updateConversationState("add_address_maplink_step");
@@ -8123,24 +8946,21 @@ async function processChatMessage(phoneNumber, text, message) {
           await customer.updateConversationState("manage_addresses");
         }
         break;
+      // Import the OrderProcessingMiddleware
+
+      // Enhanced order history with shopping history schema
       case "order_history":
-        if (customer.orderHistory && customer.orderHistory.length > 0) {
-          // Set conversation state first
+        if (customer.shoppingHistory && customer.shoppingHistory.length > 0) {
           await customer.updateConversationState("order_history");
 
-          // Generate the order list
-          const orderListMessage = generateOrderHistoryList(customer);
-
-          // Send the order list first
+          const orderListMessage = generateEnhancedOrderHistoryList(customer);
           await sendWhatsAppMessage(phoneNumber, orderListMessage);
 
-          // Then send the instruction as a separate message
           await sendWhatsAppMessage(
             phoneNumber,
             "Enter the order number to view details, type 'back' to return to the main menu."
           );
 
-          // Add both messages to chat history
           await customer.addToChatHistory(orderListMessage, "bot");
           await customer.addToChatHistory(
             "Enter the order number to view details, type 'back' to return to the main menu.",
@@ -8154,6 +8974,414 @@ async function processChatMessage(phoneNumber, text, message) {
           await sendMainMenu(phoneNumber, customer);
         }
         break;
+
+      // Enhanced order completion with middleware integration
+      case "order_complete":
+        try {
+          // Prepare order data
+          const orderData = {
+            orderId:
+              customer.latestOrderId || "ORD" + Date.now().toString().slice(-8),
+            items: customer.cart.items.map((item) => ({
+              ...item,
+              isDiscountedProduct: item.isDiscountedProduct || false,
+            })),
+            totalAmount:
+              customer.cart.totalAmount + (customer.cart.deliveryCharge || 0),
+            deliveryCharge: customer.cart.deliveryCharge || 0,
+            discounts: {
+              firstOrderDiscount: customer.cart.firstOrderDiscount || 0,
+              ecoDeliveryDiscount: customer.cart.ecoDeliveryDiscount || 0,
+              referralDiscount: customer.cart.referralDiscount || 0,
+            },
+            status: "order-confirmed",
+            paymentStatus: "paid",
+            paymentMethod:
+              customer.contextData?.paymentMethod || "Bank Transfer",
+            transactionId: customer.contextData?.transactionId,
+            deliveryAddress: customer.cart.deliveryAddress,
+            deliveryOption: customer.cart.deliveryOption,
+            deliveryLocation: customer.cart.deliveryLocation,
+          };
+
+          // Process order using middleware
+          const orderResult = await OrderProcessingMiddleware.processNewOrder(
+            orderData,
+            customer._id
+          );
+
+          if (!orderResult.success) {
+            throw new Error(orderResult.error);
+          }
+
+          // Clear cart and update state
+          await customer.emptyCart();
+          await customer.updateConversationState("main_menu");
+
+          // Generate confirmation message
+          let confirmationMessage = `✅ *Order Confirmed!* ✅\n\n`;
+          confirmationMessage += `📦 Order ID: ${orderResult.orderId}\n`;
+          confirmationMessage += `💰 Total Amount: ${formatRupiah(
+            orderData.totalAmount
+          )}\n`;
+          confirmationMessage += `🚚 Delivery: ${orderData.deliveryOption}\n`;
+          confirmationMessage += `📍 Location: ${orderData.deliveryLocation}\n\n`;
+
+          // Add referral commission info if processed
+          if (orderResult.commissionProcessed) {
+            confirmationMessage += `💰 Commission of ${formatRupiah(
+              orderResult.commissionAmount
+            )} processed for referrer: ${orderResult.referrerInfo?.name}\n\n`;
+          }
+
+          // Add first-time customer welcome message
+          if (customer.isFirstTimeCustomer) {
+            confirmationMessage += `🎉 Welcome to our family! This is your first order.\n\n`;
+          }
+
+          confirmationMessage += `📱 You can track your order by typing "5" in the main menu.\n\n`;
+          confirmationMessage += `Thank you for choosing us! 🙏`;
+
+          await sendWhatsAppMessage(phoneNumber, confirmationMessage);
+
+          // Log successful order processing
+          console.log(
+            `Order ${orderResult.orderId} processed successfully for customer ${customer.name}`
+          );
+          if (orderResult.commissionProcessed) {
+            console.log(
+              `Commission of ${orderResult.commissionAmount} processed for referrer ${orderResult.referrerInfo?.name}`
+            );
+          }
+
+          // Send main menu after confirmation
+          setTimeout(async () => {
+            await sendMainMenu(phoneNumber, customer);
+          }, 2000);
+        } catch (error) {
+          console.error("Error completing order:", error);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Error processing your order. Please contact support."
+          );
+
+          // Return to cart or main menu on error
+          await customer.updateConversationState("main_menu");
+          await sendMainMenu(phoneNumber, customer);
+        }
+        break;
+
+      // New case for order refund processing
+      case "process_refund":
+        try {
+          const {
+            orderId,
+            refundAmount,
+            refundReason,
+            refundedItems,
+            staffInfo,
+          } = customer.contextData;
+
+          const refundData = {
+            refundAmount: refundAmount,
+            refundReason: refundReason,
+            refundedItems: refundedItems || [],
+          };
+
+          const refundResult =
+            await OrderProcessingMiddleware.processOrderRefund(
+              customer._id,
+              orderId,
+              refundData,
+              staffInfo
+            );
+
+          if (refundResult.success) {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `✅ Refund processed successfully!\n\n` +
+                `🔄 Refund ID: ${refundResult.refundId}\n` +
+                `💰 Amount: ${formatRupiah(refundAmount)}\n` +
+                `📝 Reason: ${refundReason}\n\n` +
+                `Your refund will be processed within 3-5 business days.`
+            );
+          } else {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `❌ Error processing refund: ${refundResult.error}`
+            );
+          }
+
+          await customer.updateConversationState("main_menu");
+          await sendMainMenu(phoneNumber, customer);
+        } catch (error) {
+          console.error("Error in refund processing:", error);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Error processing refund. Please contact support."
+          );
+        }
+        break;
+
+      // New case for order replacement processing
+      case "process_replacement":
+        try {
+          const {
+            orderId,
+            replacementReason,
+            originalItems,
+            replacementItems,
+            priceDifference,
+            staffInfo,
+          } = customer.contextData;
+
+          const replacementData = {
+            replacementReason: replacementReason,
+            originalItems: originalItems || [],
+            replacementItems: replacementItems || [],
+            priceDifference: priceDifference || 0,
+          };
+
+          const replacementResult =
+            await OrderProcessingMiddleware.processOrderReplacement(
+              customer._id,
+              orderId,
+              replacementData,
+              staffInfo
+            );
+
+          if (replacementResult.success) {
+            let message = `✅ Replacement processed successfully!\n\n`;
+            message += `🔄 Replacement ID: ${replacementResult.replacementId}\n`;
+            message += `📝 Reason: ${replacementReason}\n`;
+
+            if (priceDifference > 0) {
+              message += `💰 Additional Amount: ${formatRupiah(
+                priceDifference
+              )}\n`;
+            } else if (priceDifference < 0) {
+              message += `💰 Refund Amount: ${formatRupiah(
+                Math.abs(priceDifference)
+              )}\n`;
+            }
+
+            message += `\nYour replacement order will be processed shortly.`;
+
+            await sendWhatsAppMessage(phoneNumber, message);
+          } else {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `❌ Error processing replacement: ${replacementResult.error}`
+            );
+          }
+
+          await customer.updateConversationState("main_menu");
+          await sendMainMenu(phoneNumber, customer);
+        } catch (error) {
+          console.error("Error in replacement processing:", error);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Error processing replacement. Please contact support."
+          );
+        }
+        break;
+
+      // New case for adding order corrections
+      case "add_order_correction":
+        try {
+          const {
+            orderId,
+            originalField,
+            originalValue,
+            newValue,
+            correctionReason,
+            staffInfo,
+          } = customer.contextData;
+
+          const correctionData = {
+            originalField: originalField,
+            originalValue: originalValue,
+            newValue: newValue,
+            correctionReason: correctionReason,
+          };
+
+          const correctionResult =
+            await OrderProcessingMiddleware.addOrderCorrection(
+              customer._id,
+              orderId,
+              correctionData,
+              staffInfo
+            );
+
+          if (correctionResult.success) {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `✅ Order correction added successfully!\n\n` +
+                `🔧 Correction ID: ${correctionResult.correctionId}\n` +
+                `📝 Field: ${originalField}\n` +
+                `📝 Original: ${originalValue}\n` +
+                `📝 New: ${newValue}\n` +
+                `📝 Reason: ${correctionReason}\n\n` +
+                `Correction has been logged and will be reviewed.`
+            );
+          } else {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              `❌ Error adding correction: ${correctionResult.error}`
+            );
+          }
+
+          await customer.updateConversationState("main_menu");
+          await sendMainMenu(phoneNumber, customer);
+        } catch (error) {
+          console.error("Error adding order correction:", error);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Error adding correction. Please contact support."
+          );
+        }
+        break;
+
+      // New case for viewing order analytics
+      case "view_order_analytics":
+        try {
+          const analyticsResult =
+            await OrderProcessingMiddleware.getOrderAnalytics(customer._id);
+
+          if (analyticsResult.success && analyticsResult.analytics.length > 0) {
+            const analytics = analyticsResult.analytics[0];
+
+            let analyticsMessage = `📊 *Your Order Analytics* 📊\n\n`;
+            analyticsMessage += `👤 Customer: ${analytics.name}\n`;
+            analyticsMessage += `📦 Total Orders: ${analytics.totalOrders}\n`;
+            analyticsMessage += `💰 Total Spent: ${formatRupiah(
+              analytics.totalSpent
+            )}\n`;
+            analyticsMessage += `🔄 Total Refunded: ${formatRupiah(
+              analytics.totalRefunded
+            )}\n`;
+            analyticsMessage += `📈 Average Order Value: ${formatRupiah(
+              analytics.avgOrderValue
+            )}\n`;
+
+            if (analytics.isForeman) {
+              analyticsMessage += `\n🏆 *Foreman Status* 🏆\n`;
+              analyticsMessage += `💼 Commission Eligible: ${
+                analytics.isCommissionEligible ? "Yes" : "No"
+              }\n`;
+              analyticsMessage += `💰 Commission Generated: ${formatRupiah(
+                analytics.commissionGenerated
+              )}\n`;
+            }
+
+            await sendWhatsAppMessage(phoneNumber, analyticsMessage);
+          } else {
+            await sendWhatsAppMessage(
+              phoneNumber,
+              "📊 No analytics data available yet. Start shopping to see your statistics!"
+            );
+          }
+
+          await customer.updateConversationState("main_menu");
+          await sendMainMenu(phoneNumber, customer);
+        } catch (error) {
+          console.error("Error viewing analytics:", error);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Error retrieving analytics. Please contact support."
+          );
+        }
+        break;
+
+        // Helper function to generate enhanced order history list (updated to work with middleware)
+        function generateEnhancedOrderHistoryList(customer) {
+          if (
+            !customer.shoppingHistory ||
+            customer.shoppingHistory.length === 0
+          ) {
+            return "📦 *Your Order History* 📦\n\nNo orders found.";
+          }
+
+          // Sort orders by date (newest first)
+          const sortedOrders = [...customer.shoppingHistory].sort((a, b) => {
+            return new Date(b.orderDate) - new Date(a.orderDate);
+          });
+
+          let orderList = `📦 *Your Order History* 📦\n\n`;
+          orderList += `Total Orders: ${sortedOrders.length}\n\n`;
+
+          sortedOrders.forEach((order, index) => {
+            const orderDate = new Date(order.orderDate);
+            const statusEmoji = getOrderStatusEmoji(order.status);
+
+            orderList += `${index + 1}. ${statusEmoji} ${order.orderId}\n`;
+            orderList += `   💰 ${formatRupiah(order.totalAmount)}\n`;
+            orderList += `   📅 ${orderDate.toLocaleDateString()}\n`;
+            orderList += `   📊 ${order.status}\n`;
+
+            // Show refund info if applicable
+            if (order.refunds && order.refunds.length > 0) {
+              const totalRefunded = order.refunds.reduce(
+                (sum, refund) => sum + refund.refundAmount,
+                0
+              );
+              orderList += `   🔄 Refunded: ${formatRupiah(totalRefunded)}\n`;
+            }
+
+            // Show replacement info if applicable
+            if (order.replacements && order.replacements.length > 0) {
+              orderList += `   🔄 Replacements: ${order.replacements.length}\n`;
+            }
+
+            // Show corrections info if applicable
+            if (order.corrections && order.corrections.length > 0) {
+              orderList += `   🔧 Corrections: ${order.corrections.length}\n`;
+            }
+
+            orderList += `\n`;
+          });
+
+          orderList += `\nEnter order number to view details.`;
+          return orderList;
+        }
+
+        // Helper function to format currency (assuming this exists)
+        function formatRupiah(amount) {
+          return new Intl.NumberFormat("id-ID", {
+            style: "currency",
+            currency: "IDR",
+            minimumFractionDigits: 0,
+            maximumFractionDigits: 0,
+          }).format(amount);
+        }
+        // Helper function to get status emoji
+        function getOrderStatusEmoji(status) {
+          const statusEmojis = {
+            "cart-not-paid": "🛒",
+            "order-made-not-paid": "⏳",
+            "pay-not-confirmed": "💳",
+            "order-confirmed": "✅",
+            "order not picked": "📋",
+            "issue-customer": "⚠️",
+            "customer-confirmed": "👍",
+            "order-refunded": "🔄",
+            "picking-order": "📦",
+            "allocated-driver": "🚚",
+            "ready to pickup": "📬",
+            "order-not-pickedup": "❌",
+            "order-pickuped-up": "🚛",
+            "on-way": "🛣️",
+            "driver-confirmed": "✅",
+            "order-processed": "⚙️",
+            refund: "💸",
+            "complain-order": "❗",
+            "issue-driver": "🚨",
+            "parcel-returned": "↩️",
+            "order-complete": "🎉",
+          };
+          return statusEmojis[status] || "📦";
+        }
+
       case "order_details":
         const orderNumber = parseInt(text);
 
@@ -8325,6 +9553,17 @@ async function processChatMessage(phoneNumber, text, message) {
           );
         }
 
+        // 🛒 CLEAR CART AFTER ORDER CONFIRMATION
+        customer.cart = {
+          items: [],
+          totalAmount: 0,
+          deliveryCharge: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        await customer.save();
+        console.log(`Cart cleared for customer: ${customer.phoneNumber}`);
+
         // 4) self-pickup branch
         if (latestOrder?.deliveryType === "self_pickup") {
           if (latestOrder.totalAmount >= 25_000_000) {
@@ -8368,49 +9607,53 @@ async function processChatMessage(phoneNumber, text, message) {
 
         break;
       }
-
       // =============================================================================
       // SIMPLIFIED REFERRAL CASES - Clean and working
       // =============================================================================
 
+      // Enhanced referral case with commission eligibility check
       case "referral":
-        // Simple referral introduction and move to video creation
-        await sendSequentialMessages(
-          phoneNumber,
-          "🎉 Welcome to our Referral Program!\n\n" +
-            "💰 Share videos with friends and earn rewards!\n\n" +
-            "🎥 Please record and send your referral video now\n\n" +
-            "📹 Supported video formats:\n" +
-            "• MP4 (recommended)\n" +
-            "• AVI\n" +
-            "• MOV\n" +
-            "• 3GP\n" +
-            "• MKV\n\n" +
-            "📏 Max size: 15MB\n" +
-            "⏱️ Keep it under 1 minute for best results!"
-        );
+        // Check if customer can see commission options
+        const canSeeCommission =
+          customer.foremanStatus?.isCommissionEligible || false;
 
+        let referralIntroMessage = "🎉 Welcome to our Referral Program!\n\n";
+
+        if (canSeeCommission) {
+          const commissionRate = customer.foremanStatus?.commissionRate || 5;
+          const availableCommission =
+            customer.commissionTracking?.availableCommission || 0;
+
+          referralIntroMessage += `💰 You're eligible to earn ${commissionRate}% commission!\n`;
+          referralIntroMessage += `💼 Available commission: Rs. ${availableCommission.toFixed(
+            2
+          )}\n\n`;
+        }
+
+        referralIntroMessage +=
+          `🎥 Share videos with friends and earn rewards!\n\n` +
+          `📱 Please record and send your referral video now\n\n` +
+          `📏 Max size: 15MB\n` +
+          `⏱️ Keep it under 1 minute for best results!`;
+
+        await sendSequentialMessages(phoneNumber, referralIntroMessage);
         await sendSequentialMessages(
           phoneNumber,
           "📱 Send your video now or type '0' to return to main menu",
           1000
         );
-
-        // Third message (video reference)
         await sendSequentialMessages(
           phoneNumber,
           "See the video below and follow the instructions to know better what to say",
           1000
         );
-
-        // Fourth message (talking points)
         await sendSequentialMessages(
           phoneNumber,
           "What to mention in the video:\n- Mention Your Name\n- What you do\n- Why do you like us",
           1000
         );
 
-        // Send the activated demo video with custom message to the customer
+        // Send demo video if available
         try {
           const videoSent = await sendActivatedDemoVideo(customer, phoneNumber);
           if (!videoSent) {
@@ -8429,8 +9672,81 @@ async function processChatMessage(phoneNumber, text, message) {
           );
         }
 
-        // Move directly to video creation state
         await customer.updateConversationState("create_video");
+        break;
+
+      // Debug case to check customersReferred field
+      case "check_referrals":
+        try {
+          const totalReferrals = customer.customersReferred?.length || 0;
+          const pendingReferrals =
+            customer.referralTracking?.pendingReferrals?.length || 0;
+          const registeredReferrals = customer.customersReferred?.length || 0;
+          const orderedReferrals =
+            customer.customersReferred?.filter((ref) => ref.hasPlacedOrder)
+              .length || 0;
+
+          let debugMessage = `🔍 *Referral Debug Info* 🔍\n\n`;
+          debugMessage += `👤 Customer: ${customer.name}\n`;
+          debugMessage += `📊 Total Confirmed Referrals: ${totalReferrals}\n`;
+          debugMessage += `⏳ Pending Referrals: ${pendingReferrals}\n`;
+          debugMessage += `✅ Registered: ${registeredReferrals}\n`;
+          debugMessage += `🛒 Placed Orders: ${orderedReferrals}\n\n`;
+
+          // Show pending referrals
+          if (
+            customer.referralTracking?.pendingReferrals &&
+            customer.referralTracking.pendingReferrals.length > 0
+          ) {
+            debugMessage += `📋 *Pending Referrals:*\n`;
+            customer.referralTracking.pendingReferrals
+              .slice(0, 3)
+              .forEach((ref, index) => {
+                debugMessage += `${index + 1}. ${ref.phoneNumber} - ${
+                  ref.status || "pending"
+                }\n`;
+                debugMessage += `   Sent: ${
+                  ref.dateShared ? ref.dateShared.toDateString() : "N/A"
+                }\n`;
+              });
+            if (customer.referralTracking.pendingReferrals.length > 3) {
+              debugMessage += `... and ${
+                customer.referralTracking.pendingReferrals.length - 3
+              } more pending\n`;
+            }
+            debugMessage += `\n`;
+          }
+
+          // Show confirmed referrals
+          if (
+            customer.customersReferred &&
+            customer.customersReferred.length > 0
+          ) {
+            debugMessage += `📋 *Confirmed Referrals:*\n`;
+            customer.customersReferred.slice(0, 3).forEach((ref, index) => {
+              debugMessage += `${index + 1}. ${ref.customerName} (${
+                ref.phoneNumber
+              })\n`;
+              debugMessage += `   Orders: ${
+                ref.totalOrdersCount || 0
+              }, Spent: Rs. ${ref.totalSpentAmount || 0}\n`;
+            });
+            if (customer.customersReferred.length > 3) {
+              debugMessage += `... and ${
+                customer.customersReferred.length - 3
+              } more confirmed\n`;
+            }
+          }
+
+          await sendWhatsAppMessage(phoneNumber, debugMessage);
+          await sendMainMenu(phoneNumber, customer);
+        } catch (error) {
+          console.error("Error checking referrals:", error);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Error checking referrals. Please contact support."
+          );
+        }
         break;
 
       case "create_video":
@@ -8444,7 +9760,7 @@ async function processChatMessage(phoneNumber, text, message) {
 
             // 2. Convert to Base64
             const base64Video = videoBuffer.toString("base64");
-            const videoSizeMB = (base64Video.length * 3) / 4 / (1024 * 1024); // Accurate size calc
+            const videoSizeMB = (base64Video.length * 3) / 4 / (1024 * 1024);
 
             // 3. Validate size
             if (videoSizeMB > 15) {
@@ -8468,7 +9784,7 @@ async function processChatMessage(phoneNumber, text, message) {
               fileSize: videoSizeMB,
               approvalDate: new Date(),
               status: "unverified",
-              // ... other metadata fields ...
+              sharedWith: [], // Initialize empty array
             });
 
             await customer.save();
@@ -8493,9 +9809,13 @@ async function processChatMessage(phoneNumber, text, message) {
             phoneNumber,
             "🎥 Please send a video file or type '0' to cancel"
           );
+          await sendWhatsAppMessage(
+            phoneNumber,
+            `If the video is large, please allow a little extra time for it to load or upload. Thank you for your patience! Don't worry, it's uploading — please wait up to 3 minutes`
+          );
         }
         break;
-      // ─── CASE: add_contact ──────────────────────────────────────────────────────
+
       case "add_contact":
         if (text === "0") {
           await sendMainMenu(phoneNumber, customer);
@@ -8523,9 +9843,7 @@ async function processChatMessage(phoneNumber, text, message) {
         if (rawNumber.length < 8) {
           await sendWhatsAppMessage(
             phoneNumber,
-            "❌ Invalid number! Please send a valid phone number (at least 8 digits)\n" +
-              "Example: 03001234567\n\n" +
-              "Or type '0' to return to main menu"
+            "❌ Invalid number! Please send a valid phone number (at least 8 digits)\nExample: 03001234567\n\nOr type '0' to return to main menu"
           );
           break;
         }
@@ -8537,13 +9855,12 @@ async function processChatMessage(phoneNumber, text, message) {
         if (rawNumber === currentUserNumber) {
           await sendWhatsAppMessage(
             phoneNumber,
-            "❌ You can't send a referral to yourself!\n" +
-              "Please provide a different phone number."
+            "❌ You can't send a referral to yourself!\nPlease provide a different phone number."
           );
           break;
         }
 
-        // Check for duplicates (compare raw numbers)
+        // Check for duplicates
         const existingContact = latestVideo.sharedWith.find((contact) => {
           const contactNumber = contact.phoneNumber.replace(/\D/g, "");
           return contactNumber === rawNumber;
@@ -8557,10 +9874,10 @@ async function processChatMessage(phoneNumber, text, message) {
           break;
         }
 
-        // Store exactly as provided by user (without @c.us suffix)
+        // Store contact
         const newContact = {
-          name: "Contact", // Can be updated later
-          phoneNumber: rawNumber, // Store raw number exactly as provided
+          name: "Contact",
+          phoneNumber: rawNumber,
           dateShared: new Date(),
           status: "pending",
         };
@@ -8570,45 +9887,618 @@ async function processChatMessage(phoneNumber, text, message) {
 
         await sendWhatsAppMessage(
           phoneNumber,
-          `✅ Contact added: ${rawNumber}\n\n` +
-            `🚀 Sending your referral now...`
+          `✅ Contact added: ${rawNumber}\n\n🚀 Sending your referral now...`
         );
 
         try {
           console.log("🚀 Attempting to send referral...");
           await sendReferralToContact(customer, latestVideo, newContact);
 
-          // Update status and save
+          // ✅ ONLY UPDATE customersReferred AFTER SUCCESSFUL SEND
           newContact.status = "sent";
           newContact.dateSent = new Date();
-          await customer.save();
 
-          // RESET STATE HERE
+          // 🎯 DIRECT REFERRAL PROCESSING - Create referral record ONLY after successful send
+          const referralResult = await createReferralRecord(
+            customer,
+            rawNumber,
+            latestVideo.imageId
+          );
+
+          if (referralResult.success) {
+            console.log(
+              `✅ customersReferred updated for ${customer.name} - Added ${rawNumber}`
+            );
+          } else {
+            console.log(`⚠️ Warning: ${referralResult.message}`);
+          }
+
+          await customer.save();
           await customer.updateConversationState("main_menu");
 
-          await sendSequentialMessages(
-            phoneNumber,
-            `✅ Referral sent successfully to ${rawNumber}!`,
-            `🎉 Earn rewards when they make their first purchase!\n\n` +
-              `Type '0' to return to main menu or send another number to continue.`,
-            1000
-          );
+          let successMessage = `✅ Referral sent successfully to ${rawNumber}!\n\n`;
+
+          if (customer.foremanStatus?.isCommissionEligible) {
+            const commissionRate = customer.foremanStatus.commissionRate || 5;
+            successMessage += `💰 Earn ${commissionRate}% commission when they make their first purchase!\n\n`;
+          } else {
+            successMessage += `🎁 Earn rewards when they make their first purchase!\n\n`;
+          }
+
+          successMessage += `Type '0' to return to main menu or send another number to continue.`;
+          await sendSequentialMessages(phoneNumber, successMessage, 1000);
         } catch (error) {
           console.error("❌ Error in referral sending process:", error);
-
-          // Update contact status to failed
           newContact.status = "failed";
+          // ❌ DO NOT UPDATE customersReferred if sending failed
           await customer.save();
-
           await sendWhatsAppMessage(
             phoneNumber,
-            `❌ Error sending to ${rawNumber}.\n\n` +
-              `Please check the number and try again, or contact support.\n\n` +
-              `Send another contact number or type '0' for main menu.`
+            `❌ Error sending to ${rawNumber}.\n\nPlease check the number and try again, or contact support.\n\nSend another contact number or type '0' for main menu.`
           );
         }
         break;
 
+      // Enhanced order completion with direct referral commission processing
+      case "order_complete":
+        try {
+          // Prepare order data
+          const orderData = {
+            orderId:
+              customer.latestOrderId || "ORD" + Date.now().toString().slice(-8),
+            orderDate: new Date(),
+            items: customer.cart.items.map((item) => ({
+              ...item,
+              isDiscountedProduct: item.isDiscountedProduct || false,
+            })),
+            totalAmount:
+              customer.cart.totalAmount + (customer.cart.deliveryCharge || 0),
+            deliveryCharge: customer.cart.deliveryCharge || 0,
+            discounts: {
+              firstOrderDiscount: customer.cart.firstOrderDiscount || 0,
+              ecoDeliveryDiscount: customer.cart.ecoDeliveryDiscount || 0,
+              referralDiscount: customer.cart.referralDiscount || 0,
+            },
+            status: "order-confirmed",
+            paymentStatus: "paid",
+            paymentMethod:
+              customer.contextData?.paymentMethod || "Bank Transfer",
+            transactionId: customer.contextData?.transactionId,
+            deliveryAddress: customer.cart.deliveryAddress,
+            deliveryOption: customer.cart.deliveryOption,
+            deliveryLocation: customer.cart.deliveryLocation,
+          };
+
+          // Add order to shopping history
+          await customer.addToShoppingHistory(orderData);
+
+          // Process referral commission if customer was referred
+          let commissionResult = {
+            processed: false,
+            amount: 0,
+            referrerInfo: null,
+          };
+          if (customer.referralTracking?.primaryReferrer) {
+            commissionResult = await processReferralCommissionForOrder(
+              customer,
+              orderData
+            );
+          }
+
+          // Update first-time customer status
+          if (customer.isFirstTimeCustomer) {
+            customer.isFirstTimeCustomer = false;
+            await customer.save();
+          }
+
+          // Clear cart and update state
+          await customer.emptyCart();
+          await customer.updateConversationState("main_menu");
+
+          // Generate confirmation message
+          let confirmationMessage = `✅ *Order Confirmed!* ✅\n\n`;
+          confirmationMessage += `📦 Order ID: ${orderData.orderId}\n`;
+          confirmationMessage += `💰 Total Amount: ${formatRupiah(
+            orderData.totalAmount
+          )}\n`;
+          confirmationMessage += `🚚 Delivery: ${orderData.deliveryOption}\n`;
+          confirmationMessage += `📍 Location: ${orderData.deliveryLocation}\n\n`;
+
+          // Add referral commission info if processed
+          if (commissionResult.processed) {
+            confirmationMessage += `💰 Commission of ${formatRupiah(
+              commissionResult.amount
+            )} processed for referrer: ${
+              commissionResult.referrerInfo?.name
+            }\n\n`;
+          }
+
+          // Add first-time customer welcome message
+          if (customer.isFirstTimeCustomer) {
+            confirmationMessage += `🎉 Welcome to our family! This is your first order.\n\n`;
+          }
+
+          confirmationMessage += `📱 You can track your order by typing "5" in the main menu.\n\n`;
+          confirmationMessage += `Thank you for choosing us! 🙏`;
+
+          await sendWhatsAppMessage(phoneNumber, confirmationMessage);
+
+          // Log successful order processing
+          console.log(
+            `Order ${orderData.orderId} processed successfully for customer ${customer.name}`
+          );
+          if (commissionResult.processed) {
+            console.log(
+              `Commission of ${commissionResult.amount} processed for referrer ${commissionResult.referrerInfo?.name}`
+            );
+          }
+
+          // Send main menu after confirmation
+          setTimeout(async () => {
+            await sendMainMenu(phoneNumber, customer);
+          }, 2000);
+        } catch (error) {
+          console.error("Error completing order:", error);
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "❌ Error processing your order. Please contact support."
+          );
+          await customer.updateConversationState("main_menu");
+          await sendMainMenu(phoneNumber, customer);
+        }
+        break;
+
+        // ===================== HELPER FUNCTIONS =====================
+
+        // Function to create referral record when sending referral
+        async function createReferralRecord(
+          referrerCustomer,
+          referredPhoneNumber,
+          videoId
+        ) {
+          try {
+            // Normalize phone number
+            const normalizedPhone = referredPhoneNumber.replace(/\D/g, "");
+
+            console.log(
+              `🔄 Creating referral record for ${normalizedPhone} by ${referrerCustomer.name}`
+            );
+
+            // 🎯 SOLUTION 1: Store referral in a separate tracking array (not customersReferred)
+            // Initialize referral tracking if not exists
+            if (!referrerCustomer.referralTracking) {
+              referrerCustomer.referralTracking = {
+                totalReferralsSent: 0,
+                totalSuccessfulReferrals: 0,
+                totalCommissionEarned: 0,
+                lastReferralDate: new Date(),
+                pendingReferrals: [], // 📝 Store pending referrals here
+              };
+            }
+
+            // Initialize pendingReferrals array if not exists
+            if (!referrerCustomer.referralTracking.pendingReferrals) {
+              referrerCustomer.referralTracking.pendingReferrals = [];
+            }
+
+            // Check if this phone number is already in pending referrals
+            let existingPendingReferral =
+              referrerCustomer.referralTracking.pendingReferrals.find((ref) => {
+                const refPhone = ref.phoneNumber.replace(/\D/g, "");
+                return refPhone === normalizedPhone;
+              });
+
+            if (!existingPendingReferral) {
+              // Create new pending referral record
+              const newPendingReferral = {
+                phoneNumber: normalizedPhone,
+                referralDate: new Date(),
+                videoId: videoId,
+                status: "pending_registration",
+                dateShared: new Date(),
+              };
+
+              referrerCustomer.referralTracking.pendingReferrals.push(
+                newPendingReferral
+              );
+              referrerCustomer.referralTracking.totalReferralsSent += 1;
+              referrerCustomer.referralTracking.lastReferralDate = new Date();
+
+              console.log(`✅ Added new pending referral: ${normalizedPhone}`);
+              console.log(
+                `📊 Total pending referrals: ${referrerCustomer.referralTracking.pendingReferrals.length}`
+              );
+
+              // Save and verify
+              await referrerCustomer.save();
+              console.log(
+                `💾 Saved referrer customer with ${referrerCustomer.referralTracking.pendingReferrals.length} pending referrals`
+              );
+
+              // Double-check the save worked
+              const verifyCustomer = await Customer.findById(
+                referrerCustomer._id
+              );
+              console.log(
+                `🔍 Verification: Customer has ${
+                  verifyCustomer.referralTracking?.pendingReferrals?.length || 0
+                } pending referrals in database`
+              );
+
+              return {
+                success: true,
+                message: "Referral tracking initiated in pending referrals",
+                totalPendingReferrals:
+                  referrerCustomer.referralTracking.pendingReferrals.length,
+              };
+            } else {
+              console.log(
+                `⚠️ Customer ${normalizedPhone} already in pending referrals by ${referrerCustomer.name}`
+              );
+              return {
+                success: false,
+                message: "Customer already in pending referrals",
+                totalPendingReferrals:
+                  referrerCustomer.referralTracking.pendingReferrals.length,
+              };
+            }
+          } catch (error) {
+            console.error("❌ Error in createReferralRecord:", error);
+            return {
+              success: false,
+              error: error.message,
+            };
+          }
+        }
+
+        // Function to link referred customer when they register
+        async function linkReferredCustomerOnRegistration(
+          newCustomer,
+          referrerPhoneNumber
+        ) {
+          try {
+            // Find the referrer by phone number
+            const referrerCustomer = await Customer.findOne({
+              phoneNumber: { $regex: referrerPhoneNumber.replace(/\D/g, "") },
+            });
+
+            if (!referrerCustomer) {
+              console.log("Referrer not found during customer registration");
+              return false;
+            }
+
+            // Find the pending referral record
+            const normalizedNewCustomerPhone =
+              newCustomer.phoneNumber[0].replace(/\D/g, "");
+
+            // Look in pendingReferrals first
+            const pendingReferral =
+              referrerCustomer.referralTracking?.pendingReferrals?.find(
+                (ref) => {
+                  const refPhone = ref.phoneNumber.replace(/\D/g, "");
+                  return refPhone === normalizedNewCustomerPhone;
+                }
+              );
+
+            if (pendingReferral) {
+              // Initialize customersReferred array if not exists
+              if (!referrerCustomer.customersReferred) {
+                referrerCustomer.customersReferred = [];
+              }
+
+              // Move from pending to actual referral with proper ObjectId
+              const newReferralRecord = {
+                customerId: newCustomer._id, // ✅ Now we have a real ObjectId
+                customerName: newCustomer.name,
+                phoneNumber: normalizedNewCustomerPhone,
+                referralDate: pendingReferral.referralDate,
+                videoUsed: pendingReferral.videoId,
+                hasPlacedOrder: false,
+                firstOrderDate: null,
+                totalOrdersCount: 0,
+                totalSpentAmount: 0,
+                commissionGenerated: 0,
+              };
+
+              referrerCustomer.customersReferred.push(newReferralRecord);
+
+              // Remove from pending referrals
+              referrerCustomer.referralTracking.pendingReferrals =
+                referrerCustomer.referralTracking.pendingReferrals.filter(
+                  (ref) => {
+                    const refPhone = ref.phoneNumber.replace(/\D/g, "");
+                    return refPhone !== normalizedNewCustomerPhone;
+                  }
+                );
+
+              // Update the new customer's referral tracking
+              newCustomer.referralTracking = {
+                primaryReferrer: {
+                  customerId: referrerCustomer._id,
+                  customerName: referrerCustomer.name,
+                  phoneNumber: referrerCustomer.phoneNumber[0],
+                  referralDate: pendingReferral.referralDate,
+                  videoId: pendingReferral.videoId,
+                },
+                isReferred: true,
+              };
+
+              // Update referrer's successful referrals count
+              if (!referrerCustomer.referralTracking.totalSuccessfulReferrals) {
+                referrerCustomer.referralTracking.totalSuccessfulReferrals = 0;
+              }
+              referrerCustomer.referralTracking.totalSuccessfulReferrals += 1;
+
+              await referrerCustomer.save();
+              await newCustomer.save();
+
+              console.log(
+                `✅ Moved pending referral to customersReferred: ${newCustomer.name} linked to ${referrerCustomer.name}`
+              );
+              console.log(
+                `📊 Referrer now has ${referrerCustomer.customersReferred.length} confirmed referrals`
+              );
+
+              return true;
+            }
+
+            console.log(
+              `⚠️ No pending referral found for ${normalizedNewCustomerPhone}`
+            );
+            return false;
+          } catch (error) {
+            console.error("Error linking referred customer:", error);
+            return false;
+          }
+        }
+
+        // Function to process referral commission when referred customer places order
+        async function processReferralCommissionForOrder(
+          referredCustomer,
+          orderData
+        ) {
+          try {
+            // Check if customer was referred
+            const primaryReferrer =
+              referredCustomer.referralTracking?.primaryReferrer;
+            if (!primaryReferrer) {
+              return { processed: false, amount: 0, referrerInfo: null };
+            }
+
+            // Find the referrer customer
+            const referrerCustomer = await Customer.findById(
+              primaryReferrer.customerId
+            );
+            if (!referrerCustomer) {
+              console.log("Referrer customer not found");
+              return { processed: false, amount: 0, referrerInfo: null };
+            }
+
+            // Check if referrer is eligible for commission
+            if (!referrerCustomer.foremanStatus?.isCommissionEligible) {
+              console.log("Referrer not eligible for commission");
+              return {
+                processed: false,
+                amount: 0,
+                referrerInfo: referrerCustomer.name,
+              };
+            }
+
+            // Check if order date is after commission eligibility date
+            const eligibilityDate =
+              referrerCustomer.foremanStatus.commissionEligibilityDate;
+            const orderDate = new Date(orderData.orderDate);
+
+            if (eligibilityDate && orderDate < eligibilityDate) {
+              console.log("Order placed before commission eligibility date");
+              return {
+                processed: false,
+                amount: 0,
+                referrerInfo: referrerCustomer.name,
+              };
+            }
+
+            // Update referrer's customersReferred array
+            await updateReferrerRecord(
+              referrerCustomer,
+              referredCustomer,
+              orderData
+            );
+
+            // Calculate and add commission
+            const commissionAmount = await addCommissionEarned(
+              referrerCustomer,
+              orderData,
+              {
+                customerId: referredCustomer._id,
+                customerName: referredCustomer.name,
+              }
+            );
+
+            console.log(
+              `Commission of ${commissionAmount} processed for referrer ${referrerCustomer.name}`
+            );
+
+            return {
+              processed: true,
+              amount: commissionAmount,
+              referrerInfo: {
+                id: referrerCustomer._id,
+                name: referrerCustomer.name,
+                totalCommission:
+                  referrerCustomer.commissionTracking?.totalCommissionEarned ||
+                  0,
+              },
+            };
+          } catch (error) {
+            console.error("Error processing referral commission:", error);
+            return { processed: false, amount: 0, referrerInfo: null };
+          }
+        }
+
+        // Function to update referrer's customer record with new referral data
+        async function updateReferrerRecord(
+          referrerCustomer,
+          referredCustomer,
+          orderData
+        ) {
+          try {
+            // Initialize customersReferred array if not exists
+            if (!referrerCustomer.customersReferred) {
+              referrerCustomer.customersReferred = [];
+            }
+
+            // Find existing referral record
+            let referralRecord = referrerCustomer.customersReferred.find(
+              (r) => r.customerId === referredCustomer._id.toString()
+            );
+
+            if (referralRecord) {
+              // Update existing record
+              if (!referralRecord.hasPlacedOrder) {
+                referralRecord.hasPlacedOrder = true;
+                referralRecord.firstOrderDate = new Date();
+              }
+              referralRecord.totalOrdersCount =
+                (referralRecord.totalOrdersCount || 0) + 1;
+              referralRecord.totalSpentAmount =
+                (referralRecord.totalSpentAmount || 0) + orderData.totalAmount;
+            } else {
+              // Create new referral record
+              const primaryReferrer =
+                referredCustomer.referralTracking?.primaryReferrer;
+              referralRecord = {
+                customerId: referredCustomer._id.toString(),
+                customerName: referredCustomer.name,
+                phoneNumber: referredCustomer.phoneNumber[0],
+                referralDate: primaryReferrer?.referralDate || new Date(),
+                hasPlacedOrder: true,
+                firstOrderDate: new Date(),
+                totalOrdersCount: 1,
+                totalSpentAmount: orderData.totalAmount,
+                commissionGenerated: 0,
+              };
+              referrerCustomer.customersReferred.push(referralRecord);
+            }
+
+            // Calculate commission for this order
+            const eligibleAmount = orderData.items.reduce((sum, item) => {
+              return sum + (item.isDiscountedProduct ? 0 : item.totalPrice);
+            }, 0);
+
+            const commissionRate =
+              referrerCustomer.foremanStatus?.commissionRate || 5;
+            const orderCommission = (eligibleAmount * commissionRate) / 100;
+
+            referralRecord.commissionGenerated =
+              (referralRecord.commissionGenerated || 0) + orderCommission;
+
+            await referrerCustomer.save();
+          } catch (error) {
+            console.error("Error updating referrer record:", error);
+          }
+        }
+
+        // Function to add commission earned to referrer
+        async function addCommissionEarned(
+          referrerCustomer,
+          orderData,
+          referredCustomerInfo
+        ) {
+          try {
+            // Calculate commission amount
+            const eligibleAmount = orderData.items.reduce((sum, item) => {
+              return sum + (item.isDiscountedProduct ? 0 : item.totalPrice);
+            }, 0);
+
+            const commissionRate =
+              referrerCustomer.foremanStatus?.commissionRate || 5;
+            const commissionAmount = (eligibleAmount * commissionRate) / 100;
+
+            // Initialize commission tracking if not exists
+            if (!referrerCustomer.commissionTracking) {
+              referrerCustomer.commissionTracking = {
+                totalCommissionEarned: 0,
+                availableCommission: 0,
+                paidCommission: 0,
+                commissionHistory: [],
+              };
+            }
+
+            // Add commission
+            referrerCustomer.commissionTracking.totalCommissionEarned +=
+              commissionAmount;
+            referrerCustomer.commissionTracking.availableCommission +=
+              commissionAmount;
+
+            // Add commission history record
+            referrerCustomer.commissionTracking.commissionHistory.push({
+              type: "earned",
+              amount: commissionAmount,
+              date: new Date(),
+              relatedOrderId: orderData.orderId,
+              referredCustomerId: referredCustomerInfo.customerId.toString(),
+              referredCustomerName: referredCustomerInfo.customerName,
+              orderAmount: orderData.totalAmount,
+              eligibleAmount: eligibleAmount,
+              commissionRate: commissionRate,
+              isPaid: false,
+            });
+
+            await referrerCustomer.save();
+            return commissionAmount;
+          } catch (error) {
+            console.error("Error adding commission earned:", error);
+            return 0;
+          }
+        }
+
+        // Function to get referral statistics for a customer
+        async function getReferralStatistics(customerId) {
+          try {
+            const customer = await Customer.findById(customerId);
+            if (!customer) return null;
+
+            const stats = {
+              totalReferrals: customer.customersReferred?.length || 0,
+              successfulReferrals: 0,
+              pendingReferrals: 0,
+              totalCommissionEarned:
+                customer.commissionTracking?.totalCommissionEarned || 0,
+              availableCommission:
+                customer.commissionTracking?.availableCommission || 0,
+              totalOrdersFromReferrals: 0,
+              totalRevenueFromReferrals: 0,
+            };
+
+            if (customer.customersReferred) {
+              customer.customersReferred.forEach((ref) => {
+                if (ref.hasPlacedOrder) {
+                  stats.successfulReferrals++;
+                  stats.totalOrdersFromReferrals += ref.totalOrdersCount || 0;
+                  stats.totalRevenueFromReferrals += ref.totalSpentAmount || 0;
+                } else {
+                  stats.pendingReferrals++;
+                }
+              });
+            }
+
+            return stats;
+          } catch (error) {
+            console.error("Error getting referral statistics:", error);
+            return null;
+          }
+        }
+
+        // Helper function to format currency
+        function formatRupiah(amount) {
+          return new Intl.NumberFormat("id-ID", {
+            style: "currency",
+            currency: "IDR",
+            minimumFractionDigits: 0,
+            maximumFractionDigits: 0,
+          }).format(amount);
+        }
         // =============================================================================
         // HELPER FUNCTION - Send referral to contacts using UltraMsg
         // =============================================================================
@@ -8760,7 +10650,7 @@ async function processChatMessage(phoneNumber, text, message) {
             if (introVideoSent) {
               console.log("✅ Introduction video sent successfully");
               // Add delay between videos to ensure proper delivery
-              await new Promise((resolve) => setTimeout(resolve, 3000)); // Increased delay
+              await new Promise((resolve) => setTimeout(resolve, 3000));
             } else {
               console.log(
                 "⚠️ No introduction video available, proceeding with referral only"
@@ -8800,24 +10690,19 @@ async function processChatMessage(phoneNumber, text, message) {
 
             console.log("✅ Referral video sent successfully");
 
-            // STEP 3: Send follow-up welcome message
+            // STEP 3: Send welcome message (FIRST PART)
             await new Promise((resolve) => setTimeout(resolve, 2000));
 
-            const welcomeMessage =
+            const welcomeMessage1 =
               `🙏 Welcome to our family!\n\n` +
-              `📞 ${customer.name} (${customer.phoneNumber}) referred you\n\n` +
-              `🎁 Your discount code: ${
-                customer.referralCode || "WELCOME10"
-              }\n\n` +
-              `💬 Reply with hi to start or visit our website!\n\n` +
-              `Thank you for trusting us! 🌟`;
+              `🎁 Your discount code: ${customer.referralCode || "WELCOME10"}`;
 
             await axios.post(
               `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/chat`,
               new URLSearchParams({
                 token: ULTRAMSG_CONFIG.token,
                 to: contact.phoneNumber + "@c.us",
-                body: welcomeMessage,
+                body: welcomeMessage1,
               }),
               {
                 headers: {
@@ -8826,7 +10711,82 @@ async function processChatMessage(phoneNumber, text, message) {
               }
             );
 
-            console.log("✅ Welcome message sent successfully");
+            console.log("✅ Welcome message 1 sent successfully");
+
+            // STEP 4: Send second message (CALL TO ACTION)
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+
+            const welcomeMessage2 =
+              `💬 Reply with "hi" to start shopping or visit our website!\n\n` +
+              `Thank you for trusting us! 🌟`;
+
+            await axios.post(
+              `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/chat`,
+              new URLSearchParams({
+                token: ULTRAMSG_CONFIG.token,
+                to: contact.phoneNumber + "@c.us",
+                body: welcomeMessage2,
+              }),
+              {
+                headers: {
+                  "Content-Type": "application/x-www-form-urlencoded",
+                },
+              }
+            );
+
+            const welcomeMessage3 = `📞 ${customer.name} (${customer.phoneNumber[0]}) referred you\n\n`;
+
+            await axios.post(
+              `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/chat`,
+              new URLSearchParams({
+                token: ULTRAMSG_CONFIG.token,
+                to: contact.phoneNumber + "@c.us",
+                body: welcomeMessage3,
+              }),
+              {
+                headers: {
+                  "Content-Type": "application/x-www-form-urlencoded",
+                },
+              }
+            );
+
+            console.log("✅ Welcome message 2 and 3 sent successfully");
+            return true;
+          } catch (error) {
+            console.error("❌ Error in sendReferralToContact:", {
+              error: error.message,
+              stack: error.stack,
+              contactPhone: contact.phoneNumber,
+              customerName: customer.name,
+            });
+            throw new Error("Failed to send complete referral package");
+          }
+        }
+        // ─── UPDATED sendReferralToContact - Sends Introduction Video First, Then Referral ───────────────────────────
+        async function sendcustomizedmassages(customer, video, contact) {
+          try {
+            console.log(
+              `🚀 Starting referral process for contact: ${contact.phoneNumber}`
+            );
+
+            const welcomeMessage =
+              `📞 ${customer.name} (${customer.phoneNumber}) referred you\n\n` +
+              `💬 Reply with hi to start or visit our website!\n\n` +
+              (await axios.post(
+                `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/chat`,
+                new URLSearchParams({
+                  token: ULTRAMSG_CONFIG.token,
+                  to: contact.phoneNumber + "@c.us",
+                  body: welcomeMessage,
+                }),
+                {
+                  headers: {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                  },
+                }
+              ));
+
+            console.log("✅ customized refferal  message sent successfully");
             return true;
           } catch (error) {
             console.error("❌ Error in sendReferralToContact:", {
@@ -9493,6 +11453,69 @@ async function getDiscountProductsForCategory(category) {
   }
 }
 
+async function recordCartOrder(customer) {
+  // Create cart-not-paid order immediately when items are added
+  const seq = await getNextSequence("orderId");
+  const orderId = "ORD" + (10000 + seq);
+
+  // Apply first time customer discount if applicable
+  let firstOrderDiscount = 0;
+  if (customer.isFirstTimeCustomer && customer.orderHistory.length === 0) {
+    firstOrderDiscount = Math.round(customer.cart.totalAmount * 0.1);
+    customer.cart.firstOrderDiscount = firstOrderDiscount;
+  }
+
+  // Apply eco delivery discount if applicable
+  let ecoDeliveryDiscount = 0;
+  if (customer.cart.deliverySpeed === "eco") {
+    ecoDeliveryDiscount = Math.round(customer.cart.totalAmount * 0.05);
+    customer.cart.ecoDeliveryDiscount = ecoDeliveryDiscount;
+  }
+
+  // FIX: Calculate final total including delivery and discounts
+  const finalTotal =
+    customer.cart.totalAmount +
+    (customer.cart.deliveryCharge || 0) -
+    firstOrderDiscount -
+    ecoDeliveryDiscount;
+
+  const cartOrder = {
+    orderId,
+    items: [...customer.cart.items],
+    // FIX: Save the complete calculated total as totalAmount
+    totalAmount: finalTotal,
+    deliveryType: customer.cart.deliveryType || "truck",
+    deliverySpeed: customer.cart.deliverySpeed || "normal",
+    deliveryOption: customer.cart.deliveryOption || "Normal Delivery",
+    deliveryLocation: customer.cart.deliveryLocation || "",
+    deliveryTimeFrame: customer.cart.deliveryTimeFrame || "",
+    deliveryCharge: customer.cart.deliveryCharge || 0,
+    firstOrderDiscount: firstOrderDiscount,
+    ecoDeliveryDiscount: ecoDeliveryDiscount,
+    deliveryAddress: customer.cart.deliveryAddress || {},
+    paymentStatus: "pending",
+    status: "cart-not-paid",
+    paymentMethod: "Bank Transfer",
+    orderDate: new Date(),
+  };
+
+  // Replace existing cart order or add new one
+  const existingIdx = customer.orderHistory.findIndex(
+    (o) => o.status === "cart-not-paid"
+  );
+
+  if (existingIdx >= 0) {
+    customer.orderHistory[existingIdx] = cartOrder;
+  } else {
+    customer.orderHistory.push(cartOrder);
+  }
+
+  customer.latestOrderId = orderId;
+  customer.currentOrderStatus = "cart-not-paid";
+
+  await customer.save();
+  return orderId;
+}
 // Simplified function to get discount product by number
 async function getDiscountProductByNumber(number) {
   console.log(`Attempting to retrieve product for number: ${number}`);
@@ -9685,6 +11708,7 @@ function formatRupiah(amount) {
   return `Rp ${amount}`;
 }
 
+// ENHANCED proceedToCheckout function
 async function proceedToCheckout(phoneNumber, customer) {
   if (
     !customer.cart ||
@@ -9699,43 +11723,129 @@ async function proceedToCheckout(phoneNumber, customer) {
     return;
   }
 
+  // Apply first time customer discount if applicable
+  if (customer.isFirstTimeCustomer && customer.orderHistory.length === 0) {
+    customer.cart.firstOrderDiscount = Math.round(
+      customer.cart.totalAmount * 0.1
+    );
+    customer.save();
+  }
+
   // Start checkout process with delivery options
   await customer.updateConversationState("checkout_delivery");
   await sendWhatsAppMessage(
     phoneNumber,
-    `Please choose your delivery option
-  
-  🚚 -- Truck Delivery ------------------------
-  1. Normal Delivery - Arrives in 3-5 days
-  2. Speed Delivery - Arrives within 24-48 hours (+$50 extra)
-  3. Early Morning Delivery - 4:00 AM–9:00 AM (+$50 extra)
-  4. ⏰🔖 Eco Delivery - 8-10 days from now (5% discount on your total bill!)
-  5. I will pickup on my own
-  
-  🛵 -- Scooter Delivery (Right Now) ---------------
-  6. Normal Scooter Delivery - 20k delivery within 2.5 hours
-  7. Direct Speed Scooter Delivery - 40k delivery within 30min–1 hour`
-  );
-
-  await customer.addToChatHistory(
-    "Please choose your delivery option:\n1. Normal Delivery\n2. Speed delivery\n3. Early Morning delivery\n4. Eco Delivery (5% discount)\n5. I will pickup on my own\n6. Normal Scooter Delivery\n7. Direct Speed Scooter Delivery",
-    "bot"
+    `🚚 *Choose Your Delivery Option* 🚚\n\n` +
+      `🚛 **-- Truck Delivery --**\n` +
+      `1. Normal Delivery - Arrives in 3-5 days (FREE)\n` +
+      `2. Speed Delivery - Arrives within 24-48 hours (+Rp 50,000)\n` +
+      `3. Early Morning Delivery - 4:00 AM–9:00 AM (+Rp 50,000)\n` +
+      `4. 🌱 Eco Delivery - 8-10 days (5% discount on total!)\n` +
+      `5. 🏪 Self Pickup - Pick up from our store\n\n` +
+      `🛵 **-- Scooter Delivery (Fast) --**\n` +
+      `6. Normal Scooter - Rp 20,000 within 2.5 hours\n` +
+      `7. Speed Scooter - Rp 40,000 within 30-60 minutes\n\n` +
+      `${
+        customer.cart.firstOrderDiscount > 0
+          ? `🎉 *First Order Discount Applied!* (-${formatRupiah(
+              customer.cart.firstOrderDiscount
+            )})\n\n`
+          : ""
+      }` +
+      `Select your preferred delivery option (1-7):`
   );
 }
 
-// Updated sendOrderSummary to match the current Customer schema
+// UPDATED goToCart function with proper total calculation
+async function goToCart(phoneNumber, customer) {
+  if (
+    !customer.cart ||
+    !customer.cart.items ||
+    customer.cart.items.length === 0
+  ) {
+    await sendWhatsAppMessage(
+      phoneNumber,
+      "Your cart is empty. Start shopping to add items to your cart!"
+    );
+    await sendMainMenu(phoneNumber, customer);
+    return;
+  }
+
+  // Calculate totals
+  const subtotal = customer.cart.totalAmount;
+  const deliveryCharge = customer.cart.deliveryCharge || 0;
+  const firstOrderDiscount = customer.cart.firstOrderDiscount || 0;
+  const ecoDeliveryDiscount = customer.cart.ecoDeliveryDiscount || 0;
+  const finalTotal =
+    subtotal + deliveryCharge - firstOrderDiscount - ecoDeliveryDiscount;
+
+  // Format cart message
+  let cartMessage = `🛒 *Your Shopping Cart* 🛒 (${customer.cart.items.length} items)\n\n`;
+
+  customer.cart.items.forEach((item, index) => {
+    cartMessage += `${index + 1}. ${item.productName}`;
+    if (item.weight) cartMessage += ` (${item.weight})`;
+    cartMessage += `\n   Quantity: ${item.quantity}\n`;
+    cartMessage += `   Price: ${formatRupiah(item.price)} each\n`;
+    cartMessage += `   Total: ${formatRupiah(item.totalPrice)}\n\n`;
+  });
+
+  cartMessage += `Subtotal: ${formatRupiah(subtotal)}\n`;
+
+  if (deliveryCharge > 0) {
+    cartMessage += `Delivery Charge: ${formatRupiah(deliveryCharge)}\n`;
+  }
+
+  if (firstOrderDiscount > 0) {
+    cartMessage += `First Order Discount (10%): -${formatRupiah(
+      firstOrderDiscount
+    )}\n`;
+  }
+
+  if (ecoDeliveryDiscount > 0) {
+    cartMessage += `Eco Delivery Discount (5%): -${formatRupiah(
+      ecoDeliveryDiscount
+    )}\n`;
+  }
+
+  cartMessage += `\n*Final Total: ${formatRupiah(finalTotal)}*\n\n`;
+
+  cartMessage += "What would you like to do next?\n\n";
+  cartMessage += "- Delete an item\n";
+  cartMessage += "- Empty my cart fully\n";
+  cartMessage += "- Proceed to payment\n";
+  cartMessage += "- Go back to menu\n";
+  cartMessage += "- View product details\n";
+
+  await sendWhatsAppMessage(phoneNumber, cartMessage);
+  await customer.updateConversationState("cart_view");
+  await customer.addToChatHistory(cartMessage, "bot");
+}
+
 async function sendOrderSummary(phoneNumber, customer) {
-  // 1) Update order status to "order-made-not-paid"
+  // 1) Calculate totals properly
+  const subtotal = customer.cart.totalAmount;
+  const deliveryCharge = customer.cart.deliveryCharge || 0;
+  const firstOrderDiscount = customer.cart.firstOrderDiscount || 0;
+  const ecoDeliveryDiscount = customer.cart.ecoDeliveryDiscount || 0;
+
+  // Final total calculation (this is the correct total bill)
+  const finalTotal =
+    subtotal + deliveryCharge - firstOrderDiscount - ecoDeliveryDiscount;
+
+  // 2) Update order status and SAVE THE CORRECT TOTAL AMOUNT
   const idx = customer.orderHistory.findIndex(
     (o) => o.orderId === customer.latestOrderId
   );
   if (idx >= 0) {
     customer.orderHistory[idx].status = "order-made-not-paid";
+    // FIX: Save the final calculated total as totalAmount (not just subtotal)
+    customer.orderHistory[idx].totalAmount = finalTotal;
     customer.currentOrderStatus = "order-made-not-paid";
     await customer.save();
   }
 
-  // 2) Build the summary message
+  // 3) Build the summary message
   let message = "Your total bill will be:\n\n";
 
   // Line items
@@ -9751,26 +11861,36 @@ async function sendOrderSummary(phoneNumber, customer) {
   });
 
   // Subtotal
-  message += `\nSubtotal for items: ${formatRupiah(customer.cart.totalAmount)}`;
+  message += `\nSubtotal for items: ${formatRupiah(subtotal)}`;
 
   // Delivery charges
-  if (customer.cart.deliveryCharge > 0) {
-    message += `\nDelivery charges: ${formatRupiah(
-      customer.cart.deliveryCharge
-    )}`;
+  if (deliveryCharge > 0) {
+    message += `\nDelivery charges: ${formatRupiah(deliveryCharge)}`;
   } else {
     message += `\nDelivery: Free`;
   }
 
-  // Eco delivery discount
-  if (customer.cart.ecoDeliveryDiscount > 0) {
-    message += `\nEco Delivery Discount (5%): -${formatRupiah(
-      customer.cart.ecoDeliveryDiscount
+  // First order discount
+  if (firstOrderDiscount > 0) {
+    message += `\nFirst Order Discount (10%): -${formatRupiah(
+      firstOrderDiscount
     )}`;
   }
 
-  // Delivery summary
+  // Eco delivery discount
+  if (ecoDeliveryDiscount > 0) {
+    message += `\nEco Delivery Discount (5%): -${formatRupiah(
+      ecoDeliveryDiscount
+    )}`;
+  }
+
+  // Delivery summary with time frame
   message += `\n\nDelivery option: ${customer.cart.deliveryOption}`;
+
+  if (customer.cart.deliveryTimeFrame) {
+    message += `\nDelivery time: ${customer.cart.deliveryTimeFrame}`;
+  }
+
   // Show delivery type and area unless it's self_pickup
   if (
     customer.cart.deliveryType &&
@@ -9791,16 +11911,13 @@ async function sendOrderSummary(phoneNumber, customer) {
     `4. Cancel and empty cart`;
 
   // Final total
-  const finalTotal =
-    customer.cart.totalAmount +
-    customer.cart.deliveryCharge -
-    (customer.cart.ecoDeliveryDiscount || 0);
   message += `\n\nTotal bill: ${formatRupiah(finalTotal)}`;
 
   // Send message and log to chat history
   await sendWhatsAppMessage(phoneNumber, message);
   await customer.addToChatHistory(message, "bot");
 }
+// Additional helper functions for API endpoints
 
 // Test endpoint for Ultramsg
 router.get("/test-message", async (req, res) => {

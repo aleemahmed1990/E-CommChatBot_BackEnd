@@ -56,13 +56,131 @@ router.get("/customers", async (req, res) => {
                 phoneNumber: { $arrayElemAt: ["$phoneNumber", 0] },
                 email: "$contextData.email",
                 currentOrderStatus: 1,
+                conversationState: 1,
                 createdAt: 1,
                 lastInteraction: 1,
-                totalOrders: { $size: "$orderHistory" },
-                totalSpent: {
-                  $sum: "$orderHistory.totalAmount",
+                // Calculate total orders from both orderHistory and shoppingHistory
+                totalOrders: {
+                  $add: [
+                    { $size: { $ifNull: ["$orderHistory", []] } },
+                    { $size: { $ifNull: ["$shoppingHistory", []] } },
+                  ],
                 },
-                conversationState: 1,
+                // Calculate total spent from both arrays
+                totalSpent: {
+                  $add: [
+                    { $sum: { $ifNull: ["$orderHistory.totalAmount", []] } },
+                    { $sum: { $ifNull: ["$shoppingHistory.totalAmount", []] } },
+                  ],
+                },
+                // Get all customer schema fields
+                addresses: 1,
+                payerNames: 1,
+                chatHistory: { $size: { $ifNull: ["$chatHistory", []] } },
+                contextData: 1,
+                preferences: 1,
+                loyaltyPoints: 1,
+                discountEligibility: 1,
+                location: 1,
+                verificationStatus: 1,
+                notes: 1,
+                tags: 1,
+                source: 1,
+                referralCode: 1,
+                isBlocked: 1,
+                blockedReason: 1,
+                blockedAt: 1,
+                unblockRequests: 1,
+                // Calculate customer lifetime value
+                lifetimeValue: {
+                  $add: [
+                    { $sum: { $ifNull: ["$orderHistory.totalAmount", []] } },
+                    { $sum: { $ifNull: ["$shoppingHistory.totalAmount", []] } },
+                  ],
+                },
+                // Get last order date
+                lastOrderDate: {
+                  $max: {
+                    $concatArrays: [
+                      { $ifNull: ["$orderHistory.orderDate", []] },
+                      { $ifNull: ["$shoppingHistory.orderDate", []] },
+                    ],
+                  },
+                },
+                // Customer segmentation data
+                segment: {
+                  $switch: {
+                    branches: [
+                      {
+                        case: {
+                          $gte: [
+                            {
+                              $add: [
+                                {
+                                  $sum: {
+                                    $ifNull: ["$orderHistory.totalAmount", []],
+                                  },
+                                },
+                                {
+                                  $sum: {
+                                    $ifNull: [
+                                      "$shoppingHistory.totalAmount",
+                                      [],
+                                    ],
+                                  },
+                                },
+                              ],
+                            },
+                            10000,
+                          ],
+                        },
+                        then: "VIP",
+                      },
+                      {
+                        case: {
+                          $gte: [
+                            {
+                              $add: [
+                                {
+                                  $sum: {
+                                    $ifNull: ["$orderHistory.totalAmount", []],
+                                  },
+                                },
+                                {
+                                  $sum: {
+                                    $ifNull: [
+                                      "$shoppingHistory.totalAmount",
+                                      [],
+                                    ],
+                                  },
+                                },
+                              ],
+                            },
+                            5000,
+                          ],
+                        },
+                        then: "Premium",
+                      },
+                      {
+                        case: {
+                          $gt: [
+                            {
+                              $add: [
+                                { $size: { $ifNull: ["$orderHistory", []] } },
+                                {
+                                  $size: { $ifNull: ["$shoppingHistory", []] },
+                                },
+                              ],
+                            },
+                            0,
+                          ],
+                        },
+                        then: "Regular",
+                      },
+                    ],
+                    default: "New",
+                  },
+                },
               },
             },
           ],
@@ -91,7 +209,7 @@ router.get("/customers", async (req, res) => {
 });
 
 // ─── GET /api/customers/:id ─────────────────────────────
-// Get single customer details
+// Get single customer details with complete schema information
 router.get("/customers/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -102,20 +220,32 @@ router.get("/customers/:id", async (req, res) => {
       return res.status(404).json({ error: "Customer not found" });
     }
 
-    // Calculate statistics
-    const totalOrders = customer.orderHistory.length;
-    const completedOrders = customer.orderHistory.filter(
+    // Combine orders from both orderHistory and shoppingHistory
+    const allOrders = [
+      ...(customer.orderHistory || []),
+      ...(customer.shoppingHistory || []),
+    ];
+
+    // Calculate comprehensive statistics
+    const totalOrders = allOrders.length;
+    const completedOrders = allOrders.filter(
       (order) => order.status === "order-complete"
     ).length;
-    const cancelledOrders = customer.orderHistory.filter(
-      (order) => order.status === "order-refunded"
+    const cancelledOrders = allOrders.filter(
+      (order) =>
+        order.status === "order-refunded" || order.status === "order-cancelled"
+    ).length;
+    const pendingOrders = allOrders.filter((order) =>
+      ["order-made-not-paid", "pay-not-confirmed", "order-processing"].includes(
+        order.status
+      )
     ).length;
 
     // Calculate spending by year
     const currentYear = new Date().getFullYear();
     const lastYear = currentYear - 1;
 
-    const spending2024 = customer.orderHistory
+    const spending2024 = allOrders
       .filter(
         (order) =>
           order.orderDate &&
@@ -123,7 +253,7 @@ router.get("/customers/:id", async (req, res) => {
       )
       .reduce((sum, order) => sum + (order.totalAmount || 0), 0);
 
-    const spending2023 = customer.orderHistory
+    const spending2023 = allOrders
       .filter(
         (order) =>
           order.orderDate &&
@@ -131,17 +261,21 @@ router.get("/customers/:id", async (req, res) => {
       )
       .reduce((sum, order) => sum + (order.totalAmount || 0), 0);
 
-    const lifetimeSpending = customer.orderHistory.reduce(
+    const lifetimeSpending = allOrders.reduce(
       (sum, order) => sum + (order.totalAmount || 0),
       0
     );
 
+    // Calculate average order value
+    const averageOrderValue =
+      totalOrders > 0 ? lifetimeSpending / totalOrders : 0;
+
     // Get most ordered products
     const productCounts = {};
-    customer.orderHistory.forEach((order) => {
-      order.items.forEach((item) => {
+    allOrders.forEach((order) => {
+      (order.items || []).forEach((item) => {
         productCounts[item.productName] =
-          (productCounts[item.productName] || 0) + item.quantity;
+          (productCounts[item.productName] || 0) + (item.quantity || 0);
       });
     });
 
@@ -150,8 +284,8 @@ router.get("/customers/:id", async (req, res) => {
       .slice(0, 10)
       .map(([name, count]) => ({ name, count }));
 
-    // Get recent orders (last 20)
-    const recentOrders = customer.orderHistory
+    // Get recent orders (last 20) from combined array
+    const recentOrders = allOrders
       .sort((a, b) => new Date(b.orderDate) - new Date(a.orderDate))
       .slice(0, 20)
       .map((order) => ({
@@ -159,32 +293,115 @@ router.get("/customers/:id", async (req, res) => {
         orderDate: order.orderDate,
         totalAmount: order.totalAmount,
         status: order.status,
-        items: order.items,
+        items: order.items || [],
         deliveryAddress: order.deliveryAddress,
+        paymentMethod: order.paymentMethod,
+        deliveryType: order.deliveryType,
       }));
 
+    // Calculate customer segment
+    let segment = "New";
+    if (lifetimeSpending >= 10000) segment = "VIP";
+    else if (lifetimeSpending >= 5000) segment = "Premium";
+    else if (totalOrders > 0) segment = "Regular";
+
+    // Get last order date
+    const lastOrderDate =
+      allOrders.length > 0
+        ? new Date(
+            Math.max(...allOrders.map((order) => new Date(order.orderDate)))
+          )
+        : null;
+
+    // Days since last order
+    const daysSinceLastOrder = lastOrderDate
+      ? Math.floor((new Date() - lastOrderDate) / (1000 * 60 * 60 * 24))
+      : null;
+
+    // Customer status analysis
+    const isActive = daysSinceLastOrder !== null && daysSinceLastOrder < 30;
+    const isAtRisk = daysSinceLastOrder !== null && daysSinceLastOrder > 90;
+
     const customerData = {
+      // Basic Info
       _id: customer._id,
       name: customer.name,
-      phoneNumber: customer.phoneNumber,
+      phoneNumber: customer.phoneNumber || [],
       email: customer.contextData?.email || null,
+
+      // Order Status
       currentOrderStatus: customer.currentOrderStatus,
       conversationState: customer.conversationState,
+
+      // Timestamps
       createdAt: customer.createdAt,
       lastInteraction: customer.lastInteraction,
-      addresses: customer.addresses,
+
+      // Addresses and Payment Info
+      addresses: customer.addresses || [],
+      payerNames: customer.payerNames || [],
+
+      // Chat and Communication
+      chatHistory: customer.chatHistory || [],
+      chatHistoryCount: (customer.chatHistory || []).length,
+
+      // Context and Preferences
+      contextData: customer.contextData || {},
+      preferences: customer.preferences || {},
+
+      // Loyalty and Rewards
+      loyaltyPoints: customer.loyaltyPoints || 0,
+      discountEligibility: customer.discountEligibility || {},
+
+      // Location
+      location: customer.location || {},
+
+      // Verification and Status
+      verificationStatus: customer.verificationStatus || "unverified",
+      isBlocked: customer.isBlocked || false,
+      blockedReason: customer.blockedReason || null,
+      blockedAt: customer.blockedAt || null,
+
+      // Notes and Tags
+      notes: customer.notes || [],
+      tags: customer.tags || [],
+
+      // Marketing
+      source: customer.source || "unknown",
+      referralCode: customer.referralCode || null,
+
+      // Unblock Requests
+      unblockRequests: customer.unblockRequests || [],
+
+      // Order Statistics
       statistics: {
         totalOrders,
         completedOrders,
         cancelledOrders,
+        pendingOrders,
+        averageOrderValue: Math.round(averageOrderValue * 100) / 100,
         spending: {
           year2023: spending2023,
           year2024: spending2024,
           lifetime: lifetimeSpending,
         },
+        segment,
+        isActive,
+        isAtRisk,
+        daysSinceLastOrder,
+        lastOrderDate,
       },
+
+      // Top Products
       topProducts,
+
+      // Recent Orders
       recentOrders,
+
+      // Order History (complete)
+      orderHistory: customer.orderHistory || [],
+      shoppingHistory: customer.shoppingHistory || [],
+      allOrders: allOrders,
     };
 
     res.json(customerData);
@@ -195,16 +412,57 @@ router.get("/customers/:id", async (req, res) => {
 });
 
 // ─── PUT /api/customers/:id ─────────────────────────────
-// Update customer information
+// Update customer information with support for all schema fields
 router.put("/customers/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, phoneNumber, email } = req.body;
+    const {
+      name,
+      phoneNumber,
+      email,
+      addresses,
+      preferences,
+      notes,
+      tags,
+      loyaltyPoints,
+      verificationStatus,
+      contextData,
+      payerNames,
+    } = req.body;
 
     const updateData = {};
+
+    // Basic info updates
     if (name) updateData.name = name;
-    if (phoneNumber) updateData.phoneNumber = [phoneNumber];
+    if (phoneNumber) {
+      updateData.phoneNumber = Array.isArray(phoneNumber)
+        ? phoneNumber
+        : [phoneNumber];
+    }
     if (email) updateData["contextData.email"] = email;
+
+    // Address updates
+    if (addresses) updateData.addresses = addresses;
+
+    // Preferences and customization
+    if (preferences) updateData.preferences = preferences;
+    if (notes) updateData.notes = notes;
+    if (tags) updateData.tags = tags;
+    if (payerNames) updateData.payerNames = payerNames;
+
+    // Loyalty and verification
+    if (loyaltyPoints !== undefined) updateData.loyaltyPoints = loyaltyPoints;
+    if (verificationStatus) updateData.verificationStatus = verificationStatus;
+
+    // Context data (merge with existing)
+    if (contextData) {
+      Object.keys(contextData).forEach((key) => {
+        updateData[`contextData.${key}`] = contextData[key];
+      });
+    }
+
+    // Update last interaction
+    updateData.lastInteraction = new Date();
 
     const customer = await Customer.findByIdAndUpdate(
       id,
@@ -228,7 +486,7 @@ router.put("/customers/:id", async (req, res) => {
 router.post("/customers/:id/notes", async (req, res) => {
   try {
     const { id } = req.params;
-    const { note, employeeName } = req.body;
+    const { note, employeeName, noteType = "general" } = req.body;
 
     if (!note) {
       return res.status(400).json({ error: "Note is required" });
@@ -239,13 +497,23 @@ router.post("/customers/:id/notes", async (req, res) => {
       return res.status(404).json({ error: "Customer not found" });
     }
 
-    // Add note to chat history
-    const noteMessage = `${employeeName || "Admin"}: ${note}`;
-    customer.chatHistory.push({
-      message: noteMessage,
-      sender: "bot", // Using bot sender for admin notes
-      timestamp: new Date(),
-    });
+    // Add note to notes array if it exists, otherwise add to chat history
+    if (customer.notes && Array.isArray(customer.notes)) {
+      customer.notes.push({
+        content: note,
+        addedBy: employeeName || "Admin",
+        addedAt: new Date(),
+        type: noteType,
+      });
+    } else {
+      // Fallback to chat history for backwards compatibility
+      const noteMessage = `${employeeName || "Admin"}: ${note}`;
+      customer.chatHistory.push({
+        message: noteMessage,
+        sender: "bot", // Using bot sender for admin notes
+        timestamp: new Date(),
+      });
+    }
 
     customer.lastInteraction = new Date();
     await customer.save();
@@ -258,7 +526,7 @@ router.post("/customers/:id/notes", async (req, res) => {
 });
 
 // ─── GET /api/customers/:id/orders ──────────────────────
-// Get customer orders with pagination and filtering
+// Get customer orders with pagination and filtering (from both order arrays)
 router.get("/customers/:id/orders", async (req, res) => {
   try {
     const { id } = req.params;
@@ -269,7 +537,11 @@ router.get("/customers/:id/orders", async (req, res) => {
       return res.status(404).json({ error: "Customer not found" });
     }
 
-    let orders = customer.orderHistory;
+    // Combine orders from both arrays
+    let orders = [
+      ...(customer.orderHistory || []),
+      ...(customer.shoppingHistory || []),
+    ];
 
     // Filter by status if provided
     if (status && status !== "All") {
@@ -321,16 +593,20 @@ router.get("/customers/:id/chat", async (req, res) => {
 });
 
 // ─── DELETE /api/customers/:id ──────────────────────────
-// Delete customer (soft delete by updating status)
+// Block customer (soft delete by updating status)
 router.delete("/customers/:id", async (req, res) => {
   try {
     const { id } = req.params;
+    const { reason = "Admin action" } = req.body;
 
     const customer = await Customer.findByIdAndUpdate(
       id,
       {
         $set: {
           conversationState: "blocked",
+          isBlocked: true,
+          blockedReason: reason,
+          blockedAt: new Date(),
           lastInteraction: new Date(),
         },
       },
@@ -359,6 +635,9 @@ router.put("/customers/:id/unblock", async (req, res) => {
       {
         $set: {
           conversationState: "new",
+          isBlocked: false,
+          blockedReason: null,
+          blockedAt: null,
           lastInteraction: new Date(),
         },
       },
@@ -376,92 +655,208 @@ router.put("/customers/:id/unblock", async (req, res) => {
   }
 });
 
-// ─── GET /api/orders ─────────────────────────────────
-// list + filter + paginate orders
-router.get("/orders", async (req, res) => {
+// ─── PUT /api/customers/:id/loyalty ─────────────────────
+// Update customer loyalty points
+router.put("/customers/:id/loyalty", async (req, res) => {
   try {
-    const {
-      status,
-      search,
-      page = 1,
-      limit = 10,
-      startDate,
-      endDate,
-      deliveryType,
-    } = req.query;
-    const match = {};
+    const { id } = req.params;
+    const { points, operation = "set" } = req.body; // operation: 'set', 'add', 'subtract'
 
-    if (status) match["orderHistory.status"] = { $in: status.split(",") };
-    if (deliveryType) match["orderHistory.deliveryType"] = deliveryType;
-    if (search)
-      match["orderHistory.orderId"] = { $regex: search, $options: "i" };
-    if (startDate || endDate) {
-      match["orderHistory.orderDate"] = {};
-      if (startDate) match["orderHistory.orderDate"].$gte = new Date(startDate);
-      if (endDate) match["orderHistory.orderDate"].$lte = new Date(endDate);
+    if (points === undefined) {
+      return res.status(400).json({ error: "Points value is required" });
     }
 
-    const skip = (Number(page) - 1) * Number(limit);
+    const customer = await Customer.findById(id);
+    if (!customer) {
+      return res.status(404).json({ error: "Customer not found" });
+    }
+
+    let newPoints = customer.loyaltyPoints || 0;
+
+    switch (operation) {
+      case "add":
+        newPoints += Number(points);
+        break;
+      case "subtract":
+        newPoints = Math.max(0, newPoints - Number(points)); // Don't allow negative points
+        break;
+      case "set":
+      default:
+        newPoints = Number(points);
+        break;
+    }
+
+    customer.loyaltyPoints = newPoints;
+    customer.lastInteraction = new Date();
+    await customer.save();
+
+    res.json({
+      success: true,
+      newPoints,
+      message: `Loyalty points ${
+        operation === "set"
+          ? "updated"
+          : operation === "add"
+          ? "added"
+          : "deducted"
+      } successfully`,
+    });
+  } catch (err) {
+    console.error("PUT /api/customers/:id/loyalty error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ─── GET /api/customers/analytics/summary ───────────────
+// Get customer analytics summary
+router.get("/customers/analytics/summary", async (req, res) => {
+  try {
     const pipeline = [
-      { $unwind: "$orderHistory" },
-      Object.keys(match).length ? { $match: match } : null,
-      { $sort: { "orderHistory.orderDate": -1 } },
-      {
-        $facet: {
-          metadata: [{ $count: "total" }],
-          data: [{ $skip: skip }, { $limit: Number(limit) }],
-        },
-      },
-      { $unwind: "$metadata" },
       {
         $project: {
-          total: "$metadata.total",
-          orders: {
-            $map: {
-              input: "$data",
-              as: "d",
-              in: {
-                orderId: "$d.orderHistory.orderId",
-                created: "$d.orderHistory.orderDate",
-                customer: "$d.name",
-                customerId: "$d._id",
-                phoneNumber: { $arrayElemAt: ["$d.phoneNumber", 0] },
-                totalAmount: "$d.orderHistory.totalAmount",
-                status: "$d.orderHistory.status",
-                items: "$d.orderHistory.items",
-                deliveryCharge: "$d.orderHistory.deliveryCharge",
-                deliveryType: "$d.orderHistory.deliveryType",
-                deliverySpeed: "$d.orderHistory.deliverySpeed",
-                deliveryAddress: "$d.orderHistory.deliveryAddress",
-                ecoDeliveryDiscount: "$d.orderHistory.ecoDeliveryDiscount",
-                timeSlot: "$d.orderHistory.timeSlot",
-                driver1: "$d.orderHistory.driver1",
-                driver2: "$d.orderHistory.driver2",
-                pickupType: "$d.orderHistory.pickupType",
-                truckOnDeliver: "$d.orderHistory.truckOnDeliver",
-                // Receipt image data
-                receiptImage: "$d.orderHistory.receiptImage",
-                receiptImageMetadata: "$d.orderHistory.receiptImageMetadata",
-                // Payment fields
-                accountHolderName: "$d.orderHistory.accountHolderName",
-                paidBankName: "$d.orderHistory.paidBankName",
-              },
+          name: 1,
+          phoneNumber: 1,
+          createdAt: 1,
+          currentOrderStatus: 1,
+          conversationState: 1,
+          isBlocked: 1,
+          loyaltyPoints: 1,
+          // Combine orders from both arrays
+          allOrders: {
+            $concatArrays: [
+              { $ifNull: ["$orderHistory", []] },
+              { $ifNull: ["$shoppingHistory", []] },
+            ],
+          },
+        },
+      },
+      {
+        $project: {
+          name: 1,
+          phoneNumber: 1,
+          createdAt: 1,
+          currentOrderStatus: 1,
+          conversationState: 1,
+          isBlocked: 1,
+          loyaltyPoints: 1,
+          totalOrders: { $size: "$allOrders" },
+          totalSpent: { $sum: "$allOrders.totalAmount" },
+          lastOrderDate: { $max: "$allOrders.orderDate" },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalCustomers: { $sum: 1 },
+          activeCustomers: {
+            $sum: {
+              $cond: [{ $eq: ["$conversationState", "active"] }, 1, 0],
+            },
+          },
+          blockedCustomers: {
+            $sum: {
+              $cond: [{ $eq: ["$isBlocked", true] }, 1, 0],
+            },
+          },
+          customersWithOrders: {
+            $sum: {
+              $cond: [{ $gt: ["$totalOrders", 0] }, 1, 0],
+            },
+          },
+          totalRevenue: { $sum: "$totalSpent" },
+          totalOrders: { $sum: "$totalOrders" },
+          averageOrderValue: {
+            $avg: {
+              $cond: [
+                { $gt: ["$totalOrders", 0] },
+                { $divide: ["$totalSpent", "$totalOrders"] },
+                0,
+              ],
+            },
+          },
+          averageCustomerValue: { $avg: "$totalSpent" },
+          totalLoyaltyPoints: { $sum: "$loyaltyPoints" },
+        },
+      },
+    ];
+
+    const [analytics] = await Customer.aggregate(pipeline);
+
+    // Get customer segments
+    const segmentPipeline = [
+      {
+        $project: {
+          totalSpent: {
+            $add: [
+              { $sum: { $ifNull: ["$orderHistory.totalAmount", []] } },
+              { $sum: { $ifNull: ["$shoppingHistory.totalAmount", []] } },
+            ],
+          },
+        },
+      },
+      {
+        $project: {
+          segment: {
+            $switch: {
+              branches: [
+                { case: { $gte: ["$totalSpent", 10000] }, then: "VIP" },
+                { case: { $gte: ["$totalSpent", 5000] }, then: "Premium" },
+                { case: { $gt: ["$totalSpent", 0] }, then: "Regular" },
+              ],
+              default: "New",
             },
           },
         },
       },
-    ].filter(Boolean);
+      {
+        $group: {
+          _id: "$segment",
+          count: { $sum: 1 },
+        },
+      },
+    ];
 
-    const [result = { orders: [], total: 0 }] = await Customer.aggregate(
-      pipeline
-    );
+    const segments = await Customer.aggregate(segmentPipeline);
 
-    res.json({ orders: result.orders, total: result.total });
+    // Get recent registrations (last 30 days)
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const recentRegistrations = await Customer.countDocuments({
+      createdAt: { $gte: thirtyDaysAgo },
+    });
+
+    res.json({
+      summary: analytics || {
+        totalCustomers: 0,
+        activeCustomers: 0,
+        blockedCustomers: 0,
+        customersWithOrders: 0,
+        totalRevenue: 0,
+        totalOrders: 0,
+        averageOrderValue: 0,
+        averageCustomerValue: 0,
+        totalLoyaltyPoints: 0,
+      },
+      segments: segments.reduce(
+        (acc, seg) => {
+          acc[seg._id] = seg.count;
+          return acc;
+        },
+        { VIP: 0, Premium: 0, Regular: 0, New: 0 }
+      ),
+      recentRegistrations,
+    });
   } catch (err) {
-    console.error("GET /api/orders error:", err);
+    console.error("GET /api/customers/analytics/summary error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
+
+/// ─── REMOVED CONFLICTING /orders ROUTE ─────────────────────────────────
+// This route is now handled by orders.js router to avoid conflicts
+
+// ─── PUT /api/orders/:orderId/status ──────────────────── (req, res) => { ... })
 
 // ─── PUT /api/orders/:orderId/status ────────────────────
 // Update order status and additional fields
@@ -478,33 +873,57 @@ router.put("/orders/:orderId/status", async (req, res) => {
       reason,
     } = req.body;
 
-    const updateFields = {
-      "orderHistory.$.status": status,
-    };
+    const customer = await Customer.findOne({
+      $or: [
+        { "orderHistory.orderId": orderId },
+        { "shoppingHistory.orderId": orderId },
+      ],
+    });
+
+    if (!customer) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    // Find order in orderHistory
+    let orderIndex = customer.orderHistory?.findIndex(
+      (order) => order.orderId === orderId
+    );
+    let isOrderHistory = true;
+
+    // If not found in orderHistory, check shoppingHistory
+    if (orderIndex === -1) {
+      orderIndex = customer.shoppingHistory?.findIndex(
+        (order) => order.orderId === orderId
+      );
+      isOrderHistory = false;
+    }
+
+    if (orderIndex === -1) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const updateFields = { status };
 
     // Add optional fields if provided
-    if (timeSlot !== undefined)
-      updateFields["orderHistory.$.timeSlot"] = timeSlot;
-    if (driver1 !== undefined) updateFields["orderHistory.$.driver1"] = driver1;
-    if (driver2 !== undefined) updateFields["orderHistory.$.driver2"] = driver2;
-    if (pickupType !== undefined)
-      updateFields["orderHistory.$.pickupType"] = pickupType;
+    if (timeSlot !== undefined) updateFields.timeSlot = timeSlot;
+    if (driver1 !== undefined) updateFields.driver1 = driver1;
+    if (driver2 !== undefined) updateFields.driver2 = driver2;
+    if (pickupType !== undefined) updateFields.pickupType = pickupType;
     if (truckOnDeliver !== undefined)
-      updateFields["orderHistory.$.truckOnDeliver"] = truckOnDeliver;
-    if (reason !== undefined)
-      updateFields["orderHistory.$.adminReason"] = reason;
+      updateFields.truckOnDeliver = truckOnDeliver;
+    if (reason !== undefined) updateFields.adminReason = reason;
+
+    // Update the order
+    if (isOrderHistory) {
+      Object.assign(customer.orderHistory[orderIndex], updateFields);
+    } else {
+      Object.assign(customer.shoppingHistory[orderIndex], updateFields);
+    }
 
     // Also update the customer's current order status
-    updateFields.currentOrderStatus = status;
+    customer.currentOrderStatus = status;
 
-    const order = await Customer.findOneAndUpdate(
-      { "orderHistory.orderId": orderId },
-      { $set: updateFields },
-      { new: true }
-    );
-
-    if (!order) return res.status(404).json({ error: "Order not found" });
-
+    await customer.save();
     res.json({ success: true });
   } catch (err) {
     console.error("PUT /orders/:orderId/status error:", err);
@@ -527,7 +946,10 @@ router.put("/orders/:orderId/item-status", async (req, res) => {
 
     // Find the customer with the order
     const customer = await Customer.findOne({
-      "orderHistory.orderId": orderId,
+      $or: [
+        { "orderHistory.orderId": orderId },
+        { "shoppingHistory.orderId": orderId },
+      ],
     });
 
     if (!customer) {
@@ -535,27 +957,40 @@ router.put("/orders/:orderId/item-status", async (req, res) => {
     }
 
     // Find the order
-    const orderIndex = customer.orderHistory.findIndex(
+    let orderIndex = customer.orderHistory?.findIndex(
       (order) => order.orderId === orderId
     );
-    const order = customer.orderHistory[orderIndex];
+    let isOrderHistory = true;
+
+    if (orderIndex === -1) {
+      orderIndex = customer.shoppingHistory?.findIndex(
+        (order) => order.orderId === orderId
+      );
+      isOrderHistory = false;
+    }
+
+    if (orderIndex === -1) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const order = isOrderHistory
+      ? customer.orderHistory[orderIndex]
+      : customer.shoppingHistory[orderIndex];
 
     if (!order.items[itemIndex]) {
       return res.status(404).json({ error: "Item not found" });
     }
 
     // Update the item's onTruck status
-    customer.orderHistory[orderIndex].items[itemIndex].onTruck = onTruck;
+    order.items[itemIndex].onTruck = onTruck;
 
     // Check if all items are now on truck
-    const allItemsOnTruck = customer.orderHistory[orderIndex].items.every(
-      (item) => item.onTruck === true
-    );
+    const allItemsOnTruck = order.items.every((item) => item.onTruck === true);
 
     if (allItemsOnTruck) {
       // Update order status to allocated-driver and set truckOnDeliver to true
-      customer.orderHistory[orderIndex].status = "allocated-driver";
-      customer.orderHistory[orderIndex].truckOnDeliver = true;
+      order.status = "allocated-driver";
+      order.truckOnDeliver = true;
       customer.currentOrderStatus = "allocated-driver";
     }
 
@@ -564,7 +999,7 @@ router.put("/orders/:orderId/item-status", async (req, res) => {
     res.json({
       success: true,
       allItemsOnTruck,
-      orderStatus: customer.orderHistory[orderIndex].status,
+      orderStatus: order.status,
     });
   } catch (err) {
     console.error("PUT /orders/:orderId/item-status error:", err);
@@ -573,41 +1008,70 @@ router.put("/orders/:orderId/item-status", async (req, res) => {
 });
 
 // ─── GET /api/orders/:orderId ───────────────────────────
-// single-order detail
+// Get single order detail with customer info
 router.get("/orders/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
-    const cust = await Customer.findOne(
-      { "orderHistory.orderId": orderId },
-      {
-        name: 1,
-        phoneNumber: 1,
-        orderHistory: {
-          $elemMatch: { orderId },
-        },
-      }
-    );
 
-    if (!cust || !cust.orderHistory.length)
+    console.log("=== ORDER DETAIL API DEBUG ===");
+    console.log("Requested Order ID:", orderId);
+
+    // Find customer with this order and get both customer and order data
+    const customer = await Customer.findOne({
+      $or: [
+        { "orderHistory.orderId": orderId },
+        { "shoppingHistory.orderId": orderId },
+      ],
+    });
+
+    console.log("=== CUSTOMER FOUND ===");
+    if (customer) {
+      console.log("Customer name:", customer.name);
+      console.log("Customer phoneNumber:", customer.phoneNumber);
+    } else {
+      console.log("No customer found with this order");
       return res.status(404).json({ error: "Order not found" });
+    }
 
-    const o = cust.orderHistory[0].toObject();
-    o.customer = cust.name;
-    o.customerId = cust._id;
-    o.phoneNumber = cust.phoneNumber[0];
+    // Find the specific order
+    let order = customer.orderHistory?.find((o) => o.orderId === orderId);
+    if (!order) {
+      order = customer.shoppingHistory?.find((o) => o.orderId === orderId);
+    }
 
-    // Just pass the receiptImage as is without modification
-    o.receiptImage = o.receiptImage;
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
 
-    res.json(o);
+    // Add customer information to order data
+    const enrichedOrder = {
+      ...order.toObject(),
+      customer: customer.name,
+      customerId: customer._id,
+      phoneNumber:
+        customer.phoneNumber && customer.phoneNumber.length > 0
+          ? customer.phoneNumber[0]
+          : "N/A",
+      accountHolderName:
+        order.accountHolderName ||
+        (customer.payerNames && customer.payerNames.length > 0
+          ? customer.payerNames[0]
+          : "Not provided"),
+    };
+
+    console.log("=== ENRICHED ORDER RESPONSE ===");
+    console.log("Customer name:", enrichedOrder.customer);
+    console.log("Phone number:", enrichedOrder.phoneNumber);
+    console.log("Account holder:", enrichedOrder.accountHolderName);
+
+    res.json(enrichedOrder);
   } catch (err) {
     console.error("GET /api/orders/:orderId error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-// ─── PUT /api/orders/:orderId/allocate ────────────────────
-// Allocate order to time slot with drivers
+// All other routes from previous router...
 router.put("/orders/:orderId/allocate", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -619,23 +1083,56 @@ router.put("/orders/:orderId/allocate", async (req, res) => {
         .json({ error: "All allocation fields are required" });
     }
 
-    const order = await Customer.findOneAndUpdate(
-      { "orderHistory.orderId": orderId },
-      {
-        $set: {
-          "orderHistory.$.timeSlot": timeSlot,
-          "orderHistory.$.driver1": driver1,
-          "orderHistory.$.driver2": driver2,
-          "orderHistory.$.pickupType": pickupType,
-          "orderHistory.$.truckOnDeliver": false,
-          // Don't change status yet - will change when all items are checked
-        },
-      },
-      { new: true }
-    );
+    const customer = await Customer.findOne({
+      $or: [
+        { "orderHistory.orderId": orderId },
+        { "shoppingHistory.orderId": orderId },
+      ],
+    });
 
-    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (!customer) {
+      return res.status(404).json({ error: "Order not found" });
+    }
 
+    // Find and update order
+    let updated = false;
+    if (customer.orderHistory) {
+      const orderIndex = customer.orderHistory.findIndex(
+        (o) => o.orderId === orderId
+      );
+      if (orderIndex !== -1) {
+        Object.assign(customer.orderHistory[orderIndex], {
+          timeSlot,
+          driver1,
+          driver2,
+          pickupType,
+          truckOnDeliver: false,
+        });
+        updated = true;
+      }
+    }
+
+    if (!updated && customer.shoppingHistory) {
+      const orderIndex = customer.shoppingHistory.findIndex(
+        (o) => o.orderId === orderId
+      );
+      if (orderIndex !== -1) {
+        Object.assign(customer.shoppingHistory[orderIndex], {
+          timeSlot,
+          driver1,
+          driver2,
+          pickupType,
+          truckOnDeliver: false,
+        });
+        updated = true;
+      }
+    }
+
+    if (!updated) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    await customer.save();
     res.json({ success: true });
   } catch (err) {
     console.error("PUT /orders/:orderId/allocate error:", err);
@@ -648,18 +1145,44 @@ router.put("/orders/:orderId/ready", async (req, res) => {
   try {
     const { orderId } = req.params;
 
-    // Update the order status to "ready-to-pickup"
-    const order = await Customer.findOneAndUpdate(
-      { "orderHistory.orderId": orderId },
-      {
-        $set: {
-          "orderHistory.$.status": "ready-to-pickup",
-        },
-      },
-      { new: true }
-    );
+    const customer = await Customer.findOne({
+      $or: [
+        { "orderHistory.orderId": orderId },
+        { "shoppingHistory.orderId": orderId },
+      ],
+    });
 
-    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (!customer) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    // Find and update order status
+    let updated = false;
+    if (customer.orderHistory) {
+      const orderIndex = customer.orderHistory.findIndex(
+        (o) => o.orderId === orderId
+      );
+      if (orderIndex !== -1) {
+        customer.orderHistory[orderIndex].status = "ready-to-pickup";
+        updated = true;
+      }
+    }
+
+    if (!updated && customer.shoppingHistory) {
+      const orderIndex = customer.shoppingHistory.findIndex(
+        (o) => o.orderId === orderId
+      );
+      if (orderIndex !== -1) {
+        customer.shoppingHistory[orderIndex].status = "ready-to-pickup";
+        updated = true;
+      }
+    }
+
+    if (!updated) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    await customer.save();
     res.json({ success: true });
   } catch (err) {
     console.error("PUT /orders/:orderId/ready error:", err);
@@ -667,375 +1190,46 @@ router.put("/orders/:orderId/ready", async (req, res) => {
   }
 });
 
-// ─── GET /api/orders ─────────────────────────────────
-// list + filter + paginate orders (existing endpoint with updates)
-router.get("/orders", async (req, res) => {
-  try {
-    const {
-      status,
-      search,
-      page = 1,
-      limit = 10,
-      startDate,
-      endDate,
-      deliveryType,
-      area,
-      driver1,
-      driver2,
-    } = req.query;
-    const match = {};
-
-    if (status) {
-      if (status.includes(",")) {
-        match["orderHistory.status"] = { $in: status.split(",") };
-      } else {
-        match["orderHistory.status"] = status;
-      }
-    }
-    if (deliveryType) match["orderHistory.deliveryType"] = deliveryType;
-    if (area)
-      match["orderHistory.deliveryAddress.area"] = {
-        $regex: area,
-        $options: "i",
-      };
-    if (driver1) match["orderHistory.driver1"] = driver1;
-    if (driver2) match["orderHistory.driver2"] = driver2;
-    if (search)
-      match["orderHistory.orderId"] = { $regex: search, $options: "i" };
-    if (startDate || endDate) {
-      match["orderHistory.orderDate"] = {};
-      if (startDate) match["orderHistory.orderDate"].$gte = new Date(startDate);
-      if (endDate) match["orderHistory.orderDate"].$lte = new Date(endDate);
-    }
-
-    const skip = (Number(page) - 1) * Number(limit);
-    const pipeline = [
-      { $unwind: "$orderHistory" },
-      Object.keys(match).length ? { $match: match } : null,
-      { $sort: { "orderHistory.orderDate": -1 } },
-      {
-        $facet: {
-          metadata: [{ $count: "total" }],
-          data: [{ $skip: skip }, { $limit: Number(limit) }],
-        },
-      },
-      { $unwind: "$metadata" },
-      {
-        $project: {
-          total: "$metadata.total",
-          orders: {
-            $map: {
-              input: "$data",
-              as: "d",
-              in: {
-                orderId: "$d.orderHistory.orderId",
-                created: "$d.orderHistory.orderDate",
-                customer: "$d.name",
-                customerId: "$d._id",
-                phoneNumber: { $arrayElemAt: ["$d.phoneNumber", 0] },
-                totalAmount: "$d.orderHistory.totalAmount",
-                status: "$d.orderHistory.status",
-                items: "$d.orderHistory.items",
-                deliveryCharge: "$d.orderHistory.deliveryCharge",
-                deliveryType: "$d.orderHistory.deliveryType",
-                deliverySpeed: "$d.orderHistory.deliverySpeed",
-                deliveryAddress: "$d.orderHistory.deliveryAddress",
-                ecoDeliveryDiscount: "$d.orderHistory.ecoDeliveryDiscount",
-                timeSlot: "$d.orderHistory.timeSlot",
-                driver1: "$d.orderHistory.driver1",
-                driver2: "$d.orderHistory.driver2",
-                pickupType: "$d.orderHistory.pickupType",
-                truckOnDeliver: "$d.orderHistory.truckOnDeliver",
-                complaints: "$d.orderHistory.complaints",
-                // Receipt image data
-                receiptImage: "$d.orderHistory.receiptImage",
-                receiptImageMetadata: "$d.orderHistory.receiptImageMetadata",
-                // Payment fields
-                accountHolderName: "$d.orderHistory.accountHolderName",
-                paidBankName: "$d.orderHistory.paidBankName",
-              },
-            },
-          },
-        },
-      },
-    ].filter(Boolean);
-
-    const [result = { orders: [], total: 0 }] = await Customer.aggregate(
-      pipeline
-    );
-
-    res.json({ orders: result.orders, total: result.total });
-  } catch (err) {
-    console.error("GET /api/orders error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// ─── POST /api/orders/:orderId/complaint ────────────────────
-// Add complaint to an order
-router.post("/orders/:orderId/complaint", async (req, res) => {
-  try {
-    const { orderId } = req.params;
-    const {
-      issueTypes,
-      additionalDetails,
-      solutions,
-      solutionDetails,
-      customerRequests,
-      customerRequestDetails,
-      driverId,
-      driverName,
-    } = req.body;
-
-    // Validate required fields
-    if (!issueTypes || !Array.isArray(issueTypes) || issueTypes.length === 0) {
-      return res
-        .status(400)
-        .json({ error: "At least one issue type is required" });
-    }
-
-    // Create complaint object
-    const complaint = {
-      complaintId: "COMP" + Date.now().toString().slice(-8),
-      issueTypes: issueTypes,
-      additionalDetails: additionalDetails || "",
-      solutions: solutions || [],
-      solutionDetails: solutionDetails || "",
-      customerRequests: customerRequests || [],
-      customerRequestDetails: customerRequestDetails || "",
-      reportedBy: {
-        driverId: driverId,
-        driverName: driverName,
-      },
-      reportedAt: new Date(),
-      status: "open", // open, in_progress, resolved
-      resolution: "",
-      resolvedAt: null,
-    };
-
-    // Find customer and add complaint to order
-    const customer = await Customer.findOne({
-      "orderHistory.orderId": orderId,
-    });
-
-    if (!customer) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    // Find the order and add complaint
-    const orderIndex = customer.orderHistory.findIndex(
-      (order) => order.orderId === orderId
-    );
-
-    if (orderIndex === -1) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    // Initialize complaints array if it doesn't exist
-    if (!customer.orderHistory[orderIndex].complaints) {
-      customer.orderHistory[orderIndex].complaints = [];
-    }
-
-    // Add complaint to order
-    customer.orderHistory[orderIndex].complaints.push(complaint);
-
-    // Update order status to indicate there's an issue
-    customer.orderHistory[orderIndex].status = "issue-driver";
-
-    await customer.save();
-
-    res.json({
-      success: true,
-      complaintId: complaint.complaintId,
-      message: "Complaint submitted successfully",
-    });
-  } catch (err) {
-    console.error("POST /orders/:orderId/complaint error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// ─── GET /api/complaints ────────────────────────────
-// Get all complaints with filters
-router.get("/complaints", async (req, res) => {
-  try {
-    const {
-      status,
-      driverId,
-      orderId,
-      dateFrom,
-      dateTo,
-      page = 1,
-      limit = 10,
-    } = req.query;
-
-    const match = {
-      "orderHistory.complaints": { $exists: true, $ne: [] },
-    };
-
-    // Build aggregation pipeline
-    const pipeline = [
-      { $match: match },
-      { $unwind: "$orderHistory" },
-      { $match: { "orderHistory.complaints": { $exists: true, $ne: [] } } },
-      { $unwind: "$orderHistory.complaints" },
-    ];
-
-    // Add filters
-    if (status) {
-      pipeline.push({ $match: { "orderHistory.complaints.status": status } });
-    }
-    if (driverId) {
-      pipeline.push({
-        $match: { "orderHistory.complaints.reportedBy.driverId": driverId },
-      });
-    }
-    if (orderId) {
-      pipeline.push({ $match: { "orderHistory.orderId": orderId } });
-    }
-    if (dateFrom || dateTo) {
-      const dateMatch = {};
-      if (dateFrom) dateMatch.$gte = new Date(dateFrom);
-      if (dateTo) dateMatch.$lte = new Date(dateTo);
-      pipeline.push({
-        $match: { "orderHistory.complaints.reportedAt": dateMatch },
-      });
-    }
-
-    // Sort by complaint date
-    pipeline.push({ $sort: { "orderHistory.complaints.reportedAt": -1 } });
-
-    // Project final structure
-    pipeline.push({
-      $project: {
-        orderId: "$orderHistory.orderId",
-        orderDate: "$orderHistory.orderDate",
-        customer: "$name",
-        customerId: "$_id",
-        totalAmount: "$orderHistory.totalAmount",
-        deliveryType: "$orderHistory.deliveryType",
-        complaint: "$orderHistory.complaints",
-        items: "$orderHistory.items",
-      },
-    });
-
-    // Add pagination
-    const skip = (Number(page) - 1) * Number(limit);
-    pipeline.push(
-      {
-        $facet: {
-          metadata: [{ $count: "total" }],
-          data: [{ $skip: skip }, { $limit: Number(limit) }],
-        },
-      },
-      { $unwind: "$metadata" }
-    );
-
-    const [result = { data: [], metadata: { total: 0 } }] =
-      await Customer.aggregate(pipeline);
-
-    res.json({
-      complaints: result.data,
-      total: result.metadata.total,
-    });
-  } catch (err) {
-    console.error("GET /api/complaints error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// ─── PUT /api/complaints/:complaintId/status ────────────────────
-// Update complaint status
-router.put("/complaints/:complaintId/status", async (req, res) => {
-  try {
-    const { complaintId } = req.params;
-    const { status, resolution } = req.body;
-
-    const customer = await Customer.findOne({
-      "orderHistory.complaints.complaintId": complaintId,
-    });
-
-    if (!customer) {
-      return res.status(404).json({ error: "Complaint not found" });
-    }
-
-    // Find and update complaint
-    for (let order of customer.orderHistory) {
-      const complaint = order.complaints?.find(
-        (c) => c.complaintId === complaintId
-      );
-      if (complaint) {
-        complaint.status = status;
-        if (resolution) complaint.resolution = resolution;
-        if (status === "resolved") complaint.resolvedAt = new Date();
-        break;
-      }
-    }
-
-    await customer.save();
-    res.json({ success: true });
-  } catch (err) {
-    console.error("PUT /complaints/:complaintId/status error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-// GET /api/refunds ───────────────────────────────
-// List all orders with status "refund"
-router.get("/refunds", async (req, res) => {
-  try {
-    const pipeline = [
-      { $unwind: "$orderHistory" },
-      { $match: { "orderHistory.status": "refund" } },
-      {
-        $project: {
-          _id: 0,
-          orderId: "$orderHistory.orderId",
-          customer: "$name",
-          phoneNumber: { $arrayElemAt: ["$phoneNumber", 0] },
-          totalAmount: "$orderHistory.totalAmount",
-        },
-      },
-    ];
-
-    const refunds = await Customer.aggregate(pipeline);
-    res.json({ refunds });
-  } catch (err) {
-    console.error("GET /api/refunds error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// Return only the customer's phone number *and* name for a given order
+// Return phone number and name for a given order
 router.get("/orders/:orderId/phone", async (req, res) => {
   try {
     const { orderId } = req.params;
-    // now also project in the `name` field
-    const cust = await Customer.findOne(
-      { "orderHistory.orderId": orderId },
+
+    const customer = await Customer.findOne(
+      {
+        $or: [
+          { "orderHistory.orderId": orderId },
+          { "shoppingHistory.orderId": orderId },
+        ],
+      },
       { phoneNumber: 1, name: 1 }
     );
-    if (!cust) {
+
+    if (!customer) {
       return res.status(404).json({ error: "Order not found" });
     }
-    // grab first phone, strip all non‐digits
-    const raw = cust.phoneNumber[0] || "";
+
+    const raw =
+      customer.phoneNumber && customer.phoneNumber.length > 0
+        ? customer.phoneNumber[0]
+        : "";
     const cleaned = raw.replace(/\D+/g, "");
-    // return both cleaned phone and the name
+
     res.json({
       phoneNumber: cleaned,
-      name: cust.name,
+      name: customer.name,
     });
   } catch (err) {
     console.error("GET /api/orders/:orderId/phone error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
+
 router.put("/orders/:orderId/pickup-status", async (req, res) => {
   try {
     const { orderId } = req.params;
     const { pickupStatus } = req.body;
 
-    // Use the actual status values from your ORDER_STATUSES
     const validStatuses = [
       "ready to pickup",
       "order-not-pickedup",
@@ -1046,17 +1240,44 @@ router.put("/orders/:orderId/pickup-status", async (req, res) => {
       return res.status(400).json({ error: "Invalid pickup status" });
     }
 
-    const order = await Customer.findOneAndUpdate(
-      { "orderHistory.orderId": orderId },
-      {
-        $set: {
-          "orderHistory.$.status": pickupStatus, // Sets to actual database status
-        },
-      },
-      { new: true }
-    );
+    const customer = await Customer.findOne({
+      $or: [
+        { "orderHistory.orderId": orderId },
+        { "shoppingHistory.orderId": orderId },
+      ],
+    });
 
-    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (!customer) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    // Find and update order
+    let updated = false;
+    if (customer.orderHistory) {
+      const orderIndex = customer.orderHistory.findIndex(
+        (o) => o.orderId === orderId
+      );
+      if (orderIndex !== -1) {
+        customer.orderHistory[orderIndex].status = pickupStatus;
+        updated = true;
+      }
+    }
+
+    if (!updated && customer.shoppingHistory) {
+      const orderIndex = customer.shoppingHistory.findIndex(
+        (o) => o.orderId === orderId
+      );
+      if (orderIndex !== -1) {
+        customer.shoppingHistory[orderIndex].status = pickupStatus;
+        updated = true;
+      }
+    }
+
+    if (!updated) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    await customer.save();
     res.json({ success: true });
   } catch (err) {
     console.error("PUT /orders/:orderId/pickup-status error:", err);
