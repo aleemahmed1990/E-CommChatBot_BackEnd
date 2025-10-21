@@ -10,7 +10,7 @@ const jwt = require("jsonwebtoken");
 const speakeasy = require("speakeasy");
 const QRCode = require("qrcode");
 const rateLimit = require("express-rate-limit");
-const Admin = require("./models/Admin");
+
 const Area = require("./models/Areas");
 const VehicleType = require("./models/VehicleType");
 const DeliveryPeriod = require("./models/DeliveryPeriod");
