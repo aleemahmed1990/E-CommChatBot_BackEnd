@@ -3,7 +3,7 @@ const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const Admin = require("../models/admin");
+const Admin = require("../models/Admin");
 
 // Environment variables should be set in a .env file
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
