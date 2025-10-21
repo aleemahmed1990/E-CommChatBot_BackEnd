@@ -15,6 +15,9 @@ const Area = require("./models/Areas");
 const VehicleType = require("./models/VehicleType");
 const DeliveryPeriod = require("./models/DeliveryPeriod");
 const packingRoutes = require("./routes/packingRoutes");
+// Import vendor routes
+const vendorPreOrderRoutes = require("./routes/vendorpreorder");
+const vendorRoutes = require("./routes/vendors");
 
 // Load environment variables
 dotenv.config();
@@ -106,8 +109,12 @@ const dispatchOfficer2Routes = require("./routes/dispatchOfficer2Routes");
 const driverOnDeliveryRoutes = require("./routes/driverOnDeliveryRoutes");
 // Import the complaint routes
 const complaintRoutes = require("./routes/complaints");
+app.use("/api/vendor-preorders", vendorPreOrderRoutes);
 const driverRoutes = require("./routes/driverRoutes");
 app.use("/api/driver-on-delivery", driverOnDeliveryRoutes);
+
+// Add vendor routes to your existing routes
+app.use("/api/vendors", vendorRoutes);
 
 // Also ensure your driver routes are included:
 
@@ -130,6 +137,111 @@ global.JWT_REFRESH_SECRET = JWT_REFRESH_SECRET;
 global.EMAIL_CONFIG = EMAIL_CONFIG;
 global.authenticateToken = authenticateToken;
 global.requireRole = requireRole;
+
+// ========== ADMIN USER SEEDING FUNCTION ==========
+const seedAdminUser = async () => {
+  try {
+    console.log("🔍 Checking for admin user...");
+
+    // Import the models
+    const { User } = require("./models/User");
+    const { Role } = require("./models/Role");
+
+    // First, ensure super_admin role exists
+    let superAdminRole = await Role.findOne({ name: "super_admin" });
+
+    if (!superAdminRole) {
+      console.log("🆕 Creating super_admin role...");
+
+      // Create a temporary admin user to assign as creator
+      const tempAdminData = {
+        username: "system",
+        email: "system@admin.com",
+        password: "temp123",
+        name: "System Admin",
+        status: "active",
+        permissions: [],
+      };
+
+      // Create temporary user without role first
+      const tempUser = new User(tempAdminData);
+      const savedTempUser = await tempUser.save();
+
+      // Create super_admin role
+      superAdminRole = new Role({
+        name: "super_admin",
+        displayName: "Super Administrator",
+        description: "Full system access with all permissions",
+        components: [], // Super admin has access to everything
+        categories: [], // Super admin has access to everything
+        isSystemRole: true,
+        isActive: true,
+        priority: 1000,
+        createdBy: savedTempUser._id,
+        lastModifiedBy: savedTempUser._id,
+      });
+
+      await superAdminRole.save();
+      console.log("✅ Super admin role created successfully");
+
+      // Update temp user with the role
+      savedTempUser.role = superAdminRole._id;
+      await savedTempUser.save();
+    }
+
+    // Check if admin12 user already exists
+    let adminUser = await User.findOne({ username: "admin12" });
+
+    if (!adminUser) {
+      console.log("🔐 Creating admin12 user...");
+
+      adminUser = new User({
+        username: "admin12",
+        email: "admin12@admin.com",
+        password: "1234", // This will be hashed by the pre-save hook
+        name: "Default Admin",
+        role: superAdminRole._id,
+        status: "active",
+        permissions: [],
+        createdBy: superAdminRole.createdBy,
+      });
+
+      await adminUser.save();
+      console.log("✅ Admin user 'admin12' created successfully");
+      console.log("   Username: admin12");
+      console.log("   Password: 1234");
+      console.log("   Role: Super Administrator");
+    } else {
+      console.log("✅ Admin user 'admin12' already exists");
+
+      // Ensure the admin user has the correct role
+      if (
+        !adminUser.role ||
+        adminUser.role.toString() !== superAdminRole._id.toString()
+      ) {
+        console.log("🔄 Updating admin12 role to super_admin...");
+        adminUser.role = superAdminRole._id;
+        await adminUser.save();
+        console.log("✅ Admin12 role updated to super_admin");
+      }
+    }
+
+    // Ensure password is correct (in case user exists but password was changed)
+    const isPasswordCorrect = await adminUser
+      .comparePassword("1234")
+      .catch(() => false);
+    if (!isPasswordCorrect) {
+      console.log("🔄 Resetting admin12 password to '1234'...");
+      adminUser.password = "1234"; // This will trigger the pre-save hook to hash it
+      adminUser.loginAttempts = 0;
+      adminUser.lockUntil = undefined;
+      await adminUser.save();
+      console.log("✅ Admin12 password reset successfully");
+    }
+  } catch (error) {
+    console.error("❌ Error seeding admin user:", error);
+  }
+};
 
 // ========== DATABASE SEEDING FUNCTION (PERMISSIONS ONLY) ==========
 const seedDatabase = async () => {
@@ -159,14 +271,17 @@ mongoose
       useUnifiedTopology: true,
     }
   )
-  .then(() => {
+  .then(async () => {
     console.log("✅ MongoDB connected successfully");
 
-    // Seed original admin user (keep existing functionality)
-    Admin.seedAdmin();
+    // ❌ REMOVED: Old admin seeding that conflicts
+    // Admin.seedAdmin();
+
+    // ✅ NEW: Seed admin user for the new auth system
+    await seedAdminUser();
 
     // ✅ FIXED: Seed only permissions (removed role seeding)
-    seedDatabase();
+    await seedDatabase();
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err);
@@ -1204,6 +1319,7 @@ app.listen(PORT, () => {
   console.log("🔐 JWT Secret: Configured");
   console.log("🔒 2FA Support: Enabled");
   console.log("🎭 Dynamic Role System: Active");
+  console.log("👤 Auto-seeded Admin: admin12 / 123456");
   console.log("=".repeat(50));
   console.log("🔗 API Endpoints:");
   console.log("   Auth: /api/auth/*");
@@ -1220,6 +1336,7 @@ app.listen(PORT, () => {
   console.log("🚚 Areas Management: Truck & Scooter Pricing");
   console.log("🚛 Vehicle Types: Full CRUD Operations");
   console.log("⏰ Delivery Periods: Time-based Pricing System");
+  console.log("👤 Default Admin Login: admin12 / 123456");
   console.log("=".repeat(50));
 });
 

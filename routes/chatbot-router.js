@@ -28,8 +28,8 @@ const mkdirp = require("mkdirp");
 
 // Ultramsg Configuration
 const ULTRAMSG_CONFIG = {
-  instanceId: "instance100248",
-  token: "qh8kyj9myo1o07a2",
+  instanceId: "instance143389",
+  token: "e5qifsg0mzq0ylng",
   baseURL: "https://api.ultramsg.com",
   botNumber: "6281818185522",
   mediaUploadURL: "https://api.ultramsg.com/upload", // Add this line
@@ -424,6 +424,15 @@ router.get("/send-confirmations", async (req, res) => {
 // UTILITY FUNCTIONS
 // ============================================================================
 // Add this new simplified function to your chatbot router
+
+// Helper function to ensure valid numbers
+function ensureValidNumber(value, defaultValue = 0) {
+  if (value === null || value === undefined || value === "") {
+    return defaultValue;
+  }
+  const num = Number(value);
+  return isNaN(num) ? defaultValue : num;
+}
 
 function cleanNumberForUltraMSG(phone) {
   // Remove all non-digit characters
@@ -2358,7 +2367,6 @@ async function processChatMessage(phoneNumber, text, message) {
         }
         break;
 
-      // UPDATED checkout_delivery case
       case "checkout_delivery":
         // Handle delivery option selection
         if (["1", "2", "3", "4", "5", "6", "7"].includes(text)) {
@@ -2373,13 +2381,13 @@ async function processChatMessage(phoneNumber, text, message) {
           };
 
           const deliveryCharges = {
-            1: 0, // Normal Delivery - Free
-            2: 50000, // Speed Delivery - 50k extra
-            3: 50000, // Early Morning - 50k extra
-            4: 0, // Eco Delivery - Free (but 5% discount)
-            5: 0, // Self Pickup - Free
-            6: 20000, // Normal Scooter - 20k
-            7: 40000, // Speed Scooter - 40k
+            1: 0,
+            2: 50000,
+            3: 50000,
+            4: 0,
+            5: 0,
+            6: 20000,
+            7: 40000,
           };
 
           const deliveryTimeFrames = {
@@ -2391,6 +2399,13 @@ async function processChatMessage(phoneNumber, text, message) {
             6: "within 2.5 hours",
             7: "30 minutes - 1 hour",
           };
+
+          // ✅ CRITICAL FIX: Ensure all cart values are valid numbers FIRST
+          customer.cart.totalAmount = ensureValidNumber(
+            customer.cart.totalAmount,
+            0
+          );
+          customer.cart.deliveryCharge = 0; // Reset to 0 before setting new value
 
           // Set delivery details
           let deliveryType, deliverySpeed;
@@ -2410,9 +2425,12 @@ async function processChatMessage(phoneNumber, text, message) {
             case "4":
               deliveryType = "truck";
               deliverySpeed = "eco";
-              customer.cart.ecoDeliveryDiscount = Math.round(
-                customer.cart.totalAmount * 0.05
+              // Ensure totalAmount is valid before calculating discount
+              const validTotal = ensureValidNumber(
+                customer.cart.totalAmount,
+                0
               );
+              customer.cart.ecoDeliveryDiscount = Math.round(validTotal * 0.05);
               break;
             case "5":
               deliveryType = "self_pickup";
@@ -2428,21 +2446,21 @@ async function processChatMessage(phoneNumber, text, message) {
               break;
           }
 
-          // Update cart with delivery information
+          // ✅ Set delivery charge with validation
+          const selectedCharge = deliveryCharges[text];
+          customer.cart.deliveryCharge = ensureValidNumber(selectedCharge, 0);
           customer.cart.deliveryOption = deliveryOptions[text];
           customer.cart.deliveryType = deliveryType;
           customer.cart.deliverySpeed = deliverySpeed;
-          customer.cart.deliveryCharge = deliveryCharges[text];
           customer.cart.deliveryTimeFrame = deliveryTimeFrames[text];
 
-          // Apply first time customer discount (10% of subtotal)
+          // Apply first time customer discount if applicable
           if (
             customer.isFirstTimeCustomer &&
             customer.orderHistory.length === 0
           ) {
-            customer.cart.firstOrderDiscount = Math.round(
-              customer.cart.totalAmount * 0.1
-            );
+            const subtotal = ensureValidNumber(customer.cart.totalAmount, 0);
+            customer.cart.firstOrderDiscount = Math.round(subtotal * 0.1);
           }
 
           // Update current order in orderHistory if exists
@@ -2453,13 +2471,14 @@ async function processChatMessage(phoneNumber, text, message) {
             customer.orderHistory[idx].deliveryType = deliveryType;
             customer.orderHistory[idx].deliverySpeed = deliverySpeed;
             customer.orderHistory[idx].deliveryOption = deliveryOptions[text];
-            customer.orderHistory[idx].deliveryCharge = deliveryCharges[text];
+            customer.orderHistory[idx].deliveryCharge =
+              customer.cart.deliveryCharge;
             customer.orderHistory[idx].deliveryTimeFrame =
               deliveryTimeFrames[text];
             customer.orderHistory[idx].ecoDeliveryDiscount =
-              customer.cart.ecoDeliveryDiscount;
+              customer.cart.ecoDeliveryDiscount || 0;
             customer.orderHistory[idx].firstOrderDiscount =
-              customer.cart.firstOrderDiscount;
+              customer.cart.firstOrderDiscount || 0;
           }
 
           await customer.save();
@@ -2467,9 +2486,9 @@ async function processChatMessage(phoneNumber, text, message) {
           // Provide confirmation message
           let confirmationMsg = `You've chosen ${deliveryOptions[text]}.`;
 
-          if (deliveryCharges[text] > 0) {
+          if (customer.cart.deliveryCharge > 0) {
             confirmationMsg += ` A ${formatRupiah(
-              deliveryCharges[text]
+              customer.cart.deliveryCharge
             )} charge will be added.`;
           }
 
@@ -2517,7 +2536,6 @@ async function processChatMessage(phoneNumber, text, message) {
           );
         }
         break;
-
       case "checkout_eco_delivery_date":
         // Validate date format (YYYY-MM-DD)
         const dateRegex = /^\d{4}-\d{2}-\d{2}$/;

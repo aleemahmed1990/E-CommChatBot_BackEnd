@@ -1547,11 +1547,20 @@ const customerSchema = new mongoose.Schema(
       totalAmount: {
         type: Number,
         default: 0,
+        set: function (v) {
+          const num = Number(v);
+          return isNaN(num) ? 0 : num;
+        },
       },
       deliveryCharge: {
         type: Number,
         default: 0,
+        set: function (v) {
+          const num = Number(v);
+          return isNaN(num) ? 0 : num;
+        },
       },
+
       deliveryOption: {
         type: String,
         default: "Normal Delivery",
