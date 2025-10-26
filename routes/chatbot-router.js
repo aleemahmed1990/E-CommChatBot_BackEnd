@@ -967,53 +967,117 @@ async function sendSequentialMessages(
   }
 }
 
-// Helper function to find product by ID with better fallback for discounted products
-function findProductById(productId) {
-  // First try to find the product in the regular product database
-  for (const category of productDatabase.categories) {
-    for (const subCategory of category.subCategories) {
-      const product = subCategory.products.find((p) => p.id === productId);
-      if (product) {
-        return {
-          ...product,
-          category: category.name,
-          subCategory: subCategory.name,
-        };
-      }
+async function findProductById(productId) {
+  try {
+    const product = await Product.findById(productId);
+    return product; // Return as-is, no transformation
+  } catch (error) {
+    console.error(`Error finding product by ID ${productId}:`, error);
+    return null;
+  }
+}
+
+async function sendProductDetailsFromCart(to, customer, product) {
+  try {
+    let message = `📦 *Product Details*\n\n`;
+    message += `*${product.productName || product.name}*\n\n`;
+
+    if (product.description) {
+      message += `${product.description}\n\n`;
     }
-  }
 
-  // If not found, check if it's a discounted product
-  const allDiscountProducts = [];
-  for (let i = 1; i <= 5; i++) {
-    allDiscountProducts.push(...getDiscountProductsForCategory(i.toString()));
-  }
+    message += `💰 *Price Information:*\n`;
+    if (product.hasActiveDiscount && product.finalPrice < product.NormalPrice) {
+      message += `   Original: Rp ${product.NormalPrice}\n`;
+      message += `   Discounted: Rp ${product.finalPrice} ✨\n`;
+      const savings = product.NormalPrice - product.finalPrice;
+      message += `   You save: Rp ${savings}!\n`;
+    } else {
+      message += `   Rp ${product.finalPrice || product.price}\n`;
+    }
+    message += `\n`;
 
-  const discountProduct = allDiscountProducts.find((p) => p.id === productId);
+    if (product.Stock !== undefined) {
+      message += `📊 *Stock:* ${
+        product.Stock > 0 ? `${product.Stock} available` : "Out of stock"
+      }\n\n`;
+    }
 
-  if (discountProduct) {
-    // We found a discounted version, now get the base product details
-    for (const category of productDatabase.categories) {
-      for (const subCategory of category.subCategories) {
-        const baseProduct = subCategory.products.find(
-          (p) => p.id === productId
-        );
-        if (baseProduct) {
-          // Return merged product with discount information
-          return {
-            ...baseProduct,
-            price: discountProduct.discountPrice, // Use discounted price
-            originalPrice: discountProduct.originalPrice,
-            category: category.name,
-            subCategory: subCategory.name,
-            name: discountProduct.name, // Use the discounted product name
-          };
+    const details = [];
+    if (product.weight) details.push(`⚖️ *Weight:* ${product.weight}`);
+    if (product.material) details.push(`🧵 *Material:* ${product.material}`);
+    if (product.brand) details.push(`🏷️ *Brand:* ${product.brand}`);
+    if (product.color) details.push(`🎨 *Color:* ${product.color}`);
+    if (product.size) details.push(`📏 *Size:* ${product.size}`);
+
+    if (details.length > 0) {
+      message += details.join("\n") + "\n\n";
+    }
+
+    if (product.care) {
+      message += `🧼 *Care Instructions:*\n${product.care}\n\n`;
+    }
+
+    if (product.features && product.features.length > 0) {
+      message += `✨ *Features:*\n`;
+      product.features.forEach((feature) => {
+        message += `   • ${feature}\n`;
+      });
+      message += `\n`;
+    }
+
+    if (product.category || product.subCategory) {
+      message += `📁 *Category:* ${product.category || "N/A"}`;
+      if (product.subCategory) {
+        message += ` > ${product.subCategory}`;
+      }
+      message += `\n`;
+    }
+
+    if (product.masterImage) {
+      try {
+        if (product.masterImage.data) {
+          const buf = Buffer.isBuffer(product.masterImage.data)
+            ? product.masterImage.data
+            : Buffer.from(product.masterImage.data);
+          const base64 = buf.toString("base64");
+
+          const cleanTo = to.replace(/@c\.us|@s\.whatsapp\.net/g, "");
+          const mimeType = product.masterImage.contentType || "image/jpeg";
+
+          const formData = new URLSearchParams();
+          formData.append("token", ULTRAMSG_CONFIG.token);
+          formData.append("to", cleanTo);
+          formData.append("image", `data:${mimeType};base64,${base64}`);
+          formData.append("caption", message);
+
+          const response = await axios.post(
+            `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/image`,
+            formData,
+            {
+              headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+              },
+            }
+          );
+
+          console.log("📸 Product details with image sent successfully");
+          return;
         }
+      } catch (error) {
+        console.error("❌ Error sending product image from cart:", error);
       }
     }
-  }
 
-  return null;
+    await sendWhatsAppMessage(to, message);
+    console.log("📄 Product details sent as text");
+  } catch (error) {
+    console.error("❌ Error in sendProductDetailsFromCart:", error);
+    await sendWhatsAppMessage(
+      to,
+      "Sorry, couldn't retrieve product details. Returning to cart..."
+    );
+  }
 }
 
 // Simplified function to get all discounted products
@@ -1755,11 +1819,6 @@ async function processChatMessage(phoneNumber, text, message) {
         break;
 
       case "pickup_date_select": {
-        await customer.updateConversationState("pickup_date_main");
-        break;
-      }
-
-      case "pickup_date_main": {
         if (!["1", "2", "3"].includes(text.trim())) {
           await sendWhatsAppMessage(
             phoneNumber,
@@ -1991,12 +2050,6 @@ async function processChatMessage(phoneNumber, text, message) {
         break;
 
       case "pickup_date_select": {
-        await customer.updateConversationState("pickup_date_main");
-
-        break;
-      }
-
-      case "pickup_date_main": {
         if (!["1", "2", "3"].includes(text.trim())) {
           await sendWhatsAppMessage(
             phoneNumber,
@@ -2342,13 +2395,55 @@ async function processChatMessage(phoneNumber, text, message) {
         const detailsIndex = parseInt(text) - 1;
         if (detailsIndex >= 0 && detailsIndex < customer.cart.items.length) {
           const item = customer.cart.items[detailsIndex];
-          const product = findProductById(item.productId);
+          const product = await Product.findById(item.productId);
 
           if (product) {
-            // Send product details
-            await sendProductDetails(phoneNumber, customer, product, false);
+            // Build simple message: name + description + price
+            const price =
+              product.finalPrice != null
+                ? product.finalPrice
+                : product.NormalPrice || product.price;
 
-            // After showing details, return to cart
+            const caption =
+              `*${product.productName || product.name}*\n` +
+              `${product.description || ""}\n\n` +
+              `💰 Price: Rp ${price}`;
+
+            // Send with image if available
+            if (product.masterImage && product.masterImage.data) {
+              try {
+                const buf = Buffer.isBuffer(product.masterImage.data)
+                  ? product.masterImage.data
+                  : product.masterImage.data.buffer;
+                const base64 = buf.toString("base64");
+                const cleanTo = phoneNumber.replace(
+                  /@c\.us|@s\.whatsapp\.net/g,
+                  ""
+                );
+                const mimeType = product.masterImage.contentType || "image/png";
+
+                const formData = new URLSearchParams();
+                formData.append("token", ULTRAMSG_CONFIG.token);
+                formData.append("to", cleanTo);
+                formData.append("image", `data:${mimeType};base64,${base64}`);
+                formData.append("caption", caption);
+
+                await axios.post(
+                  `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/image`,
+                  formData,
+                  {
+                    headers: {
+                      "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                  }
+                );
+              } catch (error) {
+                await sendWhatsAppMessage(phoneNumber, caption);
+              }
+            } else {
+              await sendWhatsAppMessage(phoneNumber, caption);
+            }
+
             setTimeout(async () => {
               await goToCart(phoneNumber, customer);
             }, 2000);
@@ -2360,10 +2455,8 @@ async function processChatMessage(phoneNumber, text, message) {
             await goToCart(phoneNumber, customer);
           }
         } else {
-          await sendWhatsAppMessage(
-            phoneNumber,
-            "Please select a valid item number, or type 0 to return to the main menu."
-          );
+          await sendWhatsAppMessage(phoneNumber, "Invalid selection.");
+          await goToCart(phoneNumber, customer);
         }
         break;
 
@@ -6946,11 +7039,46 @@ Don't worry — the driver will reach you and deliver the products safely..` +
             customer.markModified("contextData");
             await customer.save();
 
-            customer.updateConversationState("manage_bank_accounts");
+            await customer.updateConversationState("manage_bank_accounts");
             await sendWhatsAppMessage(
               phoneNumber,
               "❌ Edit cancelled. Returning to bank management..."
             );
+
+            // Show bank management menu
+            const bankAccounts = customer.bankAccounts || [];
+            let bankMessage = "🏦 *Bank Account Management*\n\n";
+
+            if (bankAccounts.length === 0) {
+              bankMessage += "You have no saved bank accounts.\n\n";
+              bankMessage += "1. Add New Bank Account\n";
+              bankMessage += "2. Return to Profile\n";
+              bankMessage += "0. Main Menu";
+            } else {
+              bankMessage += "*Your Bank Accounts:*\n\n";
+              bankAccounts.forEach((account, index) => {
+                bankMessage += `${index + 1}. ${account.bankName}\n`;
+                bankMessage += `   Account: ${account.accountNumber}\n`;
+                bankMessage += `   Name: ${account.accountHolderName}\n`;
+                if (account.isDefault) {
+                  bankMessage += `   ✅ Default Account\n`;
+                }
+                bankMessage += `\n`;
+              });
+
+              bankMessage += `\n*Options:*\n`;
+              bankMessage += `${
+                bankAccounts.length + 1
+              }. Add New Bank Account\n`;
+              bankMessage += `${bankAccounts.length + 2}. Edit an Account\n`;
+              bankMessage += `${bankAccounts.length + 3}. Delete an Account\n`;
+              bankMessage += `${
+                bankAccounts.length + 4
+              }. Set Default Account\n`;
+              bankMessage += `0. Return to Profile`;
+            }
+
+            await sendWhatsAppMessage(phoneNumber, bankMessage);
             break;
 
           default:
@@ -8039,7 +8167,9 @@ Don't worry — the driver will reach you and deliver the products safely..` +
           `Your name has been updated to ${text}. Returning to profile...`
         );
         // Clean phone number for display by removing @c.us
-        const displayPhoneNumber = customer.phoneNumber.replace("@c.us", "");
+        const displayPhoneNumber = cleanPhoneNumber(
+          customer.phoneNumber?.[0] || phoneNumber
+        );
         // Return to profile
         setTimeout(async () => {
           await customer.updateConversationState("profile");
@@ -9932,7 +10062,7 @@ Don't worry — the driver will reach you and deliver the products safely..` +
           }
 
           await customer.save();
-          await customer.updateConversationState("main_menu");
+          await customer.updateConversationState("add_contact");
 
           let successMessage = `✅ Referral sent successfully to ${rawNumber}!\n\n`;
 
