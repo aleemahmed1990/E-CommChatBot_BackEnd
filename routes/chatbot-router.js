@@ -11980,11 +11980,11 @@ async function goToCart(phoneNumber, customer) {
   cartMessage += `\n*Final Total: ${formatRupiah(finalTotal)}*\n\n`;
 
   cartMessage += "What would you like to do next?\n\n";
-  cartMessage += "- Delete an item\n";
-  cartMessage += "- Empty my cart fully\n";
-  cartMessage += "- Proceed to payment\n";
-  cartMessage += "- Go back to menu\n";
-  cartMessage += "- View product details\n";
+  cartMessage += "(A) Delete an item\n";
+  cartMessage += "(B) Empty my cart fully\n";
+  cartMessage += "(C) Proceed to payment\n";
+  cartMessage += "(D) Go back to menu\n";
+  cartMessage += "(E) View product details\n";
 
   await sendWhatsAppMessage(phoneNumber, cartMessage);
   await customer.updateConversationState("cart_view");
