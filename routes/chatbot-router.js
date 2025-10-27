@@ -1978,74 +1978,95 @@ async function processChatMessage(phoneNumber, text, message) {
 
       case "cart_view":
         // Handle cart actions
-        switch (text.toLowerCase()) {
-          case "delete an item":
-            if (customer.cart.items.length === 0) {
-              await sendWhatsAppMessage(
-                phoneNumber,
-                "Your cart is already empty."
-              );
-              await sendMainMenu(phoneNumber, customer);
-            } else {
-              await customer.updateConversationState("cart_delete_item");
-              let deleteMessage =
-                "Which item would you like to remove from your cart?\n\n";
-              customer.cart.items.forEach((item, index) => {
-                deleteMessage += `${index + 1}. ${item.productName} (${
-                  item.weight
-                }) - ${item.quantity} units - ${item.totalPrice}\n`;
-              });
-              deleteMessage +=
-                "\nEnter the number of the item you want to delete.";
+        const cartChoice = text.toLowerCase().trim();
 
-              await sendWhatsAppMessage(phoneNumber, deleteMessage);
-            }
-            break;
-
-          case "empty my cart fully":
-            await customer.updateConversationState("cart_confirm_empty");
+        // Accept both letters (A, B, C...) and full text
+        if (
+          cartChoice === "a" ||
+          cartChoice === "delete an item" ||
+          cartChoice.includes("delete")
+        ) {
+          // Delete item
+          if (customer.cart.items.length === 0) {
             await sendWhatsAppMessage(
               phoneNumber,
-              "Are you sure you want to empty your cart?\n\n1. Yes, empty my cart\n2. No, keep my items"
+              "Your cart is already empty."
             );
-            break;
-
-          case "proceed to payment":
-          case "checkout":
-            await proceedToCheckout(phoneNumber, customer);
-            break;
-
-          case "go back to menu":
             await sendMainMenu(phoneNumber, customer);
-            break;
+          } else {
+            await customer.updateConversationState("cart_delete_item");
+            let deleteMessage =
+              "Which item would you like to remove from your cart?\n\n";
+            customer.cart.items.forEach((item, index) => {
+              deleteMessage += `${index + 1}. ${item.productName} (${
+                item.weight
+              }) - ${item.quantity} units - ${item.totalPrice}\n`;
+            });
+            deleteMessage +=
+              "\nEnter the number of the item you want to delete.";
 
-          case "view product details":
-            if (customer.cart.items.length === 0) {
-              await sendWhatsAppMessage(
-                phoneNumber,
-                "Your cart is empty. There are no product details to view."
-              );
-              await goToCart(phoneNumber, customer);
-            } else {
-              await customer.updateConversationState("cart_view_details");
-              let detailsMessage =
-                "Which product details would you like to view?\n\n";
-              customer.cart.items.forEach((item, index) => {
-                detailsMessage += `${index + 1}. ${item.productName} (${
-                  item.weight
-                })\n`;
-              });
-
-              await sendWhatsAppMessage(phoneNumber, detailsMessage);
-            }
-            break;
-
-          default:
+            await sendWhatsAppMessage(phoneNumber, deleteMessage);
+          }
+        } else if (
+          cartChoice === "b" ||
+          cartChoice === "empty my cart fully" ||
+          cartChoice.includes("empty")
+        ) {
+          // Empty cart
+          await customer.updateConversationState("cart_confirm_empty");
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Are you sure you want to empty your cart?\n\n1. Yes, empty my cart\n2. No, keep my items"
+          );
+        } else if (
+          cartChoice === "c" ||
+          cartChoice === "proceed to payment" ||
+          cartChoice === "checkout" ||
+          cartChoice.includes("proceed") ||
+          cartChoice.includes("payment")
+        ) {
+          // Proceed to checkout
+          await proceedToCheckout(phoneNumber, customer);
+        } else if (
+          cartChoice === "d" ||
+          cartChoice === "go back to menu" ||
+          cartChoice.includes("back") ||
+          cartChoice.includes("menu")
+        ) {
+          // Go back to menu
+          await sendMainMenu(phoneNumber, customer);
+        } else if (
+          cartChoice === "e" ||
+          cartChoice === "view product details" ||
+          cartChoice.includes("view") ||
+          cartChoice.includes("details")
+        ) {
+          // View product details
+          if (customer.cart.items.length === 0) {
             await sendWhatsAppMessage(
               phoneNumber,
-              "Please select a valid option from the cart menu, or type 0 to return to the main menu."
+              "Your cart is empty. There are no product details to view."
             );
-            break;
+            await goToCart(phoneNumber, customer);
+          } else {
+            await customer.updateConversationState("cart_view_details");
+            let detailsMessage =
+              "Which product details would you like to view?\n\n";
+            customer.cart.items.forEach((item, index) => {
+              detailsMessage += `${index + 1}. ${item.productName} (${
+                item.weight
+              })\n`;
+            });
+
+            await sendWhatsAppMessage(phoneNumber, detailsMessage);
+          }
+        } else if (cartChoice === "0") {
+          await sendMainMenu(phoneNumber, customer);
+        } else {
+          await sendWhatsAppMessage(
+            phoneNumber,
+            "Please select a valid option (A-E) or type 0 to return to the main menu."
+          );
         }
         break;
 
@@ -11801,11 +11822,11 @@ async function goToCart(phoneNumber, customer) {
   }
 
   cartMessage += "What would you like to do next?\n\n";
-  cartMessage += "- Delete an item\n";
-  cartMessage += "- Empty my cart fully\n";
-  cartMessage += "- Proceed to payment\n";
-  cartMessage += "- Go back to menu\n";
-  cartMessage += "- View product details\n";
+  cartMessage += "(A) Delete an item\n";
+  cartMessage += "(B) Empty my cart fully\n";
+  cartMessage += "(C) Proceed to payment\n";
+  cartMessage += "(D) Go back to menu\n";
+  cartMessage += "(E) View product details\n";
 
   await sendWhatsAppMessage(phoneNumber, cartMessage);
   await customer.updateConversationState("cart_view");
