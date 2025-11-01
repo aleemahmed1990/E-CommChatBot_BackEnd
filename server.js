@@ -198,7 +198,7 @@ const seedAdminUser = async () => {
       adminUser = new User({
         username: "admin12",
         email: "admin12@admin.com",
-        password: "1234", // This will be hashed by the pre-save hook
+        password: "admin12", // This will be hashed by the pre-save hook
         name: "Default Admin",
         role: superAdminRole._id,
         status: "active",
@@ -209,7 +209,7 @@ const seedAdminUser = async () => {
       await adminUser.save();
       console.log("✅ Admin user 'admin12' created successfully");
       console.log("   Username: admin12");
-      console.log("   Password: 1234");
+      console.log("   Password: admin123");
       console.log("   Role: Super Administrator");
     } else {
       console.log("✅ Admin user 'admin12' already exists");
@@ -222,21 +222,21 @@ const seedAdminUser = async () => {
         console.log("🔄 Updating admin12 role to super_admin...");
         adminUser.role = superAdminRole._id;
         await adminUser.save();
-        console.log("✅ Admin12 role updated to super_admin");
+        console.log("✅ admin12 role updated to super_admin");
       }
     }
 
     // Ensure password is correct (in case user exists but password was changed)
     const isPasswordCorrect = await adminUser
-      .comparePassword("1234")
+      .comparePassword("admin12")
       .catch(() => false);
     if (!isPasswordCorrect) {
-      console.log("🔄 Resetting admin12 password to '1234'...");
+      console.log("🔄 Resetting admin12 password to 'admin12'...");
       adminUser.password = "1234"; // This will trigger the pre-save hook to hash it
       adminUser.loginAttempts = 0;
       adminUser.lockUntil = undefined;
       await adminUser.save();
-      console.log("✅ Admin12 password reset successfully");
+      console.log("✅ admin12 password reset successfully");
     }
   } catch (error) {
     console.error("❌ Error seeding admin user:", error);
