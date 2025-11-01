@@ -397,7 +397,7 @@ async function seedDatabase() {
     // Connect to MongoDB if not already connected
     if (mongoose.connection.readyState !== 1) {
       await mongoose.connect(
-        "mongodb+srv://realahmedali4:HcPqEvYvWK4Yvrgs@cluster0.cjdum.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0",
+        "mongodb+srv://chatbiz50_db_user:hv2Lr5GNFG3vo0Mt@cluster0.m8czptr.mongodb.net/?appName=Cluster0",
         {
           useNewUrlParser: true,
           useUnifiedTopology: true,
