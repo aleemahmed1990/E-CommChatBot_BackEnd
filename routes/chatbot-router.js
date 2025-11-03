@@ -1140,7 +1140,6 @@ async function sendCategoriesList(phoneNumber, customer) {
   await customer.save();
 }
 
-// ─── Subcategories Menu ────────────────────────────────────────────────────────
 async function sendSubcategoriesList(phoneNumber, customer, category) {
   const subcats = Array.isArray(category.subcategories)
     ? category.subcategories
@@ -1149,12 +1148,13 @@ async function sendSubcategoriesList(phoneNumber, customer, category) {
   customer.contextData.subcategoryList = subcats;
   await customer.save();
 
-  // if no subcats, jump straight to products
+  // ✅ If no subcategories, show products directly using the CATEGORY NAME
   if (subcats.length === 0) {
     await customer.updateConversationState("product_list");
-    return sendProductsList(phoneNumber, customer, category.name);
+    return sendProductsList(phoneNumber, customer, category.name); // Pass category name
   }
 
+  // Has subcategories, show subcategory menu
   let msg = `You selected category: ${category.name}\n\n`;
   msg += `This is the product divisions under category ${category.name}\n\n`;
 
@@ -1168,7 +1168,6 @@ async function sendSubcategoriesList(phoneNumber, customer, category) {
 
   await sendWhatsAppMessage(phoneNumber, msg);
 }
-
 // Helper function to find category by ID
 function findCategoryById(categoryId) {
   return productDatabase.categories.find((cat) => cat.id === categoryId);
@@ -1578,12 +1577,14 @@ async function processChatMessage(phoneNumber, text, message) {
       case "shopping_subcategories":
         const idxSub = parseInt(text) - 1;
         const subList = customer.contextData.subcategoryList || [];
+
         if (idxSub >= 0 && idxSub < subList.length) {
           const selSub = subList[idxSub];
           customer.contextData.subCategoryName = selSub;
           await customer.save();
+
           await customer.updateConversationState("product_list");
-          await sendProductsList(phoneNumber, customer, selSub);
+          await sendProductsList(phoneNumber, customer, selSub); // ✅ Pass subcategory name
         } else if (text.toLowerCase() === "view cart") {
           await goToCart(phoneNumber, customer);
         } else {
@@ -1593,7 +1594,6 @@ async function processChatMessage(phoneNumber, text, message) {
           );
         }
         break;
-
       case "product_list":
         const idxProd = parseInt(text) - 1;
         const prodList = customer.contextData.productList || [];
@@ -11707,22 +11707,63 @@ async function getDiscountProductByNumber(number) {
   }
 }
 
-// ─── Products List ─────────────────────────────────────────────────────────────
-async function sendProductsList(phoneNumber, customer, subCategoryName) {
-  const products = await Product.find({
-    subCategories: subCategoryName,
+async function sendProductsList(phoneNumber, customer, categoryOrSubcategory) {
+  console.log(`🔍 Searching products for: "${categoryOrSubcategory}"`);
+
+  let products = [];
+
+  // Strategy 1: Try finding by subcategory first
+  products = await Product.find({
+    subCategories: categoryOrSubcategory,
     productType: { $in: ["Child", "Normal"] },
     visibility: "Public",
-  });
+  }).lean();
 
-  let msg = `You selected: ${subCategoryName}\n\n`;
+  console.log(`📦 Found ${products.length} products by subcategory`);
+
+  // Strategy 2: If no products found, try finding by main category (for products without subcategories)
+  if (products.length === 0) {
+    products = await Product.find({
+      categories: categoryOrSubcategory,
+      $or: [
+        { subCategories: { $exists: false } },
+        { subCategories: "" },
+        { subCategories: null },
+      ],
+      productType: { $in: ["Child", "Normal"] },
+      visibility: "Public",
+    }).lean();
+
+    console.log(`📦 Found ${products.length} products by category`);
+  }
+
+  // No products found at all
+  if (products.length === 0) {
+    console.log(`❌ No products found for "${categoryOrSubcategory}"`);
+
+    await sendWhatsAppMessage(
+      phoneNumber,
+      `❌ No products available in "${categoryOrSubcategory}" at the moment.\n\n` +
+        `Please try another category or type 0 to return to main menu.`
+    );
+
+    await customer.updateConversationState("shopping_categories");
+    await sendCategoriesList(phoneNumber, customer);
+    return;
+  }
+
+  // ✅ Products found! Display them
+  console.log(`✅ Displaying ${products.length} products`);
+
+  let msg = `You selected: ${categoryOrSubcategory}\n\n`;
   msg += `Available products:\n\n`;
 
+  // Store product IDs for later reference
   customer.contextData.productList = products.map((p) => p._id.toString());
 
   products.forEach((prod, idx) => {
-    const price = prod.NormalPrice ?? prod.NormalPrice ?? 0;
-    msg += `${idx + 1}. ${prod.productName} - Rp ${price}\n`;
+    const price = prod.NormalPrice ?? 0;
+    msg += `${idx + 1}. ${prod.productName} - Rp ${price.toLocaleString()}\n`;
   });
 
   msg +=
@@ -11732,7 +11773,6 @@ async function sendProductsList(phoneNumber, customer, subCategoryName) {
   await sendWhatsAppMessage(phoneNumber, msg);
   await customer.save();
 }
-
 async function sendProductDetails(to, customer, product) {
   // Determine price
   const price =
