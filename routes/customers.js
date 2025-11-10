@@ -4,7 +4,7 @@ const Customer = require("../models/customer");
 
 // ─── GET /api/customers ─────────────────────────────────
 // List all customers with pagination and search
-router.get("/customers", async (req, res) => {
+router.get("/", async (req, res) => {
   try {
     const {
       search,
@@ -210,7 +210,7 @@ router.get("/customers", async (req, res) => {
 
 // ─── GET /api/customers/:id ─────────────────────────────
 // Get single customer details with complete schema information
-router.get("/customers/:id", async (req, res) => {
+router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -527,7 +527,7 @@ router.post("/customers/:id/notes", async (req, res) => {
 
 // ─── GET /api/customers/:id/orders ──────────────────────
 // Get customer orders with pagination and filtering (from both order arrays)
-router.get("/customers/:id/orders", async (req, res) => {
+router.get("/:id/orders", async (req, res) => {
   try {
     const { id } = req.params;
     const { status, page = 1, limit = 10 } = req.query;
@@ -569,7 +569,7 @@ router.get("/customers/:id/orders", async (req, res) => {
 
 // ─── GET /api/customers/:id/chat ────────────────────────
 // Get customer chat history
-router.get("/customers/:id/chat", async (req, res) => {
+router.get("/:id/chat", async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -709,7 +709,7 @@ router.put("/customers/:id/loyalty", async (req, res) => {
 
 // ─── GET /api/customers/analytics/summary ───────────────
 // Get customer analytics summary
-router.get("/customers/analytics/summary", async (req, res) => {
+router.get("/analytics/summary", async (req, res) => {
   try {
     const pipeline = [
       {
@@ -1009,7 +1009,7 @@ router.put("/orders/:orderId/item-status", async (req, res) => {
 
 // ─── GET /api/orders/:orderId ───────────────────────────
 // Get single order detail with customer info
-router.get("/orders/:orderId", async (req, res) => {
+router.get("/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
 
@@ -1191,7 +1191,7 @@ router.put("/orders/:orderId/ready", async (req, res) => {
 });
 
 // Return phone number and name for a given order
-router.get("/orders/:orderId/phone", async (req, res) => {
+router.get(":orderId/phone", async (req, res) => {
   try {
     const { orderId } = req.params;
 

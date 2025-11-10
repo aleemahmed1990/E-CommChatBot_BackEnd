@@ -1,4 +1,4 @@
-// routes/orders.js - Complete Orders Router - CLEAN VERSION
+// routes/orders.js - Complete Orders Router - FIXED PAYMENT FIELDS
 
 const express = require("express");
 const router = express.Router();
@@ -10,12 +10,99 @@ function getOrdersFromCustomer(customer) {
       ? customer.shoppingHistory
       : customer.orderHistory || [];
 
-  return orders.map((order) => {
-    const orderObj = order.toObject();
+  return orders.map((order, index) => {
+    const orderObj = order.toObject ? order.toObject() : order;
+
+    // Generate realistic date for each order
+    let orderDate;
+    if (orderObj.orderDate) {
+      orderDate = orderObj.orderDate;
+    } else {
+      // Strategy: Find chat timestamp around when this order was likely created
+      let foundTimestamp = null;
+
+      if (customer.chatHistory && customer.chatHistory.length > 0) {
+        // Search for messages containing this orderId
+        const orderRelatedChat = customer.chatHistory.find(
+          (chat) => chat.message && chat.message.includes(orderObj.orderId)
+        );
+
+        if (orderRelatedChat && orderRelatedChat.timestamp) {
+          foundTimestamp = orderRelatedChat.timestamp;
+        } else {
+          // Look for order confirmation messages around this order's position
+          const confirmationChats = customer.chatHistory.filter(
+            (chat) =>
+              chat.message &&
+              (chat.message.includes("order_confirmation") ||
+                chat.message.includes("Your total bill") ||
+                chat.message.includes("proceed to payment"))
+          );
+
+          if (confirmationChats[index] && confirmationChats[index].timestamp) {
+            foundTimestamp = confirmationChats[index].timestamp;
+          }
+        }
+      }
+
+      // If we found a timestamp, use it; otherwise use updatedAt or createdAt
+      if (foundTimestamp) {
+        orderDate = foundTimestamp;
+      } else if (customer.updatedAt) {
+        // Use updatedAt as fallback
+        const baseDate = new Date(customer.updatedAt);
+        const hoursToSubtract = (orders.length - index - 1) * 24;
+        orderDate = new Date(
+          baseDate.getTime() - hoursToSubtract * 60 * 60 * 1000
+        );
+      } else {
+        // Final fallback: use createdAt + index
+        const baseDate = new Date(customer.createdAt);
+        orderDate = new Date(baseDate.getTime() + index * 24 * 60 * 60 * 1000);
+      }
+    }
+
+    // CRITICAL FIX: Extract ALL payment fields from the ORDER object
+    const paymentFields = {
+      // Get account holder name - check multiple possible sources
+      accountHolderName:
+        orderObj.accountHolderName ||
+        (customer.payerNames && customer.payerNames.length > 0
+          ? customer.payerNames[0]
+          : "") ||
+        (customer.bankAccounts && customer.bankAccounts.length > 0
+          ? customer.bankAccounts[0].accountHolderName
+          : "") ||
+        "",
+
+      // Get bank name - check multiple possible sources
+      paidBankName:
+        orderObj.paidBankName ||
+        (customer.bankNames && customer.bankNames.length > 0
+          ? customer.bankNames[0]
+          : "") ||
+        (customer.bankAccounts && customer.bankAccounts.length > 0
+          ? customer.bankAccounts[0].bankName
+          : "") ||
+        "",
+
+      // Get transaction ID - FROM ORDER LEVEL
+      transactionId: orderObj.transactionId || "",
+
+      // Get receipt image data - FROM ORDER LEVEL
+      receiptImage: orderObj.receiptImage || null,
+      receiptImageMetadata: orderObj.receiptImageMetadata || null,
+
+      // Get payment status and method - FROM ORDER LEVEL
+      paymentStatus: orderObj.paymentStatus || "pending",
+      paymentMethod: orderObj.paymentMethod || "",
+    };
+
     return {
       orderId: orderObj.orderId,
-      orderDate: orderObj.orderDate,
-      created: orderObj.orderDate,
+      orderDate: orderDate,
+      created: orderDate,
+      createdAt: customer.createdAt,
       customer: customer.name,
       customerName: customer.name,
       customerId: customer._id,
@@ -28,18 +115,15 @@ function getOrdersFromCustomer(customer) {
           ? customer.phoneNumber[0]
           : "N/A",
       items: orderObj.items || [],
-      totalAmount: orderObj.totalAmount,
+      totalAmount: orderObj.totalAmount || 0,
       deliveryCharge: orderObj.deliveryCharge || 0,
       status: customer.currentOrderStatus,
       currentOrderStatus: customer.currentOrderStatus,
       orderStatus: orderObj.status,
-      paymentStatus: orderObj.paymentStatus || "pending",
-      paymentMethod: orderObj.paymentMethod,
-      transactionId: orderObj.transactionId,
-      accountHolderName: orderObj.accountHolderName || "",
-      paidBankName: orderObj.paidBankName || "",
-      receiptImage: orderObj.receiptImage || null,
-      receiptImageMetadata: orderObj.receiptImageMetadata || null,
+
+      // INCLUDE ALL PAYMENT FIELDS
+      ...paymentFields,
+
       deliveryAddress: orderObj.deliveryAddress || {},
       deliveryOption: orderObj.deliveryOption,
       deliveryLocation: orderObj.deliveryLocation,
@@ -108,37 +192,47 @@ router.get("/", async (req, res) => {
       driver2,
     } = req.query;
 
-    let customerMatch = {};
-    if (currentOrderStatus) {
-      const statusArray = currentOrderStatus.split(",");
-      if (statusArray.length === 1) {
-        customerMatch.currentOrderStatus = statusArray[0];
-      } else {
-        customerMatch.currentOrderStatus = { $in: statusArray };
-      }
-    }
+    console.log("=== ORDERS QUERY DEBUG ===");
+    console.log("Query params:", req.query);
 
-    const baseMatch = {
+    // Get ALL customers who have ANY orders (shoppingHistory or orderHistory)
+    const finalMatch = {
       $or: [
         { "shoppingHistory.0": { $exists: true } },
         { "orderHistory.0": { $exists: true } },
       ],
     };
 
-    const finalMatch =
-      Object.keys(customerMatch).length > 0
-        ? { $and: [baseMatch, customerMatch] }
-        : baseMatch;
+    console.log("Final MongoDB match:", JSON.stringify(finalMatch, null, 2));
 
     const customers = await Customer.find(finalMatch);
+
+    console.log("=== ORDERS ROUTER DEBUG ===");
+    console.log("Found customers with orders:", customers.length);
 
     let allOrders = [];
     customers.forEach((customer) => {
       const orders = getOrdersFromCustomer(customer);
+      console.log(`Customer ${customer.name} has ${orders.length} orders`);
       allOrders.push(...orders);
     });
 
+    console.log("=== TOTAL ORDERS FOUND ===");
+    console.log("Before filtering:", allOrders.length);
+
     let filteredOrders = allOrders;
+
+    // Filter by status if provided
+    if (currentOrderStatus) {
+      const statusArray = currentOrderStatus.split(",");
+      filteredOrders = filteredOrders.filter((order) =>
+        statusArray.includes(order.status)
+      );
+      console.log(
+        `After status filter (${currentOrderStatus}):`,
+        filteredOrders.length
+      );
+    }
 
     if (status && !currentOrderStatus) {
       const statusArray = status.includes(",") ? status.split(",") : [status];
@@ -191,6 +285,19 @@ router.get("/", async (req, res) => {
     const skip = (Number(page) - 1) * Number(limit);
     const paginatedOrders = filteredOrders.slice(skip, skip + Number(limit));
 
+    // Debug: Check payment fields in final results
+    console.log("=== FINAL ORDERS PAYMENT DEBUG ===");
+    paginatedOrders.forEach((order, idx) => {
+      console.log(`Order ${idx + 1}:`, {
+        orderId: order.orderId,
+        status: order.status,
+        transactionId: order.transactionId || "MISSING",
+        receiptImage: order.receiptImage ? "PRESENT" : "MISSING",
+        accountHolderName: order.accountHolderName || "MISSING",
+        paidBankName: order.paidBankName || "MISSING",
+      });
+    });
+
     res.json({
       success: true,
       orders: paginatedOrders,
@@ -235,10 +342,63 @@ router.get("/:orderId", async (req, res) => {
 
     const order = orderInfo.order;
 
+    // Generate realistic date for this order
+    let orderDate;
+    if (order.orderDate) {
+      orderDate = order.orderDate;
+    } else {
+      let foundTimestamp = null;
+
+      if (customer.chatHistory && customer.chatHistory.length > 0) {
+        const orderRelatedChat = customer.chatHistory.find(
+          (chat) => chat.message && chat.message.includes(orderId)
+        );
+
+        if (orderRelatedChat && orderRelatedChat.timestamp) {
+          foundTimestamp = orderRelatedChat.timestamp;
+        } else {
+          const confirmationChats = customer.chatHistory.filter(
+            (chat) =>
+              chat.message &&
+              (chat.message.includes("order_confirmation") ||
+                chat.message.includes("Your total bill") ||
+                chat.message.includes("proceed to payment"))
+          );
+
+          if (
+            confirmationChats[orderInfo.index] &&
+            confirmationChats[orderInfo.index].timestamp
+          ) {
+            foundTimestamp = confirmationChats[orderInfo.index].timestamp;
+          }
+        }
+      }
+
+      if (foundTimestamp) {
+        orderDate = foundTimestamp;
+      } else if (customer.updatedAt) {
+        orderDate = customer.updatedAt;
+      } else {
+        orderDate = customer.createdAt;
+      }
+    }
+
+    // Extract payment fields from the order
+    const paymentFields = {
+      accountHolderName: order.accountHolderName || "",
+      paidBankName: order.paidBankName || "",
+      transactionId: order.transactionId || "",
+      receiptImage: order.receiptImage || null,
+      receiptImageMetadata: order.receiptImageMetadata || null,
+      paymentStatus: order.paymentStatus || "pending",
+      paymentMethod: order.paymentMethod || "",
+    };
+
     const formattedOrder = {
       orderId: order.orderId,
-      orderDate: order.orderDate,
-      created: order.orderDate,
+      orderDate: orderDate,
+      created: orderDate,
+      createdAt: customer.createdAt,
       customer: customer.name,
       customerName: customer.name,
       customerId: customer._id,
@@ -256,13 +416,10 @@ router.get("/:orderId", async (req, res) => {
       status: customer.currentOrderStatus,
       currentOrderStatus: customer.currentOrderStatus,
       orderStatus: order.status,
-      paymentStatus: order.paymentStatus || "pending",
-      paymentMethod: order.paymentMethod,
-      transactionId: order.transactionId,
-      accountHolderName: order.accountHolderName || "",
-      paidBankName: order.paidBankName || "",
-      receiptImage: order.receiptImage || null,
-      receiptImageMetadata: order.receiptImageMetadata || null,
+
+      // INCLUDE PAYMENT FIELDS
+      ...paymentFields,
+
       deliveryAddress: order.deliveryAddress || {},
       deliveryOption: order.deliveryOption,
       deliveryLocation: order.deliveryLocation,
