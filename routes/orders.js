@@ -1,9 +1,13 @@
-// routes/orders.js - Complete Orders Router - FIXED PAYMENT FIELDS
+// routes/orders.js - COMPLETE FIXED VERSION with proper payment field extraction
 
 const express = require("express");
 const router = express.Router();
 const Customer = require("../models/customer");
 
+/**
+ * ✅ ENHANCED: getOrdersFromCustomer
+ * This function now properly extracts payment fields from BOTH order and customer
+ */
 function getOrdersFromCustomer(customer) {
   const orders =
     customer.shoppingHistory && customer.shoppingHistory.length > 0
@@ -18,11 +22,9 @@ function getOrdersFromCustomer(customer) {
     if (orderObj.orderDate) {
       orderDate = orderObj.orderDate;
     } else {
-      // Strategy: Find chat timestamp around when this order was likely created
       let foundTimestamp = null;
 
       if (customer.chatHistory && customer.chatHistory.length > 0) {
-        // Search for messages containing this orderId
         const orderRelatedChat = customer.chatHistory.find(
           (chat) => chat.message && chat.message.includes(orderObj.orderId)
         );
@@ -30,7 +32,6 @@ function getOrdersFromCustomer(customer) {
         if (orderRelatedChat && orderRelatedChat.timestamp) {
           foundTimestamp = orderRelatedChat.timestamp;
         } else {
-          // Look for order confirmation messages around this order's position
           const confirmationChats = customer.chatHistory.filter(
             (chat) =>
               chat.message &&
@@ -45,26 +46,26 @@ function getOrdersFromCustomer(customer) {
         }
       }
 
-      // If we found a timestamp, use it; otherwise use updatedAt or createdAt
       if (foundTimestamp) {
         orderDate = foundTimestamp;
       } else if (customer.updatedAt) {
-        // Use updatedAt as fallback
         const baseDate = new Date(customer.updatedAt);
         const hoursToSubtract = (orders.length - index - 1) * 24;
         orderDate = new Date(
           baseDate.getTime() - hoursToSubtract * 60 * 60 * 1000
         );
       } else {
-        // Final fallback: use createdAt + index
         const baseDate = new Date(customer.createdAt);
         orderDate = new Date(baseDate.getTime() + index * 24 * 60 * 60 * 1000);
       }
     }
 
-    // CRITICAL FIX: Extract ALL payment fields from the ORDER object
+    /**
+     * ✅ CRITICAL FIX: Complete Payment Field Extraction
+     * Now checks multiple sources in proper priority order
+     */
     const paymentFields = {
-      // Get account holder name - check multiple possible sources
+      // Account Holder Name - Check in priority order
       accountHolderName:
         orderObj.accountHolderName ||
         (customer.payerNames && customer.payerNames.length > 0
@@ -75,7 +76,7 @@ function getOrdersFromCustomer(customer) {
           : "") ||
         "",
 
-      // Get bank name - check multiple possible sources
+      // Bank Name - Check in priority order
       paidBankName:
         orderObj.paidBankName ||
         (customer.bankNames && customer.bankNames.length > 0
@@ -86,14 +87,14 @@ function getOrdersFromCustomer(customer) {
           : "") ||
         "",
 
-      // Get transaction ID - FROM ORDER LEVEL
+      // Transaction ID - FROM ORDER LEVEL
       transactionId: orderObj.transactionId || "",
 
-      // Get receipt image data - FROM ORDER LEVEL
+      // Receipt Image Data - FROM ORDER LEVEL
       receiptImage: orderObj.receiptImage || null,
       receiptImageMetadata: orderObj.receiptImageMetadata || null,
 
-      // Get payment status and method - FROM ORDER LEVEL
+      // Payment Status and Method - FROM ORDER LEVEL
       paymentStatus: orderObj.paymentStatus || "pending",
       paymentMethod: orderObj.paymentMethod || "",
     };
@@ -121,7 +122,7 @@ function getOrdersFromCustomer(customer) {
       currentOrderStatus: customer.currentOrderStatus,
       orderStatus: orderObj.status,
 
-      // INCLUDE ALL PAYMENT FIELDS
+      // ✅ INCLUDE ALL PAYMENT FIELDS WITH PROPER FALLBACKS
       ...paymentFields,
 
       deliveryAddress: orderObj.deliveryAddress || {},
@@ -176,6 +177,7 @@ function findOrderInCustomer(customer, orderId) {
   return null;
 }
 
+// GET /api/orders - List all orders with filtering
 router.get("/", async (req, res) => {
   try {
     const {
@@ -195,15 +197,12 @@ router.get("/", async (req, res) => {
     console.log("=== ORDERS QUERY DEBUG ===");
     console.log("Query params:", req.query);
 
-    // Get ALL customers who have ANY orders (shoppingHistory or orderHistory)
     const finalMatch = {
       $or: [
         { "shoppingHistory.0": { $exists: true } },
         { "orderHistory.0": { $exists: true } },
       ],
     };
-
-    console.log("Final MongoDB match:", JSON.stringify(finalMatch, null, 2));
 
     const customers = await Customer.find(finalMatch);
 
@@ -222,7 +221,6 @@ router.get("/", async (req, res) => {
 
     let filteredOrders = allOrders;
 
-    // Filter by status if provided
     if (currentOrderStatus) {
       const statusArray = currentOrderStatus.split(",");
       filteredOrders = filteredOrders.filter((order) =>
@@ -285,7 +283,6 @@ router.get("/", async (req, res) => {
     const skip = (Number(page) - 1) * Number(limit);
     const paginatedOrders = filteredOrders.slice(skip, skip + Number(limit));
 
-    // Debug: Check payment fields in final results
     console.log("=== FINAL ORDERS PAYMENT DEBUG ===");
     paginatedOrders.forEach((order, idx) => {
       console.log(`Order ${idx + 1}:`, {
@@ -314,9 +311,13 @@ router.get("/", async (req, res) => {
   }
 });
 
+// GET /api/orders/:orderId - Get single order with complete data
 router.get("/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
+
+    console.log("=== GET SINGLE ORDER DEBUG ===");
+    console.log("Requested Order ID:", orderId);
 
     const customer = await Customer.findOne({
       $or: [
@@ -326,11 +327,16 @@ router.get("/:orderId", async (req, res) => {
     });
 
     if (!customer) {
+      console.log("Customer not found for order:", orderId);
       return res.status(404).json({
         success: false,
         message: "Order not found",
       });
     }
+
+    console.log("Found customer:", customer.name);
+    console.log("Customer payerNames:", customer.payerNames);
+    console.log("Customer bankNames:", customer.bankNames);
 
     const orderInfo = findOrderInCustomer(customer, orderId);
     if (!orderInfo) {
@@ -383,16 +389,45 @@ router.get("/:orderId", async (req, res) => {
       }
     }
 
-    // Extract payment fields from the order
+    /**
+     * ✅ CRITICAL FIX: Extract payment fields with proper fallbacks
+     */
     const paymentFields = {
-      accountHolderName: order.accountHolderName || "",
-      paidBankName: order.paidBankName || "",
+      accountHolderName:
+        order.accountHolderName ||
+        (customer.payerNames && customer.payerNames.length > 0
+          ? customer.payerNames[0]
+          : "") ||
+        (customer.bankAccounts && customer.bankAccounts.length > 0
+          ? customer.bankAccounts[0].accountHolderName
+          : "") ||
+        "",
+
+      paidBankName:
+        order.paidBankName ||
+        (customer.bankNames && customer.bankNames.length > 0
+          ? customer.bankNames[0]
+          : "") ||
+        (customer.bankAccounts && customer.bankAccounts.length > 0
+          ? customer.bankAccounts[0].bankName
+          : "") ||
+        "",
+
       transactionId: order.transactionId || "",
       receiptImage: order.receiptImage || null,
       receiptImageMetadata: order.receiptImageMetadata || null,
       paymentStatus: order.paymentStatus || "pending",
       paymentMethod: order.paymentMethod || "",
     };
+
+    console.log("=== PAYMENT FIELDS EXTRACTED ===");
+    console.log("Account Holder:", paymentFields.accountHolderName);
+    console.log("Bank Name:", paymentFields.paidBankName);
+    console.log("Transaction ID:", paymentFields.transactionId);
+    console.log(
+      "Receipt Image:",
+      paymentFields.receiptImage ? "PRESENT" : "MISSING"
+    );
 
     const formattedOrder = {
       orderId: order.orderId,
@@ -417,7 +452,7 @@ router.get("/:orderId", async (req, res) => {
       currentOrderStatus: customer.currentOrderStatus,
       orderStatus: order.status,
 
-      // INCLUDE PAYMENT FIELDS
+      // ✅ INCLUDE ALL PAYMENT FIELDS
       ...paymentFields,
 
       deliveryAddress: order.deliveryAddress || {},
@@ -453,6 +488,7 @@ router.get("/:orderId", async (req, res) => {
   }
 });
 
+// PUT /api/orders/:orderId/status - Update order status
 router.put("/:orderId/status", async (req, res) => {
   try {
     const { orderId } = req.params;

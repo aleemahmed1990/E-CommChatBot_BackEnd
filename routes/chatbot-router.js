@@ -1309,6 +1309,7 @@ async function createOrder(customer) {
   };
 
   customer.orderHistory.push(newOrder);
+  customer.shoppingHistory.push(newOrder);
   customer.latestOrderId = orderId;
   customer.currentOrderStatus = "order-made-not-paid";
 
@@ -2998,87 +2999,118 @@ async function processChatMessage(phoneNumber, text, message) {
         }
         break;
 
-      // ─── CASE: checkout_wait_receipt ────────────────────────────
       case "checkout_wait_receipt": {
-        // Ensure the received message is an image
         if (!message.hasMedia || message.type !== "image") {
           await sendWhatsAppMessage(
             phoneNumber,
-            "❗ You must send a screenshot of your payment receipt to proceed."
+            "❗ Please send a screenshot of your payment receipt."
           );
           break;
         }
 
-        // Acknowledge receipt of the image
         await sendWhatsAppMessage(
           phoneNumber,
-          "✅ Receipt received. Your payment will be confirmed by us in a moment"
+          "✅ Receipt received. Your payment will be confirmed..."
         );
 
         try {
-          // For UltraMsg, we use the already downloaded media from webhook
-          if (!message.mediaInfo || !message.localMediaPath) {
+          const imageBuffer = fs.readFileSync(message.localMediaPath);
+          const base64Image = imageBuffer.toString("base64"); // ✅ JUST base64, not data URL
+
+          // Find the most recent order
+          let orderId = customer.contextData.latestOrderId;
+          let order = null;
+          let isShoppingHistory = false;
+
+          // ✅ SEARCH SHOPPING HISTORY FIRST (Preferred)
+          if (!orderId && customer.shoppingHistory?.length > 0) {
+            order =
+              customer.shoppingHistory[customer.shoppingHistory.length - 1];
+            orderId = order.orderId;
+            isShoppingHistory = true;
+          }
+
+          // Fallback to orderHistory if needed
+          if (!orderId && customer.orderHistory?.length > 0) {
+            order = customer.orderHistory[customer.orderHistory.length - 1];
+            orderId = order.orderId;
+            isShoppingHistory = false;
+          }
+
+          if (!order) {
             await sendWhatsAppMessage(
               phoneNumber,
-              "❌ Error: Could not process your receipt image. Please try again."
+              "❌ Error: No order found. Please contact support."
             );
             break;
           }
 
-          // Read the downloaded image file
-          const imageBuffer = fs.readFileSync(message.localMediaPath);
-          const base64Image = `data:${
-            message.mediaInfo.mimetype
-          };base64,${imageBuffer.toString("base64")}`;
+          // ✅ SAVE TO CORRECT LOCATION
+          const orderIndex = isShoppingHistory
+            ? customer.shoppingHistory.findIndex((o) => o.orderId === orderId)
+            : customer.orderHistory.findIndex((o) => o.orderId === orderId);
 
-          // Check if we have a valid order ID, if not, find the most recent order
-          if (
-            !customer.contextData.latestOrderId &&
-            customer.orderHistory.length > 0
-          ) {
-            const recentOrders = [...customer.orderHistory].sort(
-              (a, b) => new Date(b.orderDate) - new Date(a.orderDate)
-            );
+          if (orderIndex >= 0) {
+            if (isShoppingHistory) {
+              // Save to shoppingHistory
+              customer.shoppingHistory[orderIndex].receiptImage = {
+                data: base64Image,
+                contentType: message.mediaInfo.mimetype,
+              };
 
-            if (recentOrders.length > 0) {
-              customer.contextData.latestOrderId = recentOrders[0].orderId;
-              console.log(
-                `Found most recent order: ${customer.contextData.latestOrderId}`
-              );
+              customer.shoppingHistory[orderIndex].receiptImageMetadata = {
+                mimetype: message.mediaInfo.mimetype,
+                filename: `receipt-${Date.now()}.${
+                  message.mediaInfo.mimetype.split("/")[1] || "jpeg"
+                }`,
+                timestamp: new Date(),
+              };
+
+              // Update status to pay-not-confirmed
+              customer.shoppingHistory[orderIndex].status = "pay-not-confirmed";
+              customer.currentOrderStatus = "pay-not-confirmed";
+            } else {
+              // Save to orderHistory (if using old system)
+              customer.orderHistory[orderIndex].receiptImage = {
+                data: base64Image,
+                contentType: message.mediaInfo.mimetype,
+              };
+
+              customer.orderHistory[orderIndex].receiptImageMetadata = {
+                mimetype: message.mediaInfo.mimetype,
+                filename: `receipt-${Date.now()}.${
+                  message.mediaInfo.mimetype.split("/")[1] || "jpeg"
+                }`,
+                timestamp: new Date(),
+              };
+
+              customer.orderHistory[orderIndex].status = "pay-not-confirmed";
+              customer.currentOrderStatus = "pay-not-confirmed";
             }
-          }
 
-          // Try to find the order with the ID
-          const idxPay = customer.orderHistory.findIndex(
-            (o) => o.orderId === customer.contextData.latestOrderId
-          );
-
-          if (idxPay >= 0) {
-            // Store the image in base64 format directly
-            customer.orderHistory[idxPay].receiptImage = {
-              data: base64Image,
-              contentType: message.mediaInfo.mimetype,
+            // Clear cart after payment receipt
+            customer.cart = {
+              items: [],
+              totalAmount: 0,
+              deliveryCharge: 0,
+              deliveryType: "truck",
+              deliverySpeed: "normal",
+              deliveryOption: "Normal Delivery",
+              deliveryLocation: "",
+              deliveryTimeFrame: "",
+              firstOrderDiscount: 0,
+              ecoDeliveryDiscount: 0,
+              deliveryAddress: {},
             };
 
-            // Store receipt image metadata
-            customer.orderHistory[idxPay].receiptImageMetadata = {
-              mimetype: message.mediaInfo.mimetype,
-              filename: `receipt-${Date.now()}.${
-                message.mediaInfo.mimetype.split("/")[1] || "jpeg"
-              }`,
-              timestamp: new Date(),
-              originalUrl: message.mediaInfo.url, // Store UltraMsg media URL for reference
-            };
+            customer.latestOrderId = null;
 
-            // Update order status to 'pay-not-confirmed'
-            customer.orderHistory[idxPay].status = "pay-not-confirmed";
-            customer.currentOrderStatus = "pay-not-confirmed";
-
-            // Save the updated customer document
+            // ✅ Save to database
             await customer.save();
 
+            console.log(`✅ Receipt saved for order: ${orderId}`);
             console.log(
-              `Successfully saved receipt for order: ${customer.contextData.latestOrderId}`
+              `✅ Cart cleared for customer: ${customer.phoneNumber[0]}`
             );
           } else {
             console.log(
@@ -11677,6 +11709,7 @@ async function recordCartOrder(customer) {
     customer.orderHistory[existingIdx] = cartOrder;
   } else {
     customer.orderHistory.push(cartOrder);
+    customer.shoppingHistory.push(cartOrder);
   }
 
   customer.latestOrderId = orderId;
