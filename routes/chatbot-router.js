@@ -175,6 +175,127 @@ async function sendImageWithCaption(to, imagePath, caption) {
 /**
  * Download media from Ultramsg
  */
+
+setInterval(clearAbandonedCarts, 60 * 60 * 1000); // Check every hour
+
+async function clearAbandonedCarts() {
+  try {
+    const now = new Date();
+    const twentyFourHoursAgo = new Date(now - 24 * 60 * 60 * 1000);
+
+    // Find customers with unpaid carts older than 24 hours
+    const customersWithAbandonedCarts = await Customer.find({
+      $or: [
+        {
+          currentOrderStatus: "cart-not-paid",
+          "orderHistory.status": "cart-not-paid",
+          "orderHistory.orderDate": { $lt: twentyFourHoursAgo },
+        },
+        {
+          currentOrderStatus: "order-made-not-paid",
+          "orderHistory.status": "order-made-not-paid",
+          "orderHistory.orderDate": { $lt: twentyFourHoursAgo },
+        },
+      ],
+    });
+
+    console.log(
+      `🧹 Found ${customersWithAbandonedCarts.length} customers with abandoned carts`
+    );
+
+    for (const customer of customersWithAbandonedCarts) {
+      try {
+        const latestOrder =
+          customer.orderHistory[customer.orderHistory.length - 1];
+
+        // Only clear if order timestamp is truly older than 24 hours
+        // AND cart hasn't been recently updated
+        if (
+          latestOrder &&
+          (latestOrder.status === "cart-not-paid" ||
+            latestOrder.status === "order-made-not-paid") &&
+          new Date(latestOrder.orderDate) < twentyFourHoursAgo &&
+          (!latestOrder.lastCartUpdate ||
+            new Date(latestOrder.lastCartUpdate) < twentyFourHoursAgo)
+        ) {
+          // Remove the unpaid order
+          customer.orderHistory = customer.orderHistory.filter(
+            (o) =>
+              !(o.orderId === latestOrder.orderId && o.paymentStatus !== "paid")
+          );
+
+          // Clear cart
+          customer.cart = {
+            items: [],
+            totalAmount: 0,
+            deliveryCharge: 0,
+            deliveryType: "truck",
+            deliverySpeed: "normal",
+            deliveryOption: "Normal Delivery",
+            deliveryLocation: "",
+            deliveryTimeFrame: "",
+            firstOrderDiscount: 0,
+            ecoDeliveryDiscount: 0,
+            deliveryAddress: {},
+          };
+
+          customer.latestOrderId = null;
+          customer.currentOrderStatus = "main_menu";
+
+          await customer.save();
+
+          console.log(
+            `✅ Cleared abandoned cart for customer: ${customer.phoneNumber[0]}`
+          );
+
+          // Send notification
+          try {
+            await sendWhatsAppMessage(
+              customer.phoneNumber[0],
+              `⏰ Your cart was cleared due to inactivity (no payment for 24 hours).\n\nType 'hi' to start fresh shopping! 🛍️`
+            );
+          } catch (err) {
+            console.error("Could not send notification:", err);
+          }
+        }
+      } catch (error) {
+        console.error(`Error processing customer ${customer._id}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error("❌ Error in clearAbandonedCarts:", error);
+  }
+}
+
+// ============================================================================
+// TIMER RESET: Add this function to reset timer when items are added to cart
+// ============================================================================
+
+async function resetCartTimer(customer) {
+  try {
+    if (customer.orderHistory && customer.orderHistory.length > 0) {
+      const latestOrder =
+        customer.orderHistory[customer.orderHistory.length - 1];
+
+      // Update the timestamp for the current order
+      if (
+        latestOrder.status === "cart-not-paid" ||
+        latestOrder.status === "order-made-not-paid"
+      ) {
+        latestOrder.lastCartUpdate = new Date(); // ✅ RESET TIMER
+        latestOrder.orderDate = new Date(); // Also reset orderDate to now
+
+        console.log(
+          `⏱️ Cart timer reset for customer: ${customer.phoneNumber[0]}`
+        );
+      }
+    }
+
+    await customer.save();
+  } catch (error) {
+    console.error("Error resetting cart timer:", error);
+  }
+}
 async function downloadMedia(mediaUrl, filename) {
   try {
     const response = await axios({
@@ -1688,7 +1809,6 @@ async function processChatMessage(phoneNumber, text, message) {
         const idxW = parseInt(text, 10) - 1;
         const weights = customer.contextData.weightOptions || [];
 
-        // On valid choice, show the same menu style
         if (idxW >= 0 && idxW < weights.length) {
           const chosenId = weights[idxW];
           const chosenVar = await Product.findById(chosenId);
@@ -1697,7 +1817,6 @@ async function processChatMessage(phoneNumber, text, message) {
           customer.contextData.selectedWeight = chosenVar.varianceName;
           await customer.save();
 
-          // Echo back exactly as in your screenshot
           await sendWhatsAppMessage(
             phoneNumber,
             `You have chosen ${chosenVar.varianceName} pack. Great choice!`
@@ -1761,13 +1880,16 @@ async function processChatMessage(phoneNumber, text, message) {
           );
           await customer.save();
 
-          // 2) Record a new "cart-not-paid" order immediately
+          // 2) Record cart order
           await recordCartOrder(customer);
 
-          // 3) Move to post_add_to_cart state
+          // 3) ✅ RESET TIMER WHEN ITEMS ADDED
+          await resetCartTimer(customer);
+
+          // 4) Move to post_add_to_cart state
           await customer.updateConversationState("post_add_to_cart");
 
-          // 4) Confirmation message
+          // 5) Confirmation message
           const addedMsg =
             `added to your cart:\n` +
             `${finalProd.productName}\n` +
@@ -1775,7 +1897,7 @@ async function processChatMessage(phoneNumber, text, message) {
             `for ${formatRupiah(totalLine)}`;
           await sendWhatsAppMessage(phoneNumber, addedMsg);
 
-          // 5) Next menu
+          // 6) Next menu
           return sendWhatsAppMessage(
             phoneNumber,
             "\nWhat do you want to do next?\n" +
@@ -11384,6 +11506,9 @@ Don't worry — the driver will reach you and deliver the products safely..` +
           customer.contextData.quantity = discountQuantity;
           await customer.save();
 
+          // ✅ RESET TIMER WHEN DISCOUNT ITEMS ADDED
+          await resetCartTimer(customer);
+
           // Get product from database
           const product = await Product.findOne({
             productId: customer.currentDiscountProductId,
@@ -11457,6 +11582,7 @@ Don't worry — the driver will reach you and deliver the products safely..` +
             0
           );
           await customer.save();
+          await resetCartTimer(customer);
 
           // Confirm addition to cart
           await customer.updateConversationState("post_add_to_cart");
