@@ -1,4 +1,4 @@
-// routes/orders.js - COMPLETE FIXED VERSION with proper payment field extraction
+// routes/orders.js - COMPLETE FIXED VERSION with proper status handling
 
 const express = require("express");
 const router = express.Router();
@@ -118,8 +118,11 @@ function getOrdersFromCustomer(customer) {
       items: orderObj.items || [],
       totalAmount: orderObj.totalAmount || 0,
       deliveryCharge: orderObj.deliveryCharge || 0,
-      status: customer.currentOrderStatus,
-      currentOrderStatus: customer.currentOrderStatus,
+
+      // ✅ FIX #2: Use order-level status ONLY (not customer.currentOrderStatus)
+      status: orderObj.status || customer.currentOrderStatus || "pending",
+      currentOrderStatus:
+        orderObj.status || customer.currentOrderStatus || "pending",
       orderStatus: orderObj.status,
 
       // ✅ INCLUDE ALL PAYMENT FIELDS WITH PROPER FALLBACKS
@@ -221,6 +224,7 @@ router.get("/", async (req, res) => {
 
     let filteredOrders = allOrders;
 
+    // ✅ FIX: Filter by order.status (not customer.currentOrderStatus)
     if (currentOrderStatus) {
       const statusArray = currentOrderStatus.split(",");
       filteredOrders = filteredOrders.filter((order) =>
@@ -448,8 +452,11 @@ router.get("/:orderId", async (req, res) => {
       items: order.items || [],
       totalAmount: order.totalAmount,
       deliveryCharge: order.deliveryCharge || 0,
-      status: customer.currentOrderStatus,
-      currentOrderStatus: customer.currentOrderStatus,
+
+      // ✅ FIX: Use order-level status (not customer.currentOrderStatus)
+      status: order.status || customer.currentOrderStatus || "pending",
+      currentOrderStatus:
+        order.status || customer.currentOrderStatus || "pending",
       orderStatus: order.status,
 
       // ✅ INCLUDE ALL PAYMENT FIELDS
@@ -501,6 +508,11 @@ router.put("/:orderId/status", async (req, res) => {
       });
     }
 
+    console.log("=== UPDATE ORDER STATUS ===");
+    console.log("Order ID:", orderId);
+    console.log("New Status:", status);
+    console.log("Reason:", reason);
+
     const customer = await Customer.findOne({
       $or: [
         { "shoppingHistory.orderId": orderId },
@@ -524,27 +536,48 @@ router.put("/:orderId/status", async (req, res) => {
       });
     }
 
+    console.log("Found order:", orderId);
+    console.log(
+      "Order is in:",
+      orderInfo.isShoppingHistory ? "shoppingHistory" : "orderHistory"
+    );
+    console.log("Order index:", orderInfo.index);
+
+    // ✅ FIX #2: Update ONLY the individual order's status (not customer.currentOrderStatus)
     if (orderInfo.isShoppingHistory) {
+      console.log("Updating shoppingHistory order status...");
       customer.shoppingHistory[orderInfo.index].status = status;
       if (reason) {
         customer.shoppingHistory[orderInfo.index].adminReason = reason;
       }
     } else {
+      console.log("Updating orderHistory order status...");
       customer.orderHistory[orderInfo.index].status = status;
       if (reason) {
         customer.orderHistory[orderInfo.index].adminReason = reason;
       }
     }
 
-    customer.currentOrderStatus = status;
+    // ✅ IMPORTANT: DO NOT update customer.currentOrderStatus
+    // This keeps it separate from individual order statuses
+    // customer.currentOrderStatus remains unchanged or can be set independently
 
     await customer.save();
+
+    console.log("Order status updated successfully");
+    console.log(
+      "Saved status:",
+      customer[
+        orderInfo.isShoppingHistory ? "shoppingHistory" : "orderHistory"
+      ][orderInfo.index].status
+    );
 
     res.json({
       success: true,
       message: "Order status updated successfully",
       orderId: orderId,
       newStatus: status,
+      reason: reason || null,
     });
   } catch (error) {
     console.error("Error updating order status:", error);
