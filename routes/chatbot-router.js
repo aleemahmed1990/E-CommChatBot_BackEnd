@@ -1434,11 +1434,6 @@ async function createOrder(customer) {
   customer.latestOrderId = orderId;
   customer.currentOrderStatus = "order-made-not-paid";
 
-  // Mark customer as no longer first time after creating order
-  if (customer.isFirstTimeCustomer) {
-    customer.isFirstTimeCustomer = false;
-  }
-
   // Clear cart completely
   customer.cart = {
     items: [],
@@ -3208,6 +3203,14 @@ async function processChatMessage(phoneNumber, text, message) {
 
               customer.orderHistory[orderIndex].status = "pay-not-confirmed";
               customer.currentOrderStatus = "pay-not-confirmed";
+            }
+
+            // ✅ CRITICAL FIX: Only mark as NOT first-time customer AFTER payment receipt received
+            if (customer.isFirstTimeCustomer) {
+              customer.isFirstTimeCustomer = false;
+              console.log(
+                `✅ First order completed for customer: ${customer.phoneNumber[0]}`
+              );
             }
 
             // Clear cart after payment receipt
