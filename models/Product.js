@@ -15,10 +15,10 @@ const specificationSchema = new Schema(
   { _id: false }
 );
 
-// ✅ NEW: Discount Configuration Schema
+// ✅ FIXED: Discount Configuration Schema with sparse index
 const discountConfigSchema = new Schema(
   {
-    discountId: { type: String, unique: true },
+    discountId: { type: String, unique: true, sparse: true }, // ✅ Added sparse: true
     discountTitle: { type: String, required: true },
     discountType: {
       type: String,
@@ -385,6 +385,7 @@ const productSchema = new Schema(
   },
   { timestamps: true }
 );
+
 // ✅ NEW: Method to calculate discount details
 productSchema.methods.calculateDiscountDetails = function () {
   if (!this.discountConfig || !this.discountConfig.isActive) {

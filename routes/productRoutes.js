@@ -50,7 +50,7 @@ const uploadFields = upload.fields([
   { name: "moreImage5", maxCount: 1 },
 ]);
 
-// ─── 4) CREATE Endpoint with pricing sanitization ────────────────────────
+// ✅ FIXED: CREATE Endpoint with proper null handling
 router.post("/", async (req, res) => {
   try {
     const d = req.body;
@@ -143,6 +143,9 @@ router.post("/", async (req, res) => {
       tags,
       notes: d.notes,
 
+      // ✅ IMPORTANT: DO NOT set discountConfig unless a discount is being created
+      // discountConfig is omitted here - it defaults to undefined, which won't trigger the index
+
       // Images
       masterImage: d.masterImage
         ? {
@@ -167,10 +170,19 @@ router.post("/", async (req, res) => {
     return res.status(201).json({ success: true, data: out });
   } catch (err) {
     console.error("Error saving product:", err);
+
+    // ✅ Better error handling for E11000
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern)[0];
+      return res.status(400).json({
+        success: false,
+        message: `Duplicate value for field: ${field}. This value already exists.`,
+      });
+    }
+
     return res.status(400).json({ success: false, message: err.message });
   }
 });
-
 // ============================================================================
 // MISSING DISCOUNT FETCH ROUTES - Add these to your products.js router
 // ============================================================================
