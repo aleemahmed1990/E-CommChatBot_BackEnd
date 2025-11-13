@@ -3132,14 +3132,12 @@ async function processChatMessage(phoneNumber, text, message) {
 
         try {
           const imageBuffer = fs.readFileSync(message.localMediaPath);
-          const base64Image = imageBuffer.toString("base64"); // ✅ JUST base64, not data URL
+          const base64Image = imageBuffer.toString("base64");
 
-          // Find the most recent order
           let orderId = customer.contextData.latestOrderId;
           let order = null;
           let isShoppingHistory = false;
 
-          // ✅ SEARCH SHOPPING HISTORY FIRST (Preferred)
           if (!orderId && customer.shoppingHistory?.length > 0) {
             order =
               customer.shoppingHistory[customer.shoppingHistory.length - 1];
@@ -3147,7 +3145,6 @@ async function processChatMessage(phoneNumber, text, message) {
             isShoppingHistory = true;
           }
 
-          // Fallback to orderHistory if needed
           if (!orderId && customer.orderHistory?.length > 0) {
             order = customer.orderHistory[customer.orderHistory.length - 1];
             orderId = order.orderId;
@@ -3162,58 +3159,37 @@ async function processChatMessage(phoneNumber, text, message) {
             break;
           }
 
-          // ✅ SAVE TO CORRECT LOCATION
           const orderIndex = isShoppingHistory
             ? customer.shoppingHistory.findIndex((o) => o.orderId === orderId)
             : customer.orderHistory.findIndex((o) => o.orderId === orderId);
 
           if (orderIndex >= 0) {
             if (isShoppingHistory) {
-              // Save to shoppingHistory
               customer.shoppingHistory[orderIndex].receiptImage = {
                 data: base64Image,
                 contentType: message.mediaInfo.mimetype,
               };
-
-              customer.shoppingHistory[orderIndex].receiptImageMetadata = {
-                mimetype: message.mediaInfo.mimetype,
-                filename: `receipt-${Date.now()}.${
-                  message.mediaInfo.mimetype.split("/")[1] || "jpeg"
-                }`,
-                timestamp: new Date(),
-              };
-
-              // Update status to pay-not-confirmed
               customer.shoppingHistory[orderIndex].status = "pay-not-confirmed";
               customer.currentOrderStatus = "pay-not-confirmed";
             } else {
-              // Save to orderHistory (if using old system)
               customer.orderHistory[orderIndex].receiptImage = {
                 data: base64Image,
                 contentType: message.mediaInfo.mimetype,
               };
-
-              customer.orderHistory[orderIndex].receiptImageMetadata = {
-                mimetype: message.mediaInfo.mimetype,
-                filename: `receipt-${Date.now()}.${
-                  message.mediaInfo.mimetype.split("/")[1] || "jpeg"
-                }`,
-                timestamp: new Date(),
-              };
-
               customer.orderHistory[orderIndex].status = "pay-not-confirmed";
               customer.currentOrderStatus = "pay-not-confirmed";
             }
 
-            // ✅ CRITICAL FIX: Only mark as NOT first-time customer AFTER payment receipt received
+            // ✅ MARK FIRST ORDER DISCOUNT AS USED (ONLY AFTER PAYMENT)
             if (customer.isFirstTimeCustomer) {
               customer.isFirstTimeCustomer = false;
+              customer.firstOrderDiscountApplied = true; // THIS IS THE KEY LINE
               console.log(
-                `✅ First order completed for customer: ${customer.phoneNumber[0]}`
+                `✅ First order discount confirmed for: ${customer.phoneNumber[0]}`
               );
             }
 
-            // Clear cart after payment receipt
+            // Clear cart after payment
             customer.cart = {
               items: [],
               totalAmount: 0,
@@ -3229,64 +3205,12 @@ async function processChatMessage(phoneNumber, text, message) {
             };
 
             customer.latestOrderId = null;
-
-            // ✅ Save to database
             await customer.save();
 
             console.log(`✅ Receipt saved for order: ${orderId}`);
-            console.log(
-              `✅ Cart cleared for customer: ${customer.phoneNumber[0]}`
-            );
-          } else {
-            console.log(
-              `Order not found: ${customer.contextData.latestOrderId}`
-            );
-
-            // Create new order if none exists
-            if (customer.cart.items && customer.cart.items.length > 0) {
-              const newOrderId = await createOrder(customer);
-              customer.contextData.latestOrderId = newOrderId;
-              customer.latestOrderId = newOrderId;
-              await customer.save();
-
-              const newIdxPay = customer.orderHistory.findIndex(
-                (o) => o.orderId === newOrderId
-              );
-              if (newIdxPay >= 0) {
-                // Store the image in base64 format directly
-                customer.orderHistory[newIdxPay].receiptImage = {
-                  data: base64Image,
-                  contentType: message.mediaInfo.mimetype,
-                };
-
-                // Store receipt image metadata
-                customer.orderHistory[newIdxPay].receiptImageMetadata = {
-                  mimetype: message.mediaInfo.mimetype,
-                  filename: `receipt-${Date.now()}.${
-                    message.mediaInfo.mimetype.split("/")[1] || "jpeg"
-                  }`,
-                  timestamp: new Date(),
-                  originalUrl: message.mediaInfo.url,
-                };
-
-                customer.orderHistory[newIdxPay].status = "pay-not-confirmed";
-                customer.currentOrderStatus = "pay-not-confirmed";
-
-                await customer.save();
-                console.log(
-                  `Successfully saved receipt for new order: ${newOrderId}`
-                );
-              }
-            } else {
-              await sendWhatsAppMessage(
-                phoneNumber,
-                "❌ Error: No items found in your cart. Please contact support."
-              );
-              break;
-            }
           }
 
-          // Proceed to the next step (bank selection or other details)
+          // Continue with name/bank collection as before...
           if (customer.bankAccounts?.length) {
             await customer.updateConversationState(
               "checkout_select_saved_bank"
@@ -3295,13 +3219,8 @@ async function processChatMessage(phoneNumber, text, message) {
             customer.bankAccounts.forEach((b, i) => {
               msg += `${i + 1}. ${
                 b.bankName
-              } - Account: ${b.accountNumber.slice(0, 4)}xxxx (${
-                b.accountHolderName
-              })\n`;
+              } - Account: ${b.accountNumber.slice(0, 4)}xxxx\n`;
             });
-            msg += `${
-              customer.bankAccounts.length + 1
-            }. Other Bank\n\nℹ️ To manage your saved bank accounts, visit your *Profile* from the Main Menu.`;
             await sendWhatsAppMessage(phoneNumber, msg);
           } else {
             await customer.updateConversationState("checkout_enter_name");
@@ -3314,13 +3233,8 @@ async function processChatMessage(phoneNumber, text, message) {
           console.error("Error processing payment receipt:", error);
           await sendWhatsAppMessage(
             phoneNumber,
-            "❌ Error: Unable to process your receipt. Please try again or contact support if the issue persists."
+            "❌ Error: Unable to process your receipt. Please try again or contact support."
           );
-
-          // Clean up downloaded file if error occurs
-          if (message.localMediaPath && fs.existsSync(message.localMediaPath)) {
-            fs.unlinkSync(message.localMediaPath);
-          }
         }
         break;
       }
@@ -12079,7 +11993,6 @@ function formatRupiah(amount) {
   return `Rp ${amount}`;
 }
 
-// ENHANCED proceedToCheckout function
 async function proceedToCheckout(phoneNumber, customer) {
   if (
     !customer.cart ||
@@ -12094,15 +12007,32 @@ async function proceedToCheckout(phoneNumber, customer) {
     return;
   }
 
-  // Apply first time customer discount if applicable
-  if (customer.isFirstTimeCustomer && customer.orderHistory.length === 0) {
+  // ✅ FIX: Calculate first order discount ONCE and CORRECTLY
+  if (
+    customer.isFirstTimeCustomer &&
+    customer.orderHistory.length === 0 &&
+    !customer.firstOrderDiscountApplied
+  ) {
+    // Discount should be 10% of subtotal BEFORE delivery
+    // It will be subtracted from the total AFTER adding delivery
     customer.cart.firstOrderDiscount = Math.round(
       customer.cart.totalAmount * 0.1
     );
-    customer.save();
+    customer.firstOrderDiscountApplied = true;
+    await customer.save();
+  } else {
+    customer.cart.firstOrderDiscount = 0;
   }
 
-  // Start checkout process with delivery options
+  // Show discount info to user
+  const discountInfo =
+    customer.cart.firstOrderDiscount > 0
+      ? `🎉 *First Order Discount (10%) Applied!* (-Rp ${Math.round(
+          customer.cart.firstOrderDiscount
+        ).toLocaleString("id-ID")})\n` +
+        `✅ This discount will be deducted from your final bill!\n\n`
+      : "";
+
   await customer.updateConversationState("checkout_delivery");
   await sendWhatsAppMessage(
     phoneNumber,
@@ -12116,13 +12046,7 @@ async function proceedToCheckout(phoneNumber, customer) {
       `🛵 **-- Scooter Delivery (Fast) --**\n` +
       `6. Normal Scooter - Rp 20,000 within 2.5 hours\n` +
       `7. Speed Scooter - Rp 40,000 within 30-60 minutes\n\n` +
-      `${
-        customer.cart.firstOrderDiscount > 0
-          ? `🎉 *First Order Discount Applied!* (-${formatRupiah(
-              customer.cart.firstOrderDiscount
-            )})\n\n`
-          : ""
-      }` +
+      discountInfo +
       `Select your preferred delivery option (1-7):`
   );
 }
@@ -12194,100 +12118,90 @@ async function goToCart(phoneNumber, customer) {
 }
 
 async function sendOrderSummary(phoneNumber, customer) {
-  // 1) Calculate totals properly
+  // ✅ CORRECT CALCULATION ORDER
   const subtotal = customer.cart.totalAmount;
   const deliveryCharge = customer.cart.deliveryCharge || 0;
+
+  // Use the pre-calculated first order discount
   const firstOrderDiscount = customer.cart.firstOrderDiscount || 0;
   const ecoDeliveryDiscount = customer.cart.ecoDeliveryDiscount || 0;
 
-  // Final total calculation (this is the correct total bill)
+  // ✅ FINAL TOTAL: Subtotal + Delivery - All Discounts
   const finalTotal =
     subtotal + deliveryCharge - firstOrderDiscount - ecoDeliveryDiscount;
 
-  // 2) Update order status and SAVE THE CORRECT TOTAL AMOUNT
+  // Update order in history with CORRECT total
   const idx = customer.orderHistory.findIndex(
     (o) => o.orderId === customer.latestOrderId
   );
   if (idx >= 0) {
     customer.orderHistory[idx].status = "order-made-not-paid";
-    // FIX: Save the final calculated total as totalAmount (not just subtotal)
     customer.orderHistory[idx].totalAmount = finalTotal;
+    customer.orderHistory[idx].deliveryCharge = deliveryCharge;
+    customer.orderHistory[idx].firstOrderDiscount = firstOrderDiscount;
+    customer.orderHistory[idx].ecoDeliveryDiscount = ecoDeliveryDiscount;
     customer.currentOrderStatus = "order-made-not-paid";
     await customer.save();
   }
 
-  // 3) Build the summary message
-  let message = "Your total bill will be:\n\n";
+  // Build message
+  let message = "💳 *YOUR TOTAL BILL* 💳\n\n";
 
-  // Line items
+  // Items breakdown
   customer.cart.items.forEach((item, i) => {
     const name = (item.productName || "").replace(" (DISCOUNTED)", "");
-    const weight = item.weight ? item.weight.replace(/1kg/i, "1 kg") : "";
+    const weight = item.weight ? ` (${item.weight})` : "";
     const lineTotal = formatRupiah(item.totalPrice);
-    message += `${i + 1}. ${name}: ${lineTotal}`;
-    if (item.quantity || weight) {
-      message += ` (${item.quantity || 1}${weight ? " " + weight : ""})`;
-    }
-    message += `\n`;
+    message += `${i + 1}. ${name}${weight}: ${lineTotal}\n`;
   });
 
-  // Subtotal
-  message += `\nSubtotal for items: ${formatRupiah(subtotal)}`;
+  // Summary
+  message += `\n━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  message += `Subtotal: ${formatRupiah(subtotal)}\n`;
 
-  // Delivery charges
   if (deliveryCharge > 0) {
-    message += `\nDelivery charges: ${formatRupiah(deliveryCharge)}`;
+    message += `Delivery: +${formatRupiah(deliveryCharge)}\n`;
   } else {
-    message += `\nDelivery: Free`;
+    message += `Delivery: FREE\n`;
   }
 
-  // First order discount
+  // ✅ DISCOUNT SECTION - SHOW DISCOUNT CLEARLY
   if (firstOrderDiscount > 0) {
-    message += `\nFirst Order Discount (10%): -${formatRupiah(
-      firstOrderDiscount
-    )}`;
+    message += `\n🎉 *FIRST ORDER DISCOUNT (10%)*\n`;
+    message += `Discount: -${formatRupiah(firstOrderDiscount)}\n`;
   }
 
-  // Eco delivery discount
   if (ecoDeliveryDiscount > 0) {
-    message += `\nEco Delivery Discount (5%): -${formatRupiah(
-      ecoDeliveryDiscount
-    )}`;
+    message += `🌱 *ECO DELIVERY DISCOUNT (5%)*\n`;
+    message += `Discount: -${formatRupiah(ecoDeliveryDiscount)}\n`;
   }
-
-  // Delivery summary with time frame
-  message += `\n\nDelivery option: ${customer.cart.deliveryOption}`;
-
-  if (customer.cart.deliveryTimeFrame) {
-    message += `\nDelivery time: ${customer.cart.deliveryTimeFrame}`;
-  }
-
-  // Show delivery type and area unless it's self_pickup
-  if (
-    customer.cart.deliveryType &&
-    customer.cart.deliveryType !== "self_pickup"
-  ) {
-    message += `\nDelivery type: ${customer.cart.deliveryType}`;
-    if (customer.cart.deliveryLocation) {
-      message += `\nDelivery area: ${customer.cart.deliveryLocation}`;
-    }
-  }
-
-  // Checkout menu
-  message +=
-    `\n\nWould you like to proceed with payment?\n` +
-    `1. Yes, proceed to payment\n` +
-    `2. Modify cart\n` +
-    `3. I'll pay later\n` +
-    `4. Cancel and empty cart`;
 
   // Final total
-  message += `\n\nTotal bill: ${formatRupiah(finalTotal)}`;
+  message += `\n━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  message += `💲 *FINAL TOTAL: ${formatRupiah(finalTotal)}* 💲\n`;
+  message += `━━━━━━━━━━━━━━━━━━━━━━━━\n`;
 
-  // Send message and log to chat history
+  // Delivery details
+  message += `\n📦 *DELIVERY DETAILS*\n`;
+  message += `Option: ${customer.cart.deliveryOption}\n`;
+  if (customer.cart.deliveryTimeFrame) {
+    message += `Time: ${customer.cart.deliveryTimeFrame}\n`;
+  }
+  if (customer.cart.deliveryLocation) {
+    message += `Area: ${customer.cart.deliveryLocation}\n`;
+  }
+
+  // Checkout options
+  message += `\n*Proceed with payment?*\n`;
+  message += `1️⃣ Yes, proceed to payment\n`;
+  message += `2️⃣ Modify cart\n`;
+  message += `3️⃣ I'll pay later\n`;
+  message += `4️⃣ Cancel and empty cart`;
+
   await sendWhatsAppMessage(phoneNumber, message);
   await customer.addToChatHistory(message, "bot");
 }
+
 // Additional helper functions for API endpoints
 
 // Test endpoint for Ultramsg

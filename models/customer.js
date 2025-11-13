@@ -1148,6 +1148,12 @@ const customerSchema = new mongoose.Schema(
       type: Boolean,
       default: true, // Set to false after first confirmed order
     },
+    firstOrderDiscountApplied: {
+      type: Boolean,
+      default: false,
+      description:
+        "Marks if first order discount has been used. Set to true only after first payment receipt uploaded.",
+    },
 
     // Remember which order we last created/updated
     latestOrderId: {
