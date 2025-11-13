@@ -11697,37 +11697,50 @@ async function getDiscountProductsForCategory(category) {
   }
 }
 
+// ✅ FIXED recordCartOrder function
+// Clean old unpaid carts when creating new ones
 async function recordCartOrder(customer) {
-  // Create cart-not-paid order immediately when items are added
+  // ✅ FIX #1: Remove old unpaid/pending carts first
+  customer.orderHistory = customer.orderHistory.filter((order) => {
+    // REMOVE if: cart-not-paid OR order-made-not-paid with no payment
+    if (order.status === "cart-not-paid") return false;
+    if (
+      order.status === "order-made-not-paid" &&
+      order.paymentStatus === "pending"
+    )
+      return false;
+    // KEEP all other orders (paid ones, confirmed ones, etc)
+    return true;
+  });
+
+  console.log(
+    `🧹 Cleaned old carts. Remaining orders: ${customer.orderHistory.length}`
+  );
+
+  // Create new cart-not-paid order
   const seq = await getNextSequence("orderId");
   const orderId = "ORD" + (10000 + seq);
 
-  // Apply first time customer discount if applicable
+  // ✅ FIX #2: Only calculate discount if TRULY first time customer
   let firstOrderDiscount = 0;
   if (customer.isFirstTimeCustomer && customer.orderHistory.length === 0) {
+    // Calculate on subtotal + delivery (but delivery might not be set yet)
+    // We'll finalize this in proceedToCheckout
     firstOrderDiscount = Math.round(customer.cart.totalAmount * 0.1);
-    customer.cart.firstOrderDiscount = firstOrderDiscount;
+    console.log(`✅ First order discount initialized: ₹${firstOrderDiscount}`);
   }
 
-  // Apply eco delivery discount if applicable
+  // Eco delivery discount if applicable
   let ecoDeliveryDiscount = 0;
   if (customer.cart.deliverySpeed === "eco") {
     ecoDeliveryDiscount = Math.round(customer.cart.totalAmount * 0.05);
-    customer.cart.ecoDeliveryDiscount = ecoDeliveryDiscount;
   }
 
-  // FIX: Calculate final total including delivery and discounts
-  const finalTotal =
-    customer.cart.totalAmount +
-    (customer.cart.deliveryCharge || 0) -
-    firstOrderDiscount -
-    ecoDeliveryDiscount;
-
+  // Create cart order
   const cartOrder = {
     orderId,
     items: [...customer.cart.items],
-    // FIX: Save the complete calculated total as totalAmount
-    totalAmount: finalTotal,
+    totalAmount: customer.cart.totalAmount,
     deliveryType: customer.cart.deliveryType || "truck",
     deliverySpeed: customer.cart.deliverySpeed || "normal",
     deliveryOption: customer.cart.deliveryOption || "Normal Delivery",
@@ -11743,22 +11756,15 @@ async function recordCartOrder(customer) {
     orderDate: new Date(),
   };
 
-  // Replace existing cart order or add new one
-  const existingIdx = customer.orderHistory.findIndex(
-    (o) => o.status === "cart-not-paid"
-  );
-
-  if (existingIdx >= 0) {
-    customer.orderHistory[existingIdx] = cartOrder;
-  } else {
-    customer.orderHistory.push(cartOrder);
-    customer.shoppingHistory.push(cartOrder);
-  }
-
+  // Add to history
+  customer.orderHistory.push(cartOrder);
+  customer.shoppingHistory.push(cartOrder);
   customer.latestOrderId = orderId;
   customer.currentOrderStatus = "cart-not-paid";
 
   await customer.save();
+
+  console.log(`✅ New cart order created: ${orderId}`);
   return orderId;
 }
 // Simplified function to get discount product by number
@@ -11993,6 +11999,8 @@ function formatRupiah(amount) {
   return `Rp ${amount}`;
 }
 
+// ✅ FIXED proceedToCheckout function
+// Calculate discount on FINAL BILL (items + delivery), not just subtotal
 async function proceedToCheckout(phoneNumber, customer) {
   if (
     !customer.cart ||
@@ -12007,50 +12015,64 @@ async function proceedToCheckout(phoneNumber, customer) {
     return;
   }
 
-  // ✅ FIX: Calculate first order discount ONCE and CORRECTLY
-  if (
-    customer.isFirstTimeCustomer &&
-    customer.orderHistory.length === 0 &&
-    !customer.firstOrderDiscountApplied
-  ) {
-    // Discount should be 10% of subtotal BEFORE delivery
-    // It will be subtracted from the total AFTER adding delivery
-    customer.cart.firstOrderDiscount = Math.round(
-      customer.cart.totalAmount * 0.1
+  // ✅ FIX #1: Clean up old unpaid carts first
+  customer.orderHistory = customer.orderHistory.filter(
+    (order) =>
+      order.status !== "cart-not-paid" && order.paymentStatus !== "pending"
+  );
+
+  // ✅ FIX #2: Calculate discount on FINAL BILL (not just subtotal)
+  if (customer.isFirstTimeCustomer && customer.orderHistory.length === 0) {
+    // Calculate: items + delivery
+    const subtotal = customer.cart.totalAmount;
+    const deliveryCharge = customer.cart.deliveryCharge || 0;
+    const beforeDiscount = subtotal + deliveryCharge;
+
+    // Apply 10% discount on TOTAL BILL
+    customer.cart.firstOrderDiscount = Math.round(beforeDiscount * 0.1);
+    console.log(
+      `✅ First order discount applied: ₹${customer.cart.firstOrderDiscount} (10% of ₹${beforeDiscount})`
     );
-    customer.firstOrderDiscountApplied = true;
-    await customer.save();
   } else {
     customer.cart.firstOrderDiscount = 0;
+    console.log(`ℹ️ Not first order or already has discount`);
   }
 
-  // Show discount info to user
-  const discountInfo =
-    customer.cart.firstOrderDiscount > 0
-      ? `🎉 *First Order Discount (10%) Applied!* (-Rp ${Math.round(
-          customer.cart.firstOrderDiscount
-        ).toLocaleString("id-ID")})\n` +
-        `✅ This discount will be deducted from your final bill!\n\n`
-      : "";
+  // Eco delivery discount remains the same
+  if (customer.cart.deliverySpeed === "eco") {
+    const subtotal = customer.cart.totalAmount;
+    customer.cart.ecoDeliveryDiscount = Math.round(subtotal * 0.05);
+  }
 
+  await customer.save();
+
+  // Start checkout process with delivery options
   await customer.updateConversationState("checkout_delivery");
+
+  // Show discount message if applicable
+  let discountInfo = "";
+  if (customer.cart.firstOrderDiscount > 0) {
+    discountInfo =
+      `🎉 *FIRST ORDER DISCOUNT!* (10%)\n` +
+      `You'll save: ₹${customer.cart.firstOrderDiscount}\n\n`;
+  }
+
   await sendWhatsAppMessage(
     phoneNumber,
     `🚚 *Choose Your Delivery Option* 🚚\n\n` +
+      discountInfo +
       `🚛 **-- Truck Delivery --**\n` +
       `1. Normal Delivery - Arrives in 3-5 days (FREE)\n` +
-      `2. Speed Delivery - Arrives within 24-48 hours (+Rp 50,000)\n` +
-      `3. Early Morning Delivery - 4:00 AM–9:00 AM (+Rp 50,000)\n` +
-      `4. 🌱 Eco Delivery - 8-10 days (5% discount on total!)\n` +
+      `2. Speed Delivery - Arrives within 24-48 hours (+₹50,000)\n` +
+      `3. Early Morning Delivery - 4:00 AM–9:00 AM (+₹50,000)\n` +
+      `4. 🌱 Eco Delivery - 8-10 days (5% discount on items!)\n` +
       `5. 🏪 Self Pickup - Pick up from our store\n\n` +
       `🛵 **-- Scooter Delivery (Fast) --**\n` +
-      `6. Normal Scooter - Rp 20,000 within 2.5 hours\n` +
-      `7. Speed Scooter - Rp 40,000 within 30-60 minutes\n\n` +
-      discountInfo +
+      `6. Normal Scooter - ₹20,000 within 2.5 hours\n` +
+      `7. Speed Scooter - ₹40,000 within 30-60 minutes\n\n` +
       `Select your preferred delivery option (1-7):`
   );
 }
-
 // UPDATED goToCart function with proper total calculation
 async function goToCart(phoneNumber, customer) {
   if (
@@ -12117,91 +12139,106 @@ async function goToCart(phoneNumber, customer) {
   await customer.addToChatHistory(cartMessage, "bot");
 }
 
+// ✅ FIXED sendOrderSummary function
+// Display discount correctly calculated on FINAL BILL
 async function sendOrderSummary(phoneNumber, customer) {
-  // ✅ CORRECT CALCULATION ORDER
+  // 1) Calculate totals properly
   const subtotal = customer.cart.totalAmount;
   const deliveryCharge = customer.cart.deliveryCharge || 0;
 
-  // Use the pre-calculated first order discount
+  // ✅ FIX: Get discount that was already calculated in proceedToCheckout
   const firstOrderDiscount = customer.cart.firstOrderDiscount || 0;
   const ecoDeliveryDiscount = customer.cart.ecoDeliveryDiscount || 0;
 
-  // ✅ FINAL TOTAL: Subtotal + Delivery - All Discounts
+  // Final total calculation (this is the correct total bill)
   const finalTotal =
     subtotal + deliveryCharge - firstOrderDiscount - ecoDeliveryDiscount;
 
-  // Update order in history with CORRECT total
+  // 2) Update order status and SAVE THE CORRECT TOTAL AMOUNT
   const idx = customer.orderHistory.findIndex(
     (o) => o.orderId === customer.latestOrderId
   );
   if (idx >= 0) {
     customer.orderHistory[idx].status = "order-made-not-paid";
+    // FIX: Save the final calculated total as totalAmount (not just subtotal)
     customer.orderHistory[idx].totalAmount = finalTotal;
-    customer.orderHistory[idx].deliveryCharge = deliveryCharge;
     customer.orderHistory[idx].firstOrderDiscount = firstOrderDiscount;
     customer.orderHistory[idx].ecoDeliveryDiscount = ecoDeliveryDiscount;
     customer.currentOrderStatus = "order-made-not-paid";
     await customer.save();
+    console.log(`📊 Order summary saved with total: ₹${finalTotal}`);
   }
 
-  // Build message
-  let message = "💳 *YOUR TOTAL BILL* 💳\n\n";
+  // 3) Build the summary message
+  let message = "📋 *Your Order Summary*\n\n";
 
-  // Items breakdown
+  // Line items
+  message += "**Items:**\n";
   customer.cart.items.forEach((item, i) => {
     const name = (item.productName || "").replace(" (DISCOUNTED)", "");
     const weight = item.weight ? ` (${item.weight})` : "";
     const lineTotal = formatRupiah(item.totalPrice);
-    message += `${i + 1}. ${name}${weight}: ${lineTotal}\n`;
+    message += `${i + 1}. ${name}${weight}\n`;
+    message += `   Qty: ${
+      item.quantity
+    } × ₹${item.price.toLocaleString()} = ${lineTotal}\n`;
   });
 
-  // Summary
-  message += `\n━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  // Cost breakdown
+  message += `\n**Cost Breakdown:**\n`;
   message += `Subtotal: ${formatRupiah(subtotal)}\n`;
 
   if (deliveryCharge > 0) {
     message += `Delivery: +${formatRupiah(deliveryCharge)}\n`;
   } else {
-    message += `Delivery: FREE\n`;
+    message += `Delivery: Free ✓\n`;
   }
 
-  // ✅ DISCOUNT SECTION - SHOW DISCOUNT CLEARLY
+  // ✅ HIGHLIGHT DISCOUNT
   if (firstOrderDiscount > 0) {
-    message += `\n🎉 *FIRST ORDER DISCOUNT (10%)*\n`;
-    message += `Discount: -${formatRupiah(firstOrderDiscount)}\n`;
+    message += `\n🎉 **FIRST ORDER DISCOUNT (10%):** -${formatRupiah(
+      firstOrderDiscount
+    )}\n`;
   }
 
   if (ecoDeliveryDiscount > 0) {
-    message += `🌱 *ECO DELIVERY DISCOUNT (5%)*\n`;
-    message += `Discount: -${formatRupiah(ecoDeliveryDiscount)}\n`;
+    message += `🌱 **ECO DELIVERY DISCOUNT (5%):** -${formatRupiah(
+      ecoDeliveryDiscount
+    )}\n`;
   }
 
-  // Final total
-  message += `\n━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-  message += `💲 *FINAL TOTAL: ${formatRupiah(finalTotal)}* 💲\n`;
-  message += `━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-
-  // Delivery details
-  message += `\n📦 *DELIVERY DETAILS*\n`;
+  // Delivery summary
+  message += `\n**Delivery Details:**\n`;
   message += `Option: ${customer.cart.deliveryOption}\n`;
+
   if (customer.cart.deliveryTimeFrame) {
     message += `Time: ${customer.cart.deliveryTimeFrame}\n`;
   }
-  if (customer.cart.deliveryLocation) {
-    message += `Area: ${customer.cart.deliveryLocation}\n`;
+
+  if (customer.cart.deliveryType !== "self_pickup") {
+    if (customer.cart.deliveryLocation) {
+      message += `Area: ${customer.cart.deliveryLocation}\n`;
+    }
   }
 
-  // Checkout options
-  message += `\n*Proceed with payment?*\n`;
-  message += `1️⃣ Yes, proceed to payment\n`;
-  message += `2️⃣ Modify cart\n`;
-  message += `3️⃣ I'll pay later\n`;
-  message += `4️⃣ Cancel and empty cart`;
+  // ✅ FINAL TOTAL (MOST IMPORTANT)
+  message += `\n━━━━━━━━━━━━━━━━━━━━━━\n`;
+  message += `💰 **TOTAL BILL: ${formatRupiah(finalTotal)}** 💰\n`;
+  message += `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
+  // Checkout menu
+  message +=
+    `✅ **Ready to proceed?**\n\n` +
+    `1️⃣ Yes, proceed to payment\n` +
+    `2️⃣ Modify cart\n` +
+    `3️⃣ I'll pay later\n` +
+    `4️⃣ Cancel order\n\n` +
+    `Type the number to continue:`;
+
+  // Send message and log to chat history
   await sendWhatsAppMessage(phoneNumber, message);
   await customer.addToChatHistory(message, "bot");
 }
-
 // Additional helper functions for API endpoints
 
 // Test endpoint for Ultramsg
