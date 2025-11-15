@@ -1,4 +1,4 @@
-// routes/orders.js - COMPLETE FIXED VERSION with proper status handling
+// routes/orders.js - COMPLETE FIXED VERSION with SINGLE status enum
 
 const express = require("express");
 const router = express.Router();
@@ -546,37 +546,56 @@ router.put("/:orderId/status", async (req, res) => {
     // ✅ FIX #2: Update ONLY the individual order's status (not customer.currentOrderStatus)
     if (orderInfo.isShoppingHistory) {
       console.log("Updating shoppingHistory order status...");
+      console.log(
+        "Before update:",
+        customer.shoppingHistory[orderInfo.index].status
+      );
+
       customer.shoppingHistory[orderInfo.index].status = status;
       if (reason) {
         customer.shoppingHistory[orderInfo.index].adminReason = reason;
       }
+
+      console.log(
+        "After update:",
+        customer.shoppingHistory[orderInfo.index].status
+      );
     } else {
       console.log("Updating orderHistory order status...");
+      console.log(
+        "Before update:",
+        customer.orderHistory[orderInfo.index].status
+      );
+
       customer.orderHistory[orderInfo.index].status = status;
       if (reason) {
         customer.orderHistory[orderInfo.index].adminReason = reason;
       }
+
+      console.log(
+        "After update:",
+        customer.orderHistory[orderInfo.index].status
+      );
     }
 
     // ✅ IMPORTANT: DO NOT update customer.currentOrderStatus
     // This keeps it separate from individual order statuses
     // customer.currentOrderStatus remains unchanged or can be set independently
 
-    await customer.save();
+    const savedCustomer = await customer.save();
 
+    console.log("=== STATUS UPDATE SUCCESSFUL ===");
     console.log("Order status updated successfully");
-    console.log(
-      "Saved status:",
-      customer[
-        orderInfo.isShoppingHistory ? "shoppingHistory" : "orderHistory"
-      ][orderInfo.index].status
-    );
+    const updatedStatus = orderInfo.isShoppingHistory
+      ? savedCustomer.shoppingHistory[orderInfo.index].status
+      : savedCustomer.orderHistory[orderInfo.index].status;
+    console.log("Verified saved status:", updatedStatus);
 
     res.json({
       success: true,
       message: "Order status updated successfully",
       orderId: orderId,
-      newStatus: status,
+      newStatus: updatedStatus,
       reason: reason || null,
     });
   } catch (error) {

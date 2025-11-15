@@ -1,209 +1,113 @@
 const express = require("express");
 const router = express.Router();
-const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
 const Employee = require("../models/Employee");
 
-// Create upload directory if it doesn't exist
-const uploadDir = path.join(__dirname, "../uploads");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-// Configure multer storage
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    const ext = path.extname(file.originalname);
-    cb(null, file.fieldname + "-" + uniqueSuffix + ext);
-  },
-});
-
-// File filter to accept only images and PDFs
-const fileFilter = (req, file, cb) => {
-  const allowedTypes = /jpeg|jpg|png|gif|pdf/;
-  const ext = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-  const mime = allowedTypes.test(file.mimetype);
-
-  if (ext && mime) {
-    return cb(null, true);
-  }
-
-  cb(new Error("Invalid file type. Only JPEG, PNG, GIF and PDF are allowed."));
-};
-
-// Initialize upload
-const upload = multer({
-  storage: storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
-  fileFilter: fileFilter,
-});
-
-// Define file field array for multer upload
-const uploadFields = upload.fields([
-  { name: "profilePicture", maxCount: 1 },
-  { name: "idCardFront", maxCount: 1 },
-  { name: "idCardBack", maxCount: 1 },
-  { name: "passportFront", maxCount: 1 },
-  { name: "passportBack", maxCount: 1 },
-  { name: "otherDoc1", maxCount: 1 },
-  { name: "otherDoc2", maxCount: 1 },
-]);
-
-// @route   POST /api/employees
-// @desc    Create a new employee
-// @access  Private
-router.post("/", uploadFields, async (req, res) => {
-  try {
-    console.log("Request body:", req.body); // Log the incoming body for debugging
-    let contacts = [];
-    if (req.body.contacts) {
-      try {
-        contacts = JSON.parse(req.body.contacts);
-      } catch (err) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid contacts format",
-        });
-      }
-    }
-
-    // Ensure contacts have name and relation before proceeding
-    for (let contact of contacts) {
-      if (!contact.name || !contact.relation) {
-        return res.status(400).json({
-          success: false,
-          message: "Contact name and relation are required",
-        });
-      }
-    }
-
-    const employeeData = {
-      name: req.body.name,
-      email: req.body.email,
-      phone: req.body.phone,
-      address: req.body.address,
-      homeLocation: req.body.homeLocation,
-      emergencyContact: req.body.emergencyContact,
-      contacts: contacts, // Use the parsed contacts array
-      roles: req.body.roles ? JSON.parse(req.body.roles) : [],
-      addedOn: req.body.addedOn || Date.now(),
-      isActivated: req.body.isActivated === "true",
-      employeeCategory: req.body.employeeCategory,
-      isBlocked: req.body.isBlocked === "true",
-    };
-
-    // Add file paths if they exist
-    if (req.files) {
-      if (req.files.profilePicture) {
-        employeeData.profilePicture = `/uploads/${req.files.profilePicture[0].filename}`;
-      }
-      if (req.files.idCardFront) {
-        employeeData.idCardFront = `/uploads/${req.files.idCardFront[0].filename}`;
-      }
-      if (req.files.idCardBack) {
-        employeeData.idCardBack = `/uploads/${req.files.idCardBack[0].filename}`;
-      }
-      if (req.files.passportFront) {
-        employeeData.passportFront = `/uploads/${req.files.passportFront[0].filename}`;
-      }
-      if (req.files.passportBack) {
-        employeeData.passportBack = `/uploads/${req.files.passportBack[0].filename}`;
-      }
-      if (req.files.otherDoc1) {
-        employeeData.otherDoc1 = `/uploads/${req.files.otherDoc1[0].filename}`;
-      }
-      if (req.files.otherDoc2) {
-        employeeData.otherDoc2 = `/uploads/${req.files.otherDoc2[0].filename}`;
-      }
-    }
-
-    const employee = new Employee(employeeData);
-    await employee.save();
-
-    res.status(201).json({
-      success: true,
-      data: employee,
-      message: "Employee added successfully",
-    });
-  } catch (error) {
-    console.error("Error adding employee:", error);
-
-    // Handle duplicate key error (typically email)
-    if (error.code === 11000) {
-      return res.status(400).json({
-        success: false,
-        message: "Employee with this email already exists",
-      });
-    }
-
-    // Handle validation errors
-    if (error.name === "ValidationError") {
-      const messages = Object.values(error.errors).map((val) => val.message);
-      return res.status(400).json({
-        success: false,
-        message: messages.join(", "),
-      });
-    }
-
-    res.status(500).json({
-      success: false,
-      message: "Server error. Please try again.",
-    });
-  }
-});
-
-// @route   GET /api/employees
-// @desc    Get all employees
-// @access  Private
+// ✅ GET: List all employees with filters
 router.get("/", async (req, res) => {
   try {
-    const employees = await Employee.find().sort({ createdAt: -1 });
+    const {
+      role,
+      available,
+      category,
+      search,
+      page = 1,
+      limit = 10,
+    } = req.query;
 
-    res.status(200).json({
+    console.log("=== EMPLOYEE LIST QUERY ===");
+    console.log("Filters:", { role, available, category, search });
+
+    let query = {};
+
+    if (role) {
+      query.roles = role;
+    }
+
+    if (available === "true") {
+      query["availability.status"] = "available";
+    }
+
+    if (category) {
+      query.employeeCategory = category;
+    }
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { email: { $regex: search, $options: "i" } },
+        { employeeId: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const total = await Employee.countDocuments(query);
+    const employees = await Employee.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit));
+
+    console.log("=== EMPLOYEE LIST RESULT ===");
+    console.log("Total found:", total);
+    console.log("Returned:", employees.length);
+
+    res.json({
       success: true,
-      count: employees.length,
-      data: employees,
+      employees,
+      total,
+      page: Number(page),
+      pages: Math.ceil(total / limit),
     });
   } catch (error) {
     console.error("Error fetching employees:", error);
     res.status(500).json({
       success: false,
-      message: "Server error. Could not fetch employees.",
+      message: "Error fetching employees",
+      error: error.message,
     });
   }
 });
 
-router.get("/", async (req, res) => {
+// ✅ GET: Get available employees by role (for driver assignment)
+router.get("/available/:role", async (req, res) => {
   try {
-    const { employeeCategory } = req.query;
-    const query = employeeCategory ? { employeeCategory } : {};
-    const employees = await Employee.find(query).sort({ createdAt: -1 });
+    const { role } = req.params;
 
-    res.status(200).json({
+    console.log("=== GET AVAILABLE EMPLOYEES ===");
+    console.log("Role:", role);
+
+    const employees = await Employee.find({
+      roles: role,
+      $expr: { $lt: ["$currentAssignments", "$maxAssignments"] },
+      "availability.status": "available",
+      isActivated: true,
+      isBlocked: false,
+    }).select(
+      "employeeId name phone email currentAssignments maxAssignments performanceMetrics.rating"
+    );
+
+    console.log("Found available employees:", employees.length);
+
+    res.json({
       success: true,
+      employees,
       count: employees.length,
-      data: employees,
     });
   } catch (error) {
-    console.error("Error fetching employees:", error);
+    console.error("Error fetching available employees:", error);
     res.status(500).json({
       success: false,
-      message: "Server error. Could not fetch employees.",
+      message: "Error fetching available employees",
+      error: error.message,
     });
   }
 });
 
-// @route   GET /api/employees/:id
-// @desc    Get employee by ID
-// @access  Private
-router.get("/:id", async (req, res) => {
+// ✅ GET: Get specific employee by ID
+router.get("/:employeeId", async (req, res) => {
   try {
-    const employee = await Employee.findById(req.params.id);
+    const { employeeId } = req.params;
+
+    const employee = await Employee.findOne({ employeeId });
 
     if (!employee) {
       return res.status(404).json({
@@ -212,25 +116,59 @@ router.get("/:id", async (req, res) => {
       });
     }
 
-    res.status(200).json({
+    res.json({
       success: true,
-      data: employee,
+      employee,
     });
   } catch (error) {
     console.error("Error fetching employee:", error);
     res.status(500).json({
       success: false,
-      message: "Server error. Could not fetch employee details.",
+      message: "Error fetching employee",
+      error: error.message,
     });
   }
 });
 
-// @route   PUT /api/employees/:id
-// @desc    Update employee
-// @access  Private
-router.put("/:id", uploadFields, async (req, res) => {
+// ✅ POST: Create new employee
+router.post("/", async (req, res) => {
   try {
-    let employee = await Employee.findById(req.params.id);
+    const employeeData = req.body;
+
+    console.log("=== CREATE EMPLOYEE ===");
+    console.log("Data:", employeeData);
+
+    const employee = new Employee(employeeData);
+    await employee.save();
+
+    console.log("Employee created:", employee.employeeId);
+
+    res.status(201).json({
+      success: true,
+      message: "Employee created successfully",
+      employee,
+    });
+  } catch (error) {
+    console.error("Error creating employee:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error creating employee",
+      error: error.message,
+    });
+  }
+});
+
+// ✅ PUT: Update employee availability
+router.put("/:employeeId/availability", async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const { status, leaveStartDate, leaveEndDate, leaveReason } = req.body;
+
+    console.log("=== UPDATE EMPLOYEE AVAILABILITY ===");
+    console.log("Employee ID:", employeeId);
+    console.log("New status:", status);
+
+    const employee = await Employee.findOne({ employeeId });
 
     if (!employee) {
       return res.status(404).json({
@@ -239,130 +177,242 @@ router.put("/:id", uploadFields, async (req, res) => {
       });
     }
 
-    // Parse the contacts array from the request
-    let contacts = employee.contacts;
-    if (req.body.contacts) {
-      try {
-        contacts = JSON.parse(req.body.contacts);
-      } catch (err) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid contacts format",
-        });
+    employee.availability.status = status;
+    employee.availability.lastStatusUpdate = new Date();
+
+    if (status === "on-leave") {
+      employee.availability.leaveStartDate = leaveStartDate;
+      employee.availability.leaveEndDate = leaveEndDate;
+      employee.availability.leaveReason = leaveReason;
+    }
+
+    await employee.save();
+
+    res.json({
+      success: true,
+      message: "Availability updated successfully",
+      employee,
+    });
+  } catch (error) {
+    console.error("Error updating availability:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error updating availability",
+      error: error.message,
+    });
+  }
+});
+
+// ✅ POST: Assign order to employee
+router.post("/:employeeId/assign-order", async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const { orderId, customerId, customerName, estimatedCompletionTime } =
+      req.body;
+
+    console.log("=== ASSIGN ORDER TO EMPLOYEE ===");
+    console.log("Employee:", employeeId);
+    console.log("Order:", orderId);
+
+    const employee = await Employee.findOne({ employeeId });
+
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
+      });
+    }
+
+    if (employee.currentAssignments >= employee.maxAssignments) {
+      return res.status(400).json({
+        success: false,
+        message: "Employee has reached maximum assignments",
+      });
+    }
+
+    // Add order to assignedOrders
+    employee.assignedOrders.push({
+      orderId,
+      customerId,
+      customerName,
+      assignedAt: new Date(),
+      estimatedCompletionTime,
+      status: "assigned",
+    });
+
+    // Increment current assignments
+    employee.currentAssignments += 1;
+
+    await employee.save();
+
+    console.log("Order assigned successfully");
+
+    res.json({
+      success: true,
+      message: "Order assigned successfully",
+      employee,
+    });
+  } catch (error) {
+    console.error("Error assigning order:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error assigning order",
+      error: error.message,
+    });
+  }
+});
+
+// ✅ PUT: Update order status for employee
+router.put("/:employeeId/order-status/:orderId", async (req, res) => {
+  try {
+    const { employeeId, orderId } = req.params;
+    const { status } = req.body;
+
+    console.log("=== UPDATE EMPLOYEE ORDER STATUS ===");
+    console.log("Employee:", employeeId);
+    console.log("Order:", orderId);
+    console.log("Status:", status);
+
+    const employee = await Employee.findOne({ employeeId });
+
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
+      });
+    }
+
+    const orderIndex = employee.assignedOrders.findIndex(
+      (o) => o.orderId === orderId
+    );
+
+    if (orderIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found in employee assignments",
+      });
+    }
+
+    employee.assignedOrders[orderIndex].status = status;
+
+    // If order is completed or failed, decrement assignments
+    if (status === "completed" || status === "failed") {
+      employee.currentAssignments = Math.max(
+        0,
+        employee.currentAssignments - 1
+      );
+
+      // Update performance metrics if completed
+      if (status === "completed") {
+        employee.performanceMetrics.successfulDeliveries += 1;
+        employee.performanceMetrics.totalDeliveries += 1;
+      } else if (status === "failed") {
+        employee.performanceMetrics.failedDeliveries += 1;
+        employee.performanceMetrics.totalDeliveries += 1;
       }
     }
 
-    const updatedData = {
-      name: req.body.name,
-      phone: req.body.phone,
-      address: req.body.address,
-      homeLocation: req.body.homeLocation,
-      emergencyContact: req.body.emergencyContact,
-      contacts: contacts,
-      roles: req.body.roles ? JSON.parse(req.body.roles) : employee.roles,
-      isActivated: req.body.isActivated === "true",
-      isBlocked: req.body.isBlocked === "true",
+    await employee.save();
+
+    res.json({
+      success: true,
+      message: "Order status updated",
+      employee,
+    });
+  } catch (error) {
+    console.error("Error updating order status:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error updating order status",
+      error: error.message,
+    });
+  }
+});
+
+// ✅ GET: Get current assignments for employee
+router.get("/:employeeId/assignments", async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const { status } = req.query;
+
+    const employee = await Employee.findOne({ employeeId });
+
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
+      });
+    }
+
+    let assignments = employee.assignedOrders;
+
+    if (status) {
+      assignments = assignments.filter((a) => a.status === status);
+    }
+
+    res.json({
+      success: true,
+      assignments,
+      total: assignments.length,
+      currentAssignments: employee.currentAssignments,
+      maxAssignments: employee.maxAssignments,
+    });
+  } catch (error) {
+    console.error("Error fetching assignments:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching assignments",
+      error: error.message,
+    });
+  }
+});
+
+// ✅ PUT: Update employee location (for drivers on delivery)
+router.put("/:employeeId/location", async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const { latitude, longitude, address } = req.body;
+
+    const employee = await Employee.findOne({ employeeId });
+
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
+      });
+    }
+
+    employee.currentLocation = {
+      latitude,
+      longitude,
+      address,
+      updatedAt: new Date(),
     };
 
-    // Add file paths if they exist
-    if (req.files) {
-      if (req.files.profilePicture) {
-        // Remove old file if exists
-        if (employee.profilePicture) {
-          const oldPath = path.join(__dirname, "..", employee.profilePicture);
-          if (fs.existsSync(oldPath)) {
-            fs.unlinkSync(oldPath);
-          }
-        }
-        updatedData.profilePicture = `/uploads/${req.files.profilePicture[0].filename}`;
-      }
+    await employee.save();
 
-      if (req.files.idCardFront) {
-        if (employee.idCardFront) {
-          const oldPath = path.join(__dirname, "..", employee.idCardFront);
-          if (fs.existsSync(oldPath)) {
-            fs.unlinkSync(oldPath);
-          }
-        }
-        updatedData.idCardFront = `/uploads/${req.files.idCardFront[0].filename}`;
-      }
-
-      if (req.files.idCardBack) {
-        if (employee.idCardBack) {
-          const oldPath = path.join(__dirname, "..", employee.idCardBack);
-          if (fs.existsSync(oldPath)) {
-            fs.unlinkSync(oldPath);
-          }
-        }
-        updatedData.idCardBack = `/uploads/${req.files.idCardBack[0].filename}`;
-      }
-
-      if (req.files.passportFront) {
-        if (employee.passportFront) {
-          const oldPath = path.join(__dirname, "..", employee.passportFront);
-          if (fs.existsSync(oldPath)) {
-            fs.unlinkSync(oldPath);
-          }
-        }
-        updatedData.passportFront = `/uploads/${req.files.passportFront[0].filename}`;
-      }
-
-      if (req.files.passportBack) {
-        if (employee.passportBack) {
-          const oldPath = path.join(__dirname, "..", employee.passportBack);
-          if (fs.existsSync(oldPath)) {
-            fs.unlinkSync(oldPath);
-          }
-        }
-        updatedData.passportBack = `/uploads/${req.files.passportBack[0].filename}`;
-      }
-
-      if (req.files.otherDoc1) {
-        if (employee.otherDoc1) {
-          const oldPath = path.join(__dirname, "..", employee.otherDoc1);
-          if (fs.existsSync(oldPath)) {
-            fs.unlinkSync(oldPath);
-          }
-        }
-        updatedData.otherDoc1 = `/uploads/${req.files.otherDoc1[0].filename}`;
-      }
-
-      if (req.files.otherDoc2) {
-        if (employee.otherDoc2) {
-          const oldPath = path.join(__dirname, "..", employee.otherDoc2);
-          if (fs.existsSync(oldPath)) {
-            fs.unlinkSync(oldPath);
-          }
-        }
-        updatedData.otherDoc2 = `/uploads/${req.files.otherDoc2[0].filename}`;
-      }
-    }
-
-    employee = await Employee.findByIdAndUpdate(req.params.id, updatedData, {
-      new: true,
-      runValidators: true,
-    });
-
-    res.status(200).json({
+    res.json({
       success: true,
-      data: employee,
-      message: "Employee updated successfully",
+      message: "Location updated",
+      employee,
     });
   } catch (error) {
-    console.error("Error updating employee:", error);
+    console.error("Error updating location:", error);
     res.status(500).json({
       success: false,
-      message: "Server error. Could not update employee details.",
+      message: "Error updating location",
+      error: error.message,
     });
   }
 });
 
-// @route   DELETE /api/employees/:id
-// @desc    Delete employee
-// @access  Private (Admin only)
-router.delete("/:id", async (req, res) => {
+// ✅ POST: Log employee activity
+router.post("/:employeeId/activity", async (req, res) => {
   try {
-    const employee = await Employee.findById(req.params.id);
+    const { employeeId } = req.params;
+    const { action, orderId, details } = req.body;
+
+    const employee = await Employee.findOne({ employeeId });
 
     if (!employee) {
       return res.status(404).json({
@@ -371,37 +421,60 @@ router.delete("/:id", async (req, res) => {
       });
     }
 
-    // Delete associated files
-    const filePaths = [
-      employee.profilePicture,
-      employee.idCardFront,
-      employee.idCardBack,
-      employee.passportFront,
-      employee.passportBack,
-      employee.otherDoc1,
-      employee.otherDoc2,
-    ];
-
-    filePaths.forEach((filePath) => {
-      if (filePath) {
-        const fullPath = path.join(__dirname, "..", filePath);
-        if (fs.existsSync(fullPath)) {
-          fs.unlinkSync(fullPath);
-        }
-      }
+    employee.activityLog.push({
+      action,
+      timestamp: new Date(),
+      orderId,
+      details,
     });
 
-    await Employee.deleteOne({ _id: req.params.id });
+    // Keep only last 100 activities
+    if (employee.activityLog.length > 100) {
+      employee.activityLog = employee.activityLog.slice(-100);
+    }
 
-    res.status(200).json({
+    await employee.save();
+
+    res.json({
       success: true,
-      message: "Employee deleted successfully",
+      message: "Activity logged",
     });
   } catch (error) {
-    console.error("Error deleting employee:", error);
+    console.error("Error logging activity:", error);
     res.status(500).json({
       success: false,
-      message: "Server error. Could not delete employee.",
+      message: "Error logging activity",
+      error: error.message,
+    });
+  }
+});
+
+// ✅ GET: Get employee performance metrics
+router.get("/:employeeId/performance", async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+
+    const employee = await Employee.findOne({ employeeId }).select(
+      "employeeId name performanceMetrics"
+    );
+
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      performanceMetrics: employee.performanceMetrics,
+    });
+  } catch (error) {
+    console.error("Error fetching performance metrics:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching performance metrics",
+      error: error.message,
     });
   }
 });

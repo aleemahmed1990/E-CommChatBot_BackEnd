@@ -23,7 +23,7 @@ const EmployeeSchema = new mongoose.Schema(
       ],
     },
     phone: {
-      type: String,
+      type: [String],
       required: [true, "Phone number is required"],
     },
     address: {
@@ -47,6 +47,15 @@ const EmployeeSchema = new mongoose.Schema(
     ],
     roles: {
       type: [String],
+      enum: [
+        "packing-staff",
+        "storage-officer",
+        "dispatch-officer-1",
+        "dispatch-officer-2",
+        "driver",
+        "driver-on-delivery",
+        "complaint-manager",
+      ],
       default: [],
     },
     profilePicture: {
@@ -55,7 +64,7 @@ const EmployeeSchema = new mongoose.Schema(
     },
     employeeCategory: {
       type: String,
-      enum: ["Driver", "Order Manager"], // Restricting the category to these two options
+      enum: ["Driver", "Order Manager", "Packing", "Storage", "Dispatch"],
       required: [true, "Employee category is required"],
     },
     idCardFront: {
@@ -94,10 +103,176 @@ const EmployeeSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+
+    // ✅ NEW DELIVERY SYSTEM FIELDS
+    isAvailable: {
+      type: Boolean,
+      default: true,
+    },
+
+    currentAssignments: {
+      type: Number,
+      default: 0,
+    },
+
+    maxAssignments: {
+      type: Number,
+      default: 5, // Maximum orders an employee can handle simultaneously
+    },
+
+    assignedOrders: [
+      {
+        orderId: String,
+        customerId: String,
+        customerName: String,
+        assignedAt: Date,
+        estimatedCompletionTime: Date,
+        status: {
+          type: String,
+          enum: ["assigned", "in-progress", "completed", "failed", "on-hold"],
+          default: "assigned",
+        },
+      },
+    ],
+
+    // Driver specific fields
+    licenseNumber: {
+      type: String,
+      default: null,
+    },
+    licenseExpiry: {
+      type: Date,
+      default: null,
+    },
+    assignedVehicle: {
+      vehicleId: String,
+      vehicleType: String, // truck, scooter
+      registrationNumber: String,
+      assignedAt: Date,
+    },
+
+    // Performance tracking
+    performanceMetrics: {
+      totalDeliveries: {
+        type: Number,
+        default: 0,
+      },
+      successfulDeliveries: {
+        type: Number,
+        default: 0,
+      },
+      failedDeliveries: {
+        type: Number,
+        default: 0,
+      },
+      averageDeliveryTime: {
+        type: Number,
+        default: 0, // in minutes
+      },
+      rating: {
+        type: Number,
+        default: 5,
+        min: 1,
+        max: 5,
+      },
+      complaintsCount: {
+        type: Number,
+        default: 0,
+      },
+      lastDeliveryDate: Date,
+    },
+
+    // Availability tracking
+    availability: {
+      status: {
+        type: String,
+        enum: ["available", "busy", "on-leave", "offline"],
+        default: "available",
+      },
+      lastStatusUpdate: Date,
+      leaveStartDate: Date,
+      leaveEndDate: Date,
+      leaveReason: String,
+    },
+
+    // Current location (for drivers on delivery)
+    currentLocation: {
+      latitude: Number,
+      longitude: Number,
+      address: String,
+      updatedAt: Date,
+    },
+
+    // Work schedule
+    workSchedule: {
+      startTime: String, // HH:MM format
+      endTime: String, // HH:MM format
+      workDays: [String], // ["Monday", "Tuesday", ...]
+    },
+
+    // Salary/Payment info (if needed)
+    compensationInfo: {
+      salaryType: {
+        type: String,
+        enum: ["fixed", "per-delivery", "hourly"],
+      },
+      amount: Number,
+      currency: { type: String, default: "PKR" },
+      paymentFrequency: {
+        type: String,
+        enum: ["weekly", "bi-weekly", "monthly"],
+      },
+      bankAccount: {
+        accountNumber: String,
+        bankName: String,
+        accountHolder: String,
+      },
+    },
+
+    // Shift information
+    shift: {
+      type: String,
+      enum: ["morning", "afternoon", "evening", "night", "flexible"],
+      default: "flexible",
+    },
+
+    // Documents/Verification
+    documents: {
+      drivingLicense: {
+        fileUrl: String,
+        expiryDate: Date,
+        verified: Boolean,
+      },
+      insuranceCertificate: {
+        fileUrl: String,
+        expiryDate: Date,
+        verified: Boolean,
+      },
+      backgroundCheck: {
+        completed: Boolean,
+        completedDate: Date,
+        result: String,
+      },
+    },
+
+    // Activity log
+    activityLog: [
+      {
+        action: String,
+        timestamp: Date,
+        orderId: String,
+        details: String,
+      },
+    ],
   },
   {
     timestamps: true,
   }
 );
+
+// Index for quick lookups
+EmployeeSchema.index({ roles: 1, isAvailable: 1 });
+EmployeeSchema.index({ "availability.status": 1 });
+EmployeeSchema.index({ employeeCategory: 1 });
 
 module.exports = mongoose.model("Employee", EmployeeSchema);

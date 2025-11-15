@@ -1,5 +1,31 @@
 const mongoose = require("mongoose");
 
+// ✅ MASTER STATUS LIST - SINGLE SOURCE OF TRUTH
+const ORDER_STATUSES = [
+  "cart-not-paid",
+  "order-made-not-paid",
+  "pay-not-confirmed",
+  "order-confirmed",
+  "order-not-picked",
+  "issue-customer",
+  "customer-confirmed",
+  "order-refunded",
+  "picking-order",
+  "allocated-driver",
+  "assigned-dispatch-officer-2",
+  "ready-to-pickup",
+  "order-not-pickedup",
+  "order-picked-up",
+  "on-way",
+  "driver-confirmed",
+  "order-processed",
+  "refund",
+  "complain-order",
+  "issue-driver",
+  "parcel-returned",
+  "order-complete",
+];
+
 // Helper function to generate unique referral code
 async function generateUniqueReferralCode(phoneNumber, customerId) {
   const Customer = mongoose.model("Customer");
@@ -10,7 +36,6 @@ async function generateUniqueReferralCode(phoneNumber, customerId) {
     let code;
 
     if (attempts === 0) {
-      // First attempt: Use phone number based code
       const phoneDigits = phoneNumber.replace(/\D/g, "").slice(-4) || "0000";
       const randomSuffix = Math.random()
         .toString(36)
@@ -18,18 +43,15 @@ async function generateUniqueReferralCode(phoneNumber, customerId) {
         .toUpperCase();
       code = `CM${phoneDigits}${randomSuffix}`;
     } else if (attempts < 10) {
-      // Attempts 1-9: Use timestamp + random
       const timestamp = Date.now().toString().slice(-6);
       const random = Math.random().toString(36).substring(2, 4).toUpperCase();
       code = `CM${timestamp}${random}`;
     } else {
-      // Attempts 10+: Use ObjectId + counter
       const objectIdStr = customerId.toString();
       const counter = (attempts - 10).toString().padStart(2, "0");
       code = `CM${objectIdStr.slice(-6)}${counter}`;
     }
 
-    // Check if code exists
     try {
       const existingCustomer = await Customer.findOne({
         referralCode: code,
@@ -37,7 +59,7 @@ async function generateUniqueReferralCode(phoneNumber, customerId) {
       });
 
       if (!existingCustomer) {
-        return code; // Found unique code
+        return code;
       }
     } catch (error) {
       console.error("Error checking referral code uniqueness:", error);
@@ -46,7 +68,6 @@ async function generateUniqueReferralCode(phoneNumber, customerId) {
     attempts++;
   }
 
-  // Fallback: Use ObjectId + timestamp (guaranteed unique)
   const fallbackCode = `CM${customerId.toString().slice(-6)}${Date.now()
     .toString()
     .slice(-6)}`;
@@ -82,19 +103,16 @@ const supportTicketSchema = new mongoose.Schema(
     subType: {
       type: String,
       enum: [
-        // Delivery issues
         "track_order",
         "delivery_delayed",
         "change_delivery_address",
         "driver_location_issue",
         "marked_delivered_not_received",
         "reschedule_delivery",
-        // Product issues
         "broken_item",
         "missing_wrong_amount",
         "wrong_item",
         "product_other",
-        // Payment problems
         "paid_no_confirmation",
         "payment_failed",
         "paid_different_name",
@@ -106,10 +124,9 @@ const supportTicketSchema = new mongoose.Schema(
     issueDetails: String,
     customerMessage: String,
 
-    // Media attachments (videos, images, voice notes)
     mediaAttachments: [
       {
-        mediaId: String, // UltraMsg media ID
+        mediaId: String,
         mediaType: {
           type: String,
           enum: ["image", "video", "voice", "document"],
@@ -118,17 +135,16 @@ const supportTicketSchema = new mongoose.Schema(
         mimetype: String,
         filename: String,
         caption: String,
-        base64Data: String, // Store media as base64
+        base64Data: String,
         fileSize: Number,
         uploadedAt: {
           type: Date,
           default: Date.now,
         },
-        ultraMsgUrl: String, // UltraMsg media URL if available
+        ultraMsgUrl: String,
       },
     ],
 
-    // Payment related data
     paymentData: {
       paymentScreenshot: {
         base64Data: String,
@@ -142,7 +158,6 @@ const supportTicketSchema = new mongoose.Schema(
       paymentAmount: Number,
     },
 
-    // Delivery related data
     deliveryData: {
       currentAddress: String,
       newAddress: String,
@@ -155,9 +170,8 @@ const supportTicketSchema = new mongoose.Schema(
       estimatedExtraCharge: Number,
     },
 
-    // Product issue data
     productData: {
-      affectedItems: [String], // List of product names
+      affectedItems: [String],
       issueDescription: String,
       damagePhotos: [
         {
@@ -193,7 +207,7 @@ const supportTicketSchema = new mongoose.Schema(
     },
     resolution: String,
     resolvedAt: Date,
-    estimatedResolutionTime: String, // e.g., "within 1 hour", "1-2 business days"
+    estimatedResolutionTime: String,
   },
   { _id: false }
 );
@@ -208,9 +222,8 @@ const complaintSchema = new mongoose.Schema(
         return "COMP" + Date.now().toString().slice(-8);
       },
     },
-    orderId: String, // Optional - complaint may not be order related
+    orderId: String,
 
-    // Media attachments for complaints
     mediaAttachments: [
       {
         mediaId: String,
@@ -308,7 +321,7 @@ const originalComplaintSchema = new mongoose.Schema(
   { _id: false }
 );
 
-// Enhanced shopping history schema with full traceability
+// ✅ FIXED: Enhanced shopping history schema with full traceability
 const shoppingHistorySchema = new mongoose.Schema(
   {
     orderId: {
@@ -339,7 +352,6 @@ const shoppingHistorySchema = new mongoose.Schema(
           default: false,
         },
 
-        // EXISTING PACKING FIELDS
         packingStatus: {
           type: String,
           enum: ["pending", "packing", "packed", "unavailable"],
@@ -353,7 +365,6 @@ const shoppingHistorySchema = new mongoose.Schema(
         },
         packingNotes: String,
 
-        // ITEM-LEVEL PACKING COMPLAINTS
         itemComplaints: [
           {
             complaintId: {
@@ -393,7 +404,6 @@ const shoppingHistorySchema = new mongoose.Schema(
           },
         ],
 
-        // NEW STORAGE VERIFICATION FIELDS
         storageVerified: {
           type: Boolean,
           default: false,
@@ -410,7 +420,6 @@ const shoppingHistorySchema = new mongoose.Schema(
           timestamp: Date,
         },
 
-        // ADD THESE MISSING LOADING VERIFICATION FIELDS:
         loadingVerified: {
           type: Boolean,
           default: false,
@@ -426,7 +435,6 @@ const shoppingHistorySchema = new mongoose.Schema(
           timestamp: Date,
         },
 
-        // STORAGE-LEVEL COMPLAINTS
         storageComplaints: [
           {
             complaintId: {
@@ -468,7 +476,6 @@ const shoppingHistorySchema = new mongoose.Schema(
       },
     ],
 
-    // Add to the main shoppingHistory object (same level as packingDetails):
     storageDetails: {
       verificationStartedAt: Date,
       verificationCompletedAt: Date,
@@ -487,7 +494,7 @@ const shoppingHistorySchema = new mongoose.Schema(
         default: 0,
       },
       verificationProgress: {
-        type: Number, // Percentage
+        type: Number,
         default: 0,
       },
       hasStorageComplaints: {
@@ -495,12 +502,7 @@ const shoppingHistorySchema = new mongoose.Schema(
         default: false,
       },
     },
-    // Additional fields to add to the Customer Schema shoppingHistory items
-    // Add these fields to the existing shoppingHistorySchema
 
-    // In the shoppingHistorySchema, add these new fields:
-
-    // DISPATCH OFFICER 1 ASSIGNMENT FIELDS
     assignmentDetails: {
       assignedVehicle: {
         vehicleId: {
@@ -524,7 +526,7 @@ const shoppingHistorySchema = new mongoose.Schema(
         employeeName: String,
         phone: String,
         currentAssignments: Number,
-        expertise: [String], // ["truck", "scooter"]
+        expertise: [String],
       },
       assignedAt: Date,
       assignedBy: {
@@ -534,7 +536,6 @@ const shoppingHistorySchema = new mongoose.Schema(
       notes: String,
     },
 
-    // ORDER REQUIREMENTS CALCULATION
     orderRequirements: {
       calculatedVolume: {
         type: Number,
@@ -551,40 +552,7 @@ const shoppingHistorySchema = new mongoose.Schema(
       lastCalculated: Date,
     },
 
-    // Add new status values to the existing status enum:
-    // Add "assigned-dispatch-officer-2" to the status enum array
-
-    // UPDATED STATUS ENUM (add this to the existing enum array):
-    /*
-status: {
-  type: String,
-  enum: [
-    "cart-not-paid",
-    "order-made-not-paid", 
-    "pay-not-confirmed",
-    "order-confirmed",
-    "order not picked",
-    "issue-customer",
-    "customer-confirmed",
-    "order-refunded",
-    "picking-order",
-    "allocated-driver",
-    "ready to pickup",
-    "assigned-dispatch-officer-2", // NEW STATUS
-    "order-not-pickedup",
-    "order-pickuped-up",
-    "on-way",
-    "driver-confirmed",
-    "order-processed",
-    "refund",
-    "complain-order",
-    "issue-driver",
-    "parcel-returned",
-    "order-complete",
-  ],
-  default: "cart-not-paid",
-},
-*/ loadingDetails: {
+    loadingDetails: {
       verificationStartedAt: Date,
       verificationCompletedAt: Date,
       verificationStaff: {
@@ -601,7 +569,7 @@ status: {
         default: 0,
       },
       loadingProgress: {
-        type: Number, // Percentage
+        type: Number,
         default: 0,
       },
       isReadyForDispatch: {
@@ -609,7 +577,7 @@ status: {
         default: false,
       },
     },
-    // DRIVER ON DELIVERY FIELDS
+
     driverVerification: {
       verified: {
         type: Boolean,
@@ -623,7 +591,6 @@ status: {
       notes: String,
     },
 
-    // ROUTE AND DELIVERY TRACKING
     routeStartedAt: Date,
     routeStartedBy: {
       driverId: String,
@@ -641,7 +608,6 @@ status: {
       longitude: Number,
     },
 
-    // DELIVERY PHOTOS/VIDEOS
     deliveryPhotos: [
       {
         photoId: String,
@@ -658,7 +624,6 @@ status: {
       },
     ],
 
-    // DELIVERY COMPLETION
     deliveredAt: Date,
     deliveredBy: {
       driverId: String,
@@ -691,33 +656,7 @@ status: {
     },
     status: {
       type: String,
-      enum: [
-        "cart-not-paid",
-        "order-made-not-paid",
-        "pay-not-confirmed",
-        "on-route",
-        "order-complete",
-        "ready for driver",
-        "order-confirmed",
-        "order not picked",
-        "issue-customer",
-        "customer-confirmed",
-        "order-refunded",
-        "picking-order",
-        "allocated-driver",
-        "assigned-dispatch-officer-2",
-        "ready to pickup",
-        "order-not-pickedup",
-        "order-pickuped-up",
-        "on-way",
-        "driver-confirmed",
-        "order-processed",
-        "refund",
-        "complain-order",
-        "issue-driver",
-        "parcel-returned",
-        "order-complete",
-      ],
+      enum: ORDER_STATUSES,
       default: "cart-not-paid",
     },
     paymentStatus: {
@@ -786,7 +725,6 @@ status: {
       timestamp: Date,
     },
 
-    // Refund/Replace tracking with full traceability
     refunds: [
       {
         refundId: {
@@ -920,7 +858,6 @@ status: {
       },
     ],
 
-    // Add complaints array to each order
     complaints: [originalComplaintSchema],
   },
   { _id: false }
@@ -929,16 +866,14 @@ status: {
 // Enhanced referral tracking schema
 const referralTrackingSchema = new mongoose.Schema(
   {
-    // Primary referrer (the one who gets commission)
     primaryReferrer: {
       customerId: String,
       customerName: String,
       phoneNumber: String,
       referralCode: String,
       referralDate: Date,
-      videoId: String, // Reference to the video used for referral
+      videoId: String,
     },
-    // Additional referrers (for data tracking only)
     additionalReferrers: [
       {
         customerId: String,
@@ -949,7 +884,6 @@ const referralTrackingSchema = new mongoose.Schema(
         videoId: String,
       },
     ],
-    // Track all people who have referred this customer
     allReferralSources: [
       {
         customerId: String,
@@ -971,7 +905,6 @@ const referralTrackingSchema = new mongoose.Schema(
 // Enhanced foreman status tracking
 const foremanStatusSchema = new mongoose.Schema(
   {
-    // Step 1: Become a Foreman (Manual Admin Approval Required)
     isForemanApproved: {
       type: Boolean,
       default: false,
@@ -982,7 +915,6 @@ const foremanStatusSchema = new mongoose.Schema(
       staffName: String,
     },
 
-    // Step 2: Become Eligible for Commission (Separate Manual Admin Approval Required)
     isCommissionEligible: {
       type: Boolean,
       default: false,
@@ -993,13 +925,11 @@ const foremanStatusSchema = new mongoose.Schema(
       staffName: String,
     },
 
-    // Commission settings
     commissionRate: {
       type: Number,
-      default: 5, // 5% default commission rate
+      default: 5,
     },
 
-    // Status history (immutable)
     statusHistory: [
       {
         action: {
@@ -1047,7 +977,6 @@ const commissionTrackingSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // Detailed commission history
     commissionHistory: [
       {
         commissionId: {
@@ -1070,11 +999,11 @@ const commissionTrackingSchema = new mongoose.Schema(
           type: Date,
           default: Date.now,
         },
-        relatedOrderId: String, // Order that generated this commission
-        referredCustomerId: String, // Customer who made the purchase
+        relatedOrderId: String,
+        referredCustomerId: String,
         referredCustomerName: String,
-        commissionRate: Number, // Rate used for calculation
-        baseAmount: Number, // Original order amount
+        commissionRate: Number,
+        baseAmount: Number,
         notes: String,
         isPaid: {
           type: Boolean,
@@ -1096,36 +1025,6 @@ const commissionTrackingSchema = new mongoose.Schema(
   { _id: false }
 );
 
-// 15 statuses pulled straight from your AllOrders component
-const ORDER_STATUSES = [
-  "cart-not-paid",
-  "order-made-not-paid",
-  "pay-not-confirmed",
-  "order-confirmed",
-  "order not picked",
-  "issue-customer",
-  "customer-confirmed",
-  "order-refunded",
-  "picking-order",
-  "allocated-driver",
-  "ready to pickup",
-  "order-not-pickedup",
-  "order-pickuped-up",
-  "on-way",
-  "driver-confirmed",
-  "order-processed",
-  "refund",
-  "complain-order",
-  "issue-driver",
-  "parcel-returned",
-  "order-complete",
-];
-
-// Helper function for phone number validation
-function arrayLimit(val) {
-  return val.length > 0;
-}
-
 // Main customer schema with all enhancements
 const customerSchema = new mongoose.Schema(
   {
@@ -1133,20 +1032,23 @@ const customerSchema = new mongoose.Schema(
       type: [String],
       required: true,
       index: true,
-      validate: [arrayLimit, "{PATH} must have at least one phone number"],
+      validate: [
+        function (val) {
+          return val.length > 0;
+        },
+        "{PATH} must have at least one phone number",
+      ],
     },
 
-    // Track "where" the customer is in the order flow
     currentOrderStatus: {
       type: String,
       enum: ORDER_STATUSES,
       default: "cart-not-paid",
     },
 
-    // Track if first time customer
     isFirstTimeCustomer: {
       type: Boolean,
-      default: true, // Set to false after first confirmed order
+      default: true,
     },
     firstOrderDiscountApplied: {
       type: Boolean,
@@ -1155,14 +1057,12 @@ const customerSchema = new mongoose.Schema(
         "Marks if first order discount has been used. Set to true only after first payment receipt uploaded.",
     },
 
-    // Remember which order we last created/updated
     latestOrderId: {
       type: String,
       default: null,
       index: true,
     },
 
-    // Optional metadata to track linked/migrated numbers
     numberLinkedHistory: [
       {
         number: String,
@@ -1179,28 +1079,24 @@ const customerSchema = new mongoose.Schema(
 
     conversationState: {
       type: String,
-      default: "new", // Tracks where they are in the conversation flow
+      default: "new",
     },
 
-    // Current support conversation tracking
     currentSupportFlow: {
-      mainCategory: String, // "delivery_product", "check_delivery", "payment", etc.
-      subCategory: String, // "delivery_issue", "product_issue", etc.
-      specificIssue: String, // "track_order", "broken_item", etc.
-      currentStep: String, // Current step in the flow
-      tempData: mongoose.Schema.Types.Mixed, // Temporary data during conversation
-      mediaExpected: Boolean, // Whether we're expecting media upload
+      mainCategory: String,
+      subCategory: String,
+      specificIssue: String,
+      currentStep: String,
+      tempData: mongoose.Schema.Types.Mixed,
+      mediaExpected: Boolean,
       lastInteraction: Date,
-      sessionId: String, // To track support sessions
+      sessionId: String,
     },
 
-    // Enhanced support tickets with media
     supportTickets: [supportTicketSchema],
 
-    // Complaints with media support
     complaints: [complaintSchema],
 
-    // Support interaction history
     supportInteractionHistory: [
       {
         sessionId: String,
@@ -1208,7 +1104,7 @@ const customerSchema = new mongoose.Schema(
         endTime: Date,
         category: String,
         issueResolved: Boolean,
-        satisfaction: Number, // 1-5 rating
+        satisfaction: Number,
         agentInvolved: Boolean,
         totalMessages: Number,
         mediaShared: Number,
@@ -1217,7 +1113,6 @@ const customerSchema = new mongoose.Schema(
       },
     ],
 
-    // Support preferences
     supportPreferences: {
       preferredLanguage: {
         type: String,
@@ -1234,7 +1129,6 @@ const customerSchema = new mongoose.Schema(
       },
     },
 
-    // FAQ interaction tracking
     faqInteractions: [
       {
         question: String,
@@ -1244,7 +1138,6 @@ const customerSchema = new mongoose.Schema(
       },
     ],
 
-    // Delivery address change history
     addressChangeHistory: [
       {
         orderId: String,
@@ -1261,7 +1154,6 @@ const customerSchema = new mongoose.Schema(
       },
     ],
 
-    // Payment issue tracking
     paymentIssues: [
       {
         issueId: String,
@@ -1285,7 +1177,6 @@ const customerSchema = new mongoose.Schema(
       },
     ],
 
-    // Media storage for support
     supportMedia: [
       {
         mediaId: String,
@@ -1299,23 +1190,20 @@ const customerSchema = new mongoose.Schema(
       },
     ],
 
-    // FIXED REFERRAL CODE FIELD - Now with guaranteed uniqueness
     referralCode: {
       type: String,
       unique: true,
-      sparse: true, // Allows null during creation
+      sparse: true,
       index: true,
     },
 
-    // Who referred this customer
     referralTracking: referralTrackingSchema,
 
-    // In the customerSchema, replace the customersReferred array with this:
     customersReferred: [
       {
         customerId: {
-          type: mongoose.Schema.Types.ObjectId, // Changed to ObjectId reference
-          ref: "Customer", // Reference to the actual Customer document
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Customer",
           required: true,
         },
         customerName: String,
@@ -1342,6 +1230,7 @@ const customerSchema = new mongoose.Schema(
         _id: false,
       },
     ],
+
     referraldemovideos: [
       {
         videoId: mongoose.Schema.Types.ObjectId,
@@ -1349,7 +1238,7 @@ const customerSchema = new mongoose.Schema(
         mimetype: String,
         filename: String,
         fileSize: Number,
-        base64Data: String, // Binary data as base64
+        base64Data: String,
         status: {
           type: String,
           enum: ["pending", "approved", "rejected"],
@@ -1363,7 +1252,6 @@ const customerSchema = new mongoose.Schema(
       },
     ],
 
-    // Enhanced referral videos section
     referralvideos: [
       {
         imageId: {
@@ -1385,7 +1273,7 @@ const customerSchema = new mongoose.Schema(
           required: true,
         },
         fileSize: {
-          type: Number, // Size in MB
+          type: Number,
           required: true,
         },
         approvalDate: {
@@ -1411,8 +1299,8 @@ const customerSchema = new mongoose.Schema(
               type: Date,
               default: Date.now,
             },
-            updatedBy: String, // Admin user ID or name
-            reason: String, // Optional reason for status change
+            updatedBy: String,
+            reason: String,
           },
         ],
         adminNotes: String,
@@ -1436,7 +1324,7 @@ const customerSchema = new mongoose.Schema(
               default: "pending",
             },
             dateSent: Date,
-            errorMessage: String, // Track any sending errors
+            errorMessage: String,
           },
         ],
       },
@@ -1461,14 +1349,11 @@ const customerSchema = new mongoose.Schema(
       },
     ],
 
-    // Enhanced foreman and commission tracking
     foremanStatus: foremanStatusSchema,
     commissionTracking: commissionTrackingSchema,
 
-    // Enhanced shopping history with full traceability (REPLACES orderHistory)
     shoppingHistory: [shoppingHistorySchema],
 
-    // Keep orderHistory for backward compatibility but mark as deprecated
     orderHistory: [
       {
         orderId: String,
@@ -1535,7 +1420,6 @@ const customerSchema = new mongoose.Schema(
       },
     ],
 
-    // Current cart (unchanged)
     cart: {
       items: [
         {
@@ -1605,7 +1489,6 @@ const customerSchema = new mongoose.Schema(
       },
     },
 
-    // Discount products tracking
     currentDiscountProductId: String,
     currentDiscountProductName: String,
     currentDiscountProductPrice: Number,
@@ -1613,8 +1496,8 @@ const customerSchema = new mongoose.Schema(
     currentDiscountCategory: String,
 
     pickupPlan: {
-      date: { type: String, default: null }, // e.g., "2025-04-20"
-      timeSlot: { type: String, default: null }, // e.g., "12 PM – 3 PM"
+      date: { type: String, default: null },
+      timeSlot: { type: String, default: null },
       reminderSent: { type: Boolean, default: false },
     },
 
@@ -1633,7 +1516,6 @@ const customerSchema = new mongoose.Schema(
     },
 
     contextData: {
-      // Store additional context for the current conversation state
       categoryId: String,
       categoryName: String,
       subCategoryId: String,
@@ -1693,7 +1575,6 @@ const customerSchema = new mongoose.Schema(
       transactionId: String,
       temporaryItemDetails: Object,
 
-      // Support-related context data
       reportingOrderId: String,
       issueType: String,
       issueDetails: String,
@@ -1745,7 +1626,7 @@ const customerSchema = new mongoose.Schema(
 
     addresses: [
       {
-        nickname: String, // e.g., "Home", "Office"
+        nickname: String,
         fullAddress: String,
         area: String,
         googleMapLink: String,
@@ -1773,7 +1654,6 @@ const customerSchema = new mongoose.Schema(
 // PRE-SAVE MIDDLEWARE - Guarantees unique referral codes
 customerSchema.pre("save", async function (next) {
   try {
-    // Only generate referral code if it doesn't exist
     if (!this.referralCode && this.phoneNumber && this.phoneNumber.length > 0) {
       console.log(
         `Generating referral code for customer: ${this.name || "Unknown"}`
@@ -1804,7 +1684,6 @@ customerSchema.post("save", function (error, doc, next) {
   ) {
     console.error("Duplicate referral code detected, attempting retry...");
 
-    // Generate new code and retry
     generateUniqueReferralCode(doc.phoneNumber[0], doc._id)
       .then((newCode) => {
         doc.referralCode = newCode;
@@ -1825,13 +1704,12 @@ customerSchema.statics.fixAllReferralCodes = async function () {
   try {
     console.log("Starting referral code migration...");
 
-    // Find customers without referral codes or with duplicate issues
     const customersToFix = await this.find({
       $or: [
         { referralCode: { $exists: false } },
         { referralCode: null },
         { referralCode: "" },
-        { referralCode: /^CM68789a/ }, // Fix the problematic pattern
+        { referralCode: /^CM68789a/ },
       ],
     });
 
@@ -1883,6 +1761,7 @@ customerSchema.methods.regenerateReferralCode = async function () {
     throw error;
   }
 };
+
 customerSchema.methods.verifyItemForLoading = function (
   orderId,
   itemIndex,
@@ -1902,7 +1781,6 @@ customerSchema.methods.verifyItemForLoading = function (
     throw new Error("Item not found");
   }
 
-  // Update item loading verification
   this.shoppingHistory[orderIndex].items[itemIndex].loadingVerified = verified;
   this.shoppingHistory[orderIndex].items[itemIndex].loadingNotes = notes || "";
   this.shoppingHistory[orderIndex].items[itemIndex].loadingVerifiedAt =
@@ -1912,7 +1790,6 @@ customerSchema.methods.verifyItemForLoading = function (
     timestamp: new Date(),
   };
 
-  // Update loading details progress
   const order = this.shoppingHistory[orderIndex];
   const verifiedItems = order.items.filter(
     (item) => item.loadingVerified === true
@@ -1929,9 +1806,6 @@ customerSchema.methods.verifyItemForLoading = function (
   return this.save();
 };
 
-// METHOD TO COMPLETE ORDER LOADING
-// Add this method to customerSchema.methods
-
 customerSchema.methods.completeOrderLoading = function (
   orderId,
   loadingNotes,
@@ -1947,7 +1821,6 @@ customerSchema.methods.completeOrderLoading = function (
 
   const order = this.shoppingHistory[orderIndex];
 
-  // Check if all items are verified
   const allItemsVerified = order.items.every(
     (item) => item.loadingVerified === true
   );
@@ -1958,10 +1831,8 @@ customerSchema.methods.completeOrderLoading = function (
     );
   }
 
-  // Update order status to ready for driver
-  this.shoppingHistory[orderIndex].status = "ready for driver";
+  this.shoppingHistory[orderIndex].status = "ready-to-pickup";
 
-  // Update loading details
   if (!this.shoppingHistory[orderIndex].loadingDetails) {
     this.shoppingHistory[orderIndex].loadingDetails = {};
   }
@@ -1975,13 +1846,10 @@ customerSchema.methods.completeOrderLoading = function (
   return this.save();
 };
 
-// METHOD TO GET ORDERS READY FOR VERIFICATION
-// Add this static method to customerSchema.statics
-
 customerSchema.statics.getOrdersForVerification = async function () {
   const customers = await this.find({
     "shoppingHistory.status": {
-      $in: ["assigned-dispatch-officer-2", "ready for driver"],
+      $in: ["assigned-dispatch-officer-2", "ready-to-pickup"],
     },
   }).lean();
 
@@ -1990,7 +1858,7 @@ customerSchema.statics.getOrdersForVerification = async function () {
   for (let customer of customers) {
     for (let order of customer.shoppingHistory) {
       if (
-        ["assigned-dispatch-officer-2", "ready for driver"].includes(
+        ["assigned-dispatch-officer-2", "ready-to-pickup"].includes(
           order.status
         )
       ) {
@@ -2007,13 +1875,10 @@ customerSchema.statics.getOrdersForVerification = async function () {
   return orders;
 };
 
-// METHOD TO GET VEHICLE ASSIGNMENTS
-// Add this static method to customerSchema.statics
-
 customerSchema.statics.getVehicleAssignments = async function () {
   const customers = await this.find({
     "shoppingHistory.status": {
-      $in: ["assigned-dispatch-officer-2", "ready for driver"],
+      $in: ["assigned-dispatch-officer-2", "ready-to-pickup"],
     },
   }).lean();
 
@@ -2022,7 +1887,7 @@ customerSchema.statics.getVehicleAssignments = async function () {
   for (let customer of customers) {
     for (let order of customer.shoppingHistory) {
       if (
-        ["assigned-dispatch-officer-2", "ready for driver"].includes(
+        ["assigned-dispatch-officer-2", "ready-to-pickup"].includes(
           order.status
         )
       ) {
@@ -2052,9 +1917,7 @@ customerSchema.statics.getVehicleAssignments = async function () {
 
   return vehicleAssignments;
 };
-// ENHANCED METHODS FOR REFERRAL AND COMMISSION SYSTEM
 
-// Method to add a message to chat history
 customerSchema.methods.addToChatHistory = function (message, sender) {
   this.chatHistory.push({
     message,
@@ -2065,28 +1928,23 @@ customerSchema.methods.addToChatHistory = function (message, sender) {
   return this.save();
 };
 
-// Method to update conversation state
 customerSchema.methods.updateConversationState = function (newState) {
   this.conversationState = newState;
   this.lastInteraction = new Date();
   return this.save();
 };
 
-// Method to add item to cart
 customerSchema.methods.addToCart = function (product, quantity, weight) {
-  // Check if product already exists in cart with same weight
   const existingItemIndex = this.cart.items.findIndex(
     (item) => item.productId === product.id && item.weight === weight
   );
 
   if (existingItemIndex > -1) {
-    // Update existing item quantity
     this.cart.items[existingItemIndex].quantity += quantity;
     this.cart.items[existingItemIndex].totalPrice =
       this.cart.items[existingItemIndex].price *
       this.cart.items[existingItemIndex].quantity;
   } else {
-    // Add new item to cart
     this.cart.items.push({
       productId: product.id,
       productName: product.name,
@@ -2100,7 +1958,6 @@ customerSchema.methods.addToCart = function (product, quantity, weight) {
     });
   }
 
-  // Recalculate total amount
   this.cart.totalAmount = this.cart.items.reduce(
     (total, item) => total + item.totalPrice,
     0
@@ -2109,14 +1966,11 @@ customerSchema.methods.addToCart = function (product, quantity, weight) {
   return this.save();
 };
 
-// Method to remove item from cart
 customerSchema.methods.removeFromCart = function (productId, weight) {
-  // Filter out the item to remove
   this.cart.items = this.cart.items.filter(
     (item) => !(item.productId === productId && item.weight === weight)
   );
 
-  // Recalculate total amount
   this.cart.totalAmount = this.cart.items.reduce(
     (total, item) => total + item.totalPrice,
     0
@@ -2125,7 +1979,6 @@ customerSchema.methods.removeFromCart = function (productId, weight) {
   return this.save();
 };
 
-// Method to empty cart
 customerSchema.methods.emptyCart = function () {
   this.cart.items = [];
   this.cart.totalAmount = 0;
@@ -2136,7 +1989,6 @@ customerSchema.methods.emptyCart = function () {
   return this.save();
 };
 
-// Method to create new order from cart (DEPRECATED - use addToShoppingHistory instead)
 customerSchema.methods.createOrder = function () {
   const orderId = "ORD" + Date.now().toString().slice(-8);
 
@@ -2156,18 +2008,12 @@ customerSchema.methods.createOrder = function () {
   return this.save().then(() => orderId);
 };
 
-// ENHANCED METHODS FOR SHOPPING HISTORY
-
-// Method to add order to shopping history
 customerSchema.methods.addToShoppingHistory = function (orderData) {
   this.shoppingHistory.push(orderData);
   this.isFirstTimeCustomer = false;
   return this.save();
 };
 
-// ENHANCED METHODS FOR REFERRAL SYSTEM
-
-// Method to add referral
 customerSchema.methods.addReferral = function (referrerData, isPrimary = true) {
   if (!this.referralTracking) {
     this.referralTracking = {
@@ -2182,23 +2028,17 @@ customerSchema.methods.addReferral = function (referrerData, isPrimary = true) {
     referralDate: new Date(),
   };
 
-  // Add to all referral sources
   this.referralTracking.allReferralSources.push(referralEntry);
 
   if (isPrimary && !this.referralTracking.primaryReferrer) {
-    // Set as primary referrer only if no primary exists
     this.referralTracking.primaryReferrer = referralEntry;
   } else {
-    // Add to additional referrers
     this.referralTracking.additionalReferrers.push(referralEntry);
   }
 
   return this.save();
 };
 
-// ENHANCED METHODS FOR FOREMAN STATUS
-
-// Method to update foreman status
 customerSchema.methods.updateForemanStatus = function (
   isApproved,
   staffInfo,
@@ -2220,7 +2060,6 @@ customerSchema.methods.updateForemanStatus = function (
     this.foremanStatus.foremanApprovedBy = staffInfo;
   }
 
-  // Add to history
   this.foremanStatus.statusHistory.push({
     action: isApproved ? "foreman_approved" : "foreman_revoked",
     actionDate: new Date(),
@@ -2231,7 +2070,6 @@ customerSchema.methods.updateForemanStatus = function (
   return this.save();
 };
 
-// Method to update commission eligibility
 customerSchema.methods.updateCommissionEligibility = function (
   isEligible,
   staffInfo,
@@ -2252,7 +2090,6 @@ customerSchema.methods.updateCommissionEligibility = function (
     this.foremanStatus.commissionEligibilityDate = new Date();
     this.foremanStatus.commissionApprovedBy = staffInfo;
 
-    // Initialize commission tracking if not exists
     if (!this.commissionTracking) {
       this.commissionTracking = {
         totalCommissionEarned: 0,
@@ -2263,7 +2100,6 @@ customerSchema.methods.updateCommissionEligibility = function (
     }
   }
 
-  // Add to history
   this.foremanStatus.statusHistory.push({
     action: isEligible ? "commission_approved" : "commission_revoked",
     actionDate: new Date(),
@@ -2274,14 +2110,10 @@ customerSchema.methods.updateCommissionEligibility = function (
   return this.save();
 };
 
-// ENHANCED METHODS FOR COMMISSION MANAGEMENT
-
-// Method to calculate and add commission
 customerSchema.methods.addCommissionEarned = function (
   orderData,
   referredCustomerData
 ) {
-  // Only add commission if eligible and order date is after eligibility date
   if (!this.foremanStatus?.isCommissionEligible) {
     return Promise.resolve();
   }
@@ -2296,7 +2128,6 @@ customerSchema.methods.addCommissionEarned = function (
     return Promise.resolve();
   }
 
-  // Calculate commission (exclude discounted products)
   const eligibleAmount = orderData.items.reduce((sum, item) => {
     return sum + (item.isDiscountedProduct ? 0 : item.totalPrice);
   }, 0);
@@ -2308,7 +2139,6 @@ customerSchema.methods.addCommissionEarned = function (
     return Promise.resolve();
   }
 
-  // Initialize commission tracking if not exists
   if (!this.commissionTracking) {
     this.commissionTracking = {
       totalCommissionEarned: 0,
@@ -2318,11 +2148,9 @@ customerSchema.methods.addCommissionEarned = function (
     };
   }
 
-  // Update totals
   this.commissionTracking.totalCommissionEarned += commissionAmount;
   this.commissionTracking.availableCommission += commissionAmount;
 
-  // Add to history
   this.commissionTracking.commissionHistory.push({
     type: "earned",
     amount: commissionAmount,
@@ -2339,7 +2167,6 @@ customerSchema.methods.addCommissionEarned = function (
   return this.save();
 };
 
-// Method to pay commission
 customerSchema.methods.payCommission = function (
   amount,
   staffInfo,
@@ -2353,11 +2180,9 @@ customerSchema.methods.payCommission = function (
     throw new Error("Cannot pay more than available commission");
   }
 
-  // Update totals
   this.commissionTracking.totalCommissionPaid += amount;
   this.commissionTracking.availableCommission -= amount;
 
-  // Add to history
   this.commissionTracking.commissionHistory.push({
     type: "paid",
     amount: amount,
@@ -2374,12 +2199,10 @@ customerSchema.methods.payCommission = function (
   return this.save();
 };
 
-// Method to check if customer can see commission options
 customerSchema.methods.canSeeCommissionOptions = function () {
   return this.foremanStatus?.isCommissionEligible === true;
 };
 
-// Method to get referral dashboard data
 customerSchema.methods.getReferralDashboard = function () {
   return {
     referralCode: this.referralCode,
@@ -2402,9 +2225,6 @@ customerSchema.methods.getReferralDashboard = function () {
   };
 };
 
-// SUPPORT SYSTEM METHODS (keeping existing functionality)
-
-// Method to create support ticket with media
 customerSchema.methods.createSupportTicket = function (ticketData) {
   if (!this.supportTickets) {
     this.supportTickets = [];
@@ -2421,7 +2241,6 @@ customerSchema.methods.createSupportTicket = function (ticketData) {
   return this.save().then(() => ticket.ticketId);
 };
 
-// Method to add media to support ticket
 customerSchema.methods.addMediaToTicket = function (ticketId, mediaData) {
   const ticket = this.supportTickets.find((t) => t.ticketId === ticketId);
   if (ticket) {
@@ -2438,7 +2257,6 @@ customerSchema.methods.addMediaToTicket = function (ticketId, mediaData) {
   return Promise.reject(new Error("Ticket not found"));
 };
 
-// Method to create complaint with media
 customerSchema.methods.createComplaint = function (complaintData) {
   if (!this.complaints) {
     this.complaints = [];
@@ -2454,7 +2272,6 @@ customerSchema.methods.createComplaint = function (complaintData) {
   return this.save().then(() => complaint.complaintId);
 };
 
-// Method to update support flow state
 customerSchema.methods.updateSupportFlow = function (flowData) {
   if (!this.currentSupportFlow) {
     this.currentSupportFlow = {};
@@ -2468,7 +2285,6 @@ customerSchema.methods.updateSupportFlow = function (flowData) {
   return this.save();
 };
 
-// Method to clear support flow
 customerSchema.methods.clearSupportFlow = function () {
   this.currentSupportFlow = {
     mainCategory: null,
@@ -2483,7 +2299,6 @@ customerSchema.methods.clearSupportFlow = function () {
   return this.save();
 };
 
-// Method to log support interaction
 customerSchema.methods.logSupportInteraction = function (action, details = {}) {
   if (!this.supportInteractionHistory) {
     this.supportInteractionHistory = [];
@@ -2503,7 +2318,6 @@ customerSchema.methods.logSupportInteraction = function (action, details = {}) {
       currentSession.mediaShared += 1;
     }
   } else {
-    // Create new session
     this.supportInteractionHistory.push({
       sessionId: sessionId,
       startTime: new Date(),
@@ -2514,7 +2328,6 @@ customerSchema.methods.logSupportInteraction = function (action, details = {}) {
       lastActionTime: new Date(),
     });
 
-    // Update current support flow with session ID
     if (this.currentSupportFlow) {
       this.currentSupportFlow.sessionId = sessionId;
     }
@@ -2523,7 +2336,6 @@ customerSchema.methods.logSupportInteraction = function (action, details = {}) {
   return this.save();
 };
 
-// Method to add payment issue
 customerSchema.methods.addPaymentIssue = function (issueData) {
   if (!this.paymentIssues) {
     this.paymentIssues = [];
@@ -2539,7 +2351,6 @@ customerSchema.methods.addPaymentIssue = function (issueData) {
   return this.save().then(() => paymentIssue.issueId);
 };
 
-// Method to add address change request
 customerSchema.methods.addAddressChangeRequest = function (changeData) {
   if (!this.addressChangeHistory) {
     this.addressChangeHistory = [];
@@ -2555,7 +2366,6 @@ customerSchema.methods.addAddressChangeRequest = function (changeData) {
   return this.save();
 };
 
-// Method to add FAQ interaction
 customerSchema.methods.addFAQInteraction = function (question, category) {
   if (!this.faqInteractions) {
     this.faqInteractions = [];
@@ -2571,7 +2381,6 @@ customerSchema.methods.addFAQInteraction = function (question, category) {
   return this.save();
 };
 
-// Method to save support media
 customerSchema.methods.saveSupportMedia = function (mediaData) {
   if (!this.supportMedia) {
     this.supportMedia = [];
@@ -2586,7 +2395,6 @@ customerSchema.methods.saveSupportMedia = function (mediaData) {
   return this.save();
 };
 
-// Method to update order status (DEPRECATED - use shoppingHistory instead)
 customerSchema.methods.updateOrderStatus = function (orderId, status) {
   const orderIndex = this.orderHistory.findIndex(
     (order) => order.orderId === orderId
@@ -2600,27 +2408,22 @@ customerSchema.methods.updateOrderStatus = function (orderId, status) {
   return Promise.reject(new Error("Order not found"));
 };
 
-// UTILITY METHODS
-
-// Method to calculate performance score
 customerSchema.methods.calculatePerformanceScore = function () {
   const referrals = this.customersReferred?.length || 0;
   const videos = this.referralvideos ? this.referralvideos.length : 0;
   const totalSpent = this.getTotalSpent();
   const orders = this.shoppingHistory ? this.shoppingHistory.length : 0;
 
-  // Performance scoring algorithm
-  const referralScore = Math.min(referrals * 10, 40); // Max 40 points
-  const videoScore = Math.min(videos * 5, 20); // Max 20 points
-  const spendingScore = Math.min(totalSpent / 50, 25); // Max 25 points ($50 = 1 point)
-  const loyaltyScore = Math.min(orders * 3, 15); // Max 15 points
+  const referralScore = Math.min(referrals * 10, 40);
+  const videoScore = Math.min(videos * 5, 20);
+  const spendingScore = Math.min(totalSpent / 50, 25);
+  const loyaltyScore = Math.min(orders * 3, 15);
 
   const totalScore = referralScore + videoScore + spendingScore + loyaltyScore;
 
   return Math.round(totalScore);
 };
 
-// Method to get total spent
 customerSchema.methods.getTotalSpent = function () {
   if (!this.shoppingHistory || this.shoppingHistory.length === 0) {
     return 0;
@@ -2630,9 +2433,6 @@ customerSchema.methods.getTotalSpent = function () {
     return total + (order.totalAmount || 0);
   }, 0);
 };
-
-// METHOD TO CALCULATE ORDER REQUIREMENTS
-// Add this method to customerSchema.methods
 
 customerSchema.methods.calculateOrderRequirements = function (orderId) {
   const order = this.shoppingHistory.find((o) => o.orderId === orderId);
@@ -2645,18 +2445,15 @@ customerSchema.methods.calculateOrderRequirements = function (orderId) {
   let totalPackages = items.length;
 
   items.forEach((item) => {
-    // Estimate volume based on quantity (rough estimate)
-    totalVolume += (item.quantity || 1) * 0.1; // 0.1 cubic meters per item
+    totalVolume += (item.quantity || 1) * 0.1;
 
-    // Extract weight from weight string if available
     if (item.weight) {
       const weightMatch = item.weight.match(/(\d+(?:\.\d+)?)/);
       if (weightMatch) {
         totalWeight += parseFloat(weightMatch[1]) * (item.quantity || 1);
       }
     } else {
-      // Default weight estimate
-      totalWeight += (item.quantity || 1) * 0.5; // 0.5 kg per item
+      totalWeight += (item.quantity || 1) * 0.5;
     }
   });
 
@@ -2667,7 +2464,6 @@ customerSchema.methods.calculateOrderRequirements = function (orderId) {
     lastCalculated: new Date(),
   };
 
-  // Update the order with calculated requirements
   const orderIndex = this.shoppingHistory.findIndex(
     (o) => o.orderId === orderId
   );
@@ -2677,9 +2473,6 @@ customerSchema.methods.calculateOrderRequirements = function (orderId) {
 
   return requirements;
 };
-
-// METHOD TO ASSIGN VEHICLE AND DRIVER
-// Add this method to customerSchema.methods
 
 customerSchema.methods.assignVehicleAndDriver = function (
   orderId,
@@ -2693,36 +2486,29 @@ customerSchema.methods.assignVehicleAndDriver = function (
     throw new Error("Order not found");
   }
 
-  // Update assignment details
   this.shoppingHistory[orderIndex].assignmentDetails = {
     ...assignmentData,
     assignedAt: new Date(),
   };
 
-  // Update status
   this.shoppingHistory[orderIndex].status = "assigned-dispatch-officer-2";
 
-  // Update driver1 field for backward compatibility
   this.shoppingHistory[orderIndex].driver1 =
     assignmentData.assignedDriver.employeeName;
 
   return this.save();
 };
 
-// METHOD TO GET ORDERS READY FOR ASSIGNMENT
-// Add this static method to customerSchema.statics
-
 customerSchema.statics.getOrdersReadyForAssignment = async function () {
   const customers = await this.find({
-    "shoppingHistory.status": "ready to pickup",
+    "shoppingHistory.status": "ready-to-pickup",
   }).lean();
 
   let orders = [];
 
   for (let customer of customers) {
     for (let order of customer.shoppingHistory) {
-      if (order.status === "ready to pickup") {
-        // Check if already assigned
+      if (order.status === "ready-to-pickup") {
         if (
           !order.assignmentDetails ||
           !order.assignmentDetails.assignedVehicle
@@ -2740,23 +2526,16 @@ customerSchema.statics.getOrdersReadyForAssignment = async function () {
 
   return orders;
 };
-// Method to check if eligible for foreman
+
 customerSchema.methods.isEligibleForForeman = function () {
   const performanceScore = this.calculatePerformanceScore();
   const totalSpent = this.getTotalSpent();
   const hasVideos = this.referralvideos && this.referralvideos.length > 0;
   const hasOrders = this.shoppingHistory && this.shoppingHistory.length >= 2;
 
-  // Eligibility criteria
-  return (
-    performanceScore >= 30 && // Minimum performance score
-    totalSpent >= 100 && // Minimum spending
-    hasVideos && // Has uploaded at least one video
-    hasOrders // Has placed at least 2 orders
-  );
+  return performanceScore >= 30 && totalSpent >= 100 && hasVideos && hasOrders;
 };
 
-// Method to get commission dashboard data
 customerSchema.methods.getCommissionDashboard = function () {
   return {
     commissionEarned: this.commissionTracking?.totalCommissionEarned || 0,
@@ -2771,7 +2550,6 @@ customerSchema.methods.getCommissionDashboard = function () {
   };
 };
 
-// Method to get support dashboard data
 customerSchema.methods.getSupportDashboard = function () {
   return {
     activeTickets:
@@ -2788,11 +2566,9 @@ customerSchema.methods.getSupportDashboard = function () {
   };
 };
 
-// Add this method to customerSchema.methods
 customerSchema.methods.addReferredCustomer = async function (
   referredCustomerData
 ) {
-  // Ensure the referred customer exists as a separate document
   const referredCustomer = await mongoose
     .model("Customer")
     .findById(referredCustomerData.customerId);
@@ -2801,7 +2577,6 @@ customerSchema.methods.addReferredCustomer = async function (
     throw new Error("Referred customer not found");
   }
 
-  // Update the referred customer's referredBy field
   referredCustomer.referredBy = {
     customerId: this._id,
     phoneNumber: this.phoneNumber[0],
@@ -2812,12 +2587,10 @@ customerSchema.methods.addReferredCustomer = async function (
 
   await referredCustomer.save();
 
-  // Add to this customer's referral list
   if (!this.customersReferred) {
     this.customersReferred = [];
   }
 
-  // Check if this customer is already in the referral list
   const existingReferralIndex = this.customersReferred.findIndex(
     (ref) =>
       ref.customerId.toString() === referredCustomerData.customerId.toString()
@@ -2841,7 +2614,6 @@ customerSchema.methods.addReferredCustomer = async function (
   return this.save();
 };
 
-// Add this method to customerSchema.methods
 customerSchema.methods.updateReferredCustomerOrder = async function (
   referredCustomerId,
   orderAmount
@@ -2863,7 +2635,6 @@ customerSchema.methods.updateReferredCustomerOrder = async function (
     referral.totalOrdersCount += 1;
     referral.totalSpentAmount += orderAmount;
 
-    // Calculate commission if applicable
     if (this.foremanStatus?.isCommissionEligible) {
       const commissionRate = this.foremanStatus.commissionRate || 5;
       const commission = (orderAmount * commissionRate) / 100;
@@ -2874,9 +2645,7 @@ customerSchema.methods.updateReferredCustomerOrder = async function (
   }
 };
 
-// Add this pre-save hook
 customerSchema.pre("save", async function (next) {
-  // If this is a new customer with referredBy data, ensure the referrer's customersReferred is updated
   if (this.isNew && this.referredBy) {
     try {
       const referrer = await mongoose
@@ -2894,7 +2663,7 @@ customerSchema.pre("save", async function (next) {
   }
   next();
 });
-// Create the model
+
 const Customer = mongoose.model("Customer", customerSchema);
 
 module.exports = Customer;
