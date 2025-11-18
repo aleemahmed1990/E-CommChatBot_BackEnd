@@ -104,7 +104,7 @@ const EmployeeSchema = new mongoose.Schema(
       default: false,
     },
 
-    // ✅ NEW DELIVERY SYSTEM FIELDS
+    // PACKING STAFF SPECIFIC
     isAvailable: {
       type: Boolean,
       default: true,
@@ -117,7 +117,7 @@ const EmployeeSchema = new mongoose.Schema(
 
     maxAssignments: {
       type: Number,
-      default: 5, // Maximum orders an employee can handle simultaneously
+      default: 5,
     },
 
     assignedOrders: [
@@ -135,7 +135,27 @@ const EmployeeSchema = new mongoose.Schema(
       },
     ],
 
-    // Driver specific fields
+    // PACKING WORK HISTORY
+    packingHistory: [
+      {
+        orderId: String,
+        customerId: String,
+        customerName: String,
+        startedAt: Date,
+        completedAt: Date,
+        totalItems: Number,
+        packedItems: Number,
+        status: {
+          type: String,
+          enum: ["completed", "failed", "cancelled"],
+          default: "completed",
+        },
+        notes: String,
+        complaints: { type: Number, default: 0 },
+      },
+    ],
+
+    // DRIVER SPECIFIC
     licenseNumber: {
       type: String,
       default: null,
@@ -146,13 +166,39 @@ const EmployeeSchema = new mongoose.Schema(
     },
     assignedVehicle: {
       vehicleId: String,
-      vehicleType: String, // truck, scooter
+      vehicleType: String,
       registrationNumber: String,
       assignedAt: Date,
     },
 
-    // Performance tracking
+    // PERFORMANCE METRICS
     performanceMetrics: {
+      totalOrders: {
+        type: Number,
+        default: 0,
+      },
+      completedOrders: {
+        type: Number,
+        default: 0,
+      },
+      failedOrders: {
+        type: Number,
+        default: 0,
+      },
+      averagePackingTime: {
+        type: Number,
+        default: 0,
+      },
+      rating: {
+        type: Number,
+        default: 5,
+        min: 1,
+        max: 5,
+      },
+      complaintsCount: {
+        type: Number,
+        default: 0,
+      },
       totalDeliveries: {
         type: Number,
         default: 0,
@@ -167,22 +213,11 @@ const EmployeeSchema = new mongoose.Schema(
       },
       averageDeliveryTime: {
         type: Number,
-        default: 0, // in minutes
-      },
-      rating: {
-        type: Number,
-        default: 5,
-        min: 1,
-        max: 5,
-      },
-      complaintsCount: {
-        type: Number,
         default: 0,
       },
-      lastDeliveryDate: Date,
+      lastWorkDate: Date,
     },
 
-    // Availability tracking
     availability: {
       status: {
         type: String,
@@ -195,7 +230,6 @@ const EmployeeSchema = new mongoose.Schema(
       leaveReason: String,
     },
 
-    // Current location (for drivers on delivery)
     currentLocation: {
       latitude: Number,
       longitude: Number,
@@ -203,14 +237,12 @@ const EmployeeSchema = new mongoose.Schema(
       updatedAt: Date,
     },
 
-    // Work schedule
     workSchedule: {
-      startTime: String, // HH:MM format
-      endTime: String, // HH:MM format
-      workDays: [String], // ["Monday", "Tuesday", ...]
+      startTime: String,
+      endTime: String,
+      workDays: [String],
     },
 
-    // Salary/Payment info (if needed)
     compensationInfo: {
       salaryType: {
         type: String,
@@ -229,14 +261,12 @@ const EmployeeSchema = new mongoose.Schema(
       },
     },
 
-    // Shift information
     shift: {
       type: String,
       enum: ["morning", "afternoon", "evening", "night", "flexible"],
       default: "flexible",
     },
 
-    // Documents/Verification
     documents: {
       drivingLicense: {
         fileUrl: String,
@@ -255,7 +285,6 @@ const EmployeeSchema = new mongoose.Schema(
       },
     },
 
-    // Activity log
     activityLog: [
       {
         action: String,
@@ -270,9 +299,10 @@ const EmployeeSchema = new mongoose.Schema(
   }
 );
 
-// Index for quick lookups
+// Indexes
 EmployeeSchema.index({ roles: 1, isAvailable: 1 });
 EmployeeSchema.index({ "availability.status": 1 });
 EmployeeSchema.index({ employeeCategory: 1 });
+EmployeeSchema.index({ employeeId: 1 });
 
 module.exports = mongoose.model("Employee", EmployeeSchema);

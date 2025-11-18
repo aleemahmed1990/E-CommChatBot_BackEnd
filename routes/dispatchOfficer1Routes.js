@@ -4,6 +4,7 @@ const router = express.Router();
 const Customer = require("../models/customer");
 const DeliveryTracking = require("../models/Deliverytracking");
 const VehicleType = require("../models/VehicleType");
+const Employee = require("../models/Employee"); // ✅ Import Employee schema
 
 // Helper function to get workflow progress
 function getWorkflowProgress(tracking) {
@@ -85,16 +86,16 @@ function suggestVehicle(orderRequirements, availableVehicles) {
 // Get assignment queue - orders ready for vehicle assignment
 router.get("/queue", async (req, res) => {
   try {
-    // Get orders that are ready for pickup (completed storage verification)
+    // ✅ FIXED: Status check - Storage officer sets "ready-to-pickup" (with hyphen)
     const customers = await Customer.find({
-      "shoppingHistory.status": "ready to pickup",
+      "shoppingHistory.status": "ready-to-pickup",
     }).lean();
 
     let assignmentQueue = [];
 
     for (let customer of customers) {
       for (let order of customer.shoppingHistory) {
-        if (order.status === "ready to pickup") {
+        if (order.status === "ready-to-pickup") {
           // Get delivery tracking for workflow status
           let tracking = await DeliveryTracking.findOne({
             orderId: order.orderId,
@@ -234,63 +235,68 @@ router.get("/suggest-vehicle/:orderId", async (req, res) => {
   }
 });
 
-// Get available Dispatch Officer 2 staff
+// ✅ SIMPLIFIED: Get all employees (no strict filters)
 router.get("/dispatch-officers", async (req, res) => {
   try {
-    // For now, return mock data. In a real system, this would come from Staff schema
-    const dispatchOfficers = [
-      {
-        employeeId: "DO2_001",
-        employeeName: "Ahmed Hassan",
-        phone: "+971501234567",
-        currentAssignments: 2,
-        maxAssignments: 5,
-        expertise: ["truck", "scooter"],
-        status: "available",
-      },
-      {
-        employeeId: "DO2_002",
-        employeeName: "Sara Mohammed",
-        phone: "+971507654321",
-        currentAssignments: 1,
-        maxAssignments: 5,
-        expertise: ["truck"],
-        status: "available",
-      },
-      {
-        employeeId: "DO2_003",
-        employeeName: "Omar Ali",
-        phone: "+971509876543",
-        currentAssignments: 3,
-        maxAssignments: 5,
-        expertise: ["scooter"],
-        status: "available",
-      },
-      {
-        employeeId: "DO2_004",
-        employeeName: "Fatima Rashid",
-        phone: "+971502468135",
-        currentAssignments: 5,
-        maxAssignments: 5,
-        expertise: ["truck", "scooter"],
-        status: "busy",
-      },
-    ];
+    console.log("=== FETCHING ALL EMPLOYEES ===");
 
-    // Filter available officers
+    // Fetch ALL employees - no filters
+    const employees = await Employee.find({});
+
+    console.log("Total employees found:", employees.length);
+    console.log(
+      "Employees:",
+      employees.map((e) => ({
+        id: e.employeeId,
+        name: e.name,
+        roles: e.roles,
+        activated: e.isActivated,
+        blocked: e.isBlocked,
+        status: e.availability?.status,
+        assignments: e.currentAssignments,
+      }))
+    );
+
+    // Map employees to dispatch officer format
+    const dispatchOfficers = employees.map((emp) => ({
+      employeeId: emp.employeeId,
+      employeeName: emp.name,
+      phone: emp.phone?.[0] || "",
+      currentAssignments: emp.currentAssignments || 0,
+      maxAssignments: emp.maxAssignments || 5,
+      expertise: emp.roles || [],
+      status: emp.availability?.status || "available",
+      rating: emp.performanceMetrics?.rating || 5,
+      completedOrders: emp.performanceMetrics?.completedOrders || 0,
+      email: emp.email,
+      isActivated: emp.isActivated,
+      isBlocked: emp.isBlocked,
+    }));
+
+    console.log("Mapped officers:", dispatchOfficers.length);
+
+    // Filter: Only show available, not blocked, activated employees
     const availableOfficers = dispatchOfficers.filter(
       (officer) =>
-        officer.status === "available" &&
+        officer.isActivated &&
+        !officer.isBlocked &&
         officer.currentAssignments < officer.maxAssignments
     );
 
+    console.log("Available officers:", availableOfficers.length);
+
     res.json({
-      available: availableOfficers,
-      all: dispatchOfficers,
+      available: availableOfficers.sort(
+        (a, b) => a.currentAssignments - b.currentAssignments
+      ),
+      all: dispatchOfficers, // Show ALL employees
     });
   } catch (error) {
     console.error("Error fetching dispatch officers:", error);
-    res.status(500).json({ error: "Failed to fetch dispatch officers" });
+    res.status(500).json({
+      error: "Failed to fetch dispatch officers",
+      details: error.message,
+    });
   }
 });
 
@@ -422,6 +428,16 @@ router.post("/assign/:orderId", async (req, res) => {
 
     await customer.save();
 
+    // ✅ Update Employee record - increment currentAssignments
+    // Use employeeId (not _id) to find employee
+    await Employee.findOneAndUpdate(
+      { employeeId: driverDetails.employeeId },
+      {
+        $inc: { currentAssignments: 1 },
+        "availability.lastStatusUpdate": new Date(),
+      }
+    );
+
     // Update delivery tracking workflow
     const tracking = await DeliveryTracking.findOne({ orderId: orderId });
     if (tracking) {
@@ -456,7 +472,7 @@ router.get("/stats", async (req, res) => {
   try {
     const customers = await Customer.find({
       "shoppingHistory.status": {
-        $in: ["ready to pickup", "assigned-dispatch-officer-2"],
+        $in: ["ready-to-pickup", "assigned-dispatch-officer-2"],
       },
     }).lean();
 
@@ -470,7 +486,8 @@ router.get("/stats", async (req, res) => {
 
     for (let customer of customers) {
       for (let order of customer.shoppingHistory) {
-        if (order.status === "ready to pickup") {
+        // ✅ FIXED: Status check
+        if (order.status === "ready-to-pickup") {
           stats.pending++;
 
           // Check if urgent (delivery within 4 hours)
@@ -602,6 +619,15 @@ async function assignSingleOrder(
 
   await customer.save();
 
+  // ✅ Update Employee record
+  await Employee.findOneAndUpdate(
+    { employeeId: driverDetails.employeeId },
+    {
+      $inc: { currentAssignments: 1 },
+      "availability.lastStatusUpdate": new Date(),
+    }
+  );
+
   // Update delivery tracking workflow
   const tracking = await DeliveryTracking.findOne({ orderId: orderId });
   if (tracking) {
@@ -619,5 +645,50 @@ async function assignSingleOrder(
 
   return assignmentData;
 }
+
+// ✅ DEBUG: Check all employees with dispatch-officer-2 role
+router.get("/debug/check-officers", async (req, res) => {
+  try {
+    console.log("=== DEBUG: Checking all employees ===");
+
+    // Get ALL employees first
+    const allEmployees = await Employee.find({}).select(
+      "employeeId name roles isActivated isBlocked availability currentAssignments maxAssignments"
+    );
+
+    console.log("Total employees in DB:", allEmployees.length);
+
+    // Check dispatch officers
+    const dispatchOfficers = await Employee.find({
+      roles: { $in: ["dispatch-officer-2"] },
+    }).select(
+      "employeeId name roles isActivated isBlocked availability currentAssignments"
+    );
+
+    console.log("Dispatch Officer 2 count:", dispatchOfficers.length);
+    console.log(
+      "Details:",
+      dispatchOfficers.map((e) => ({
+        id: e.employeeId,
+        name: e.name,
+        roles: e.roles,
+        activated: e.isActivated,
+        blocked: e.isBlocked,
+        status: e.availability?.status,
+        assignments: `${e.currentAssignments}/${e.maxAssignments}`,
+      }))
+    );
+
+    res.json({
+      totalEmployees: allEmployees.length,
+      dispatchOfficers2Count: dispatchOfficers.length,
+      dispatchOfficers2: dispatchOfficers,
+      allEmployees: allEmployees.slice(0, 10), // First 10
+    });
+  } catch (error) {
+    console.error("Debug error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 module.exports = router;

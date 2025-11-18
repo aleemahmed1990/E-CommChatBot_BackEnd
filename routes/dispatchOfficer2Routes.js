@@ -28,10 +28,10 @@ function getWorkflowProgress(tracking) {
 // Get verification & loading queue - orders assigned to Dispatch Officer 2
 router.get("/queue", async (req, res) => {
   try {
-    // Get orders that are assigned to dispatch officer 2
+    // ✅ FIXED: Use "order-picked-up" from master status list
     const customers = await Customer.find({
       "shoppingHistory.status": {
-        $in: ["assigned-dispatch-officer-2", "ready for driver"],
+        $in: ["assigned-dispatch-officer-2", "order-picked-up"],
       },
     }).lean();
 
@@ -40,7 +40,7 @@ router.get("/queue", async (req, res) => {
     for (let customer of customers) {
       for (let order of customer.shoppingHistory) {
         if (
-          ["assigned-dispatch-officer-2", "ready for driver"].includes(
+          ["assigned-dispatch-officer-2", "ready-for-driver"].includes(
             order.status
           )
         ) {
@@ -69,7 +69,7 @@ router.get("/queue", async (req, res) => {
 
           // Determine loading status
           let loadingStatus = "pending";
-          if (order.status === "ready for driver") {
+          if (order.status === "ready-for-driver") {
             loadingStatus = "confirmed for dispatch";
           } else if (verificationProgress === 100) {
             loadingStatus = "verified";
@@ -125,10 +125,10 @@ router.get("/queue", async (req, res) => {
 // Get vehicle status with assigned orders
 router.get("/vehicles", async (req, res) => {
   try {
-    // Get all orders that are assigned to dispatch officer 2 or ready for driver
+    // ✅ FIXED: Use "order-picked-up" from master status list
     const customers = await Customer.find({
       "shoppingHistory.status": {
-        $in: ["assigned-dispatch-officer-2", "ready for driver"],
+        $in: ["assigned-dispatch-officer-2", "order-picked-up"],
       },
     }).lean();
 
@@ -137,7 +137,7 @@ router.get("/vehicles", async (req, res) => {
     for (let customer of customers) {
       for (let order of customer.shoppingHistory) {
         if (
-          ["assigned-dispatch-officer-2", "ready for driver"].includes(
+          ["assigned-dispatch-officer-2", "order-picked-up"].includes(
             order.status
           )
         ) {
@@ -199,7 +199,7 @@ router.get("/vehicles", async (req, res) => {
 
       // Determine vehicle status
       const allOrdersReady = vehicle.assignedOrders.every(
-        (order) => order.orderStatus === "ready for driver"
+        (order) => order.orderStatus === "order-picked-up"
       );
       if (allOrdersReady && vehicle.assignedOrders.length > 0) {
         vehicle.status = "all orders loaded";
@@ -219,7 +219,7 @@ router.get("/vehicles", async (req, res) => {
   }
 });
 
-// FIXED ROUTE: Get detailed order for verification
+// Get detailed order for verification
 router.get("/order/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -234,7 +234,7 @@ router.get("/order/:orderId", async (req, res) => {
 
     const order = customer.shoppingHistory.find((o) => o.orderId === orderId);
 
-    // CRITICAL FIX: Initialize loading verification status for items if not exists
+    // Initialize loading verification status for items if not exists
     if (order.items) {
       order.items.forEach((item, index) => {
         if (
@@ -285,7 +285,6 @@ router.post("/start-verification/:orderId", async (req, res) => {
     const { orderId } = req.params;
     const { employeeId, employeeName } = req.body;
 
-    // Update customer order with loading verification start
     const result = await Customer.updateOne(
       { "shoppingHistory.orderId": orderId },
       {
@@ -312,6 +311,8 @@ router.post("/start-verification/:orderId", async (req, res) => {
     res.status(500).json({ error: "Failed to start verification" });
   }
 });
+
+// Verify individual item
 router.put("/verify-item/:orderId/:itemIndex", async (req, res) => {
   try {
     const { orderId, itemIndex } = req.params;
@@ -346,7 +347,6 @@ router.put("/verify-item/:orderId/:itemIndex", async (req, res) => {
       timestamp: new Date(),
     };
 
-    // Save the document
     await customer.save();
 
     // Count verified items after save
@@ -391,65 +391,12 @@ router.put("/verify-item/:orderId/:itemIndex", async (req, res) => {
       loadingProgress: Math.round((verifiedItems / totalItems) * 100),
     });
   } catch (error) {
-    console.error("❌ Error verifying item:", error);
+    console.error("Error verifying item:", error);
     res.status(500).json({ error: "Failed to verify item" });
   }
 });
 
-// ALSO ADD THIS DEBUG ROUTE TO CHECK REAL-TIME STATUS:
-router.get("/debug-verification/:orderId", async (req, res) => {
-  try {
-    const { orderId } = req.params;
-
-    const customer = await Customer.findOne({
-      "shoppingHistory.orderId": orderId,
-    });
-
-    if (!customer) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    const order = customer.shoppingHistory.find((o) => o.orderId === orderId);
-
-    const itemsDebug =
-      order.items?.map((item, index) => ({
-        index: index,
-        productName: item.productName,
-        loadingVerified: item.loadingVerified,
-        loadingVerifiedType: typeof item.loadingVerified,
-        loadingVerifiedAt: item.loadingVerifiedAt,
-        isStrictlyTrue: item.loadingVerified === true,
-        isLooselyTrue: Boolean(item.loadingVerified),
-      })) || [];
-
-    // Count with different methods
-    const strictCount =
-      order.items?.filter((item) => item.loadingVerified === true).length || 0;
-    const looseCount =
-      order.items?.filter((item) => Boolean(item.loadingVerified)).length || 0;
-    const totalCount = order.items?.length || 0;
-
-    res.json({
-      orderId: orderId,
-      orderStatus: order.status,
-      totalItems: totalCount,
-      verifiedItemsStrict: strictCount,
-      verifiedItemsLoose: looseCount,
-      allItemsVerifiedStrict: strictCount === totalCount && totalCount > 0,
-      allItemsVerifiedLoose: looseCount === totalCount && totalCount > 0,
-      itemsDebug: itemsDebug,
-      loadingDetails: order.loadingDetails || {},
-      verifiedItemNames:
-        order.items
-          ?.filter((item) => item.loadingVerified === true)
-          .map((item) => item.productName) || [],
-    });
-  } catch (error) {
-    console.error("Error fetching debug verification info:", error);
-    res.status(500).json({ error: "Failed to fetch debug verification info" });
-  }
-});
-// IMPROVED DEBUG ROUTE
+// Debug route to check verification status
 router.get("/debug/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -476,7 +423,6 @@ router.get("/debug/:orderId", async (req, res) => {
         isLooselyTrue: Boolean(item.loadingVerified),
       })) || [];
 
-    // Count with different methods
     const strictCount =
       order.items?.filter((item) => item.loadingVerified === true).length || 0;
     const looseCount =
@@ -499,10 +445,14 @@ router.get("/debug/:orderId", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch debug info" });
   }
 });
+
+// ✅ FIXED: Complete loading for single order
 router.post("/complete-loading/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
     const { loadingNotes, employeeId, employeeName } = req.body;
+
+    console.log(`🔄 Completing loading for order: ${orderId}`);
 
     const customer = await Customer.findOne({
       "shoppingHistory.orderId": orderId,
@@ -523,6 +473,10 @@ router.post("/complete-loading/:orderId", async (req, res) => {
     );
 
     if (unverifiedItems.length > 0) {
+      console.log(
+        `❌ Unverified items found:`,
+        unverifiedItems.map((i) => i.productName)
+      );
       return res.status(400).json({
         error: "Cannot complete loading. Some items are not verified.",
         details: {
@@ -533,8 +487,8 @@ router.post("/complete-loading/:orderId", async (req, res) => {
       });
     }
 
-    // Update order status
-    customer.shoppingHistory[orderIndex].status = "ready for driver";
+    // ✅ FIXED: Use "order-picked-up" from master status list
+    customer.shoppingHistory[orderIndex].status = "order-picked-up";
 
     // Update loading details
     if (!customer.shoppingHistory[orderIndex].loadingDetails) {
@@ -557,8 +511,9 @@ router.post("/complete-loading/:orderId", async (req, res) => {
 
     await customer.save();
 
+    console.log(`✅ Order ${orderId} status updated to "ready-for-driver"`);
+
     // Update delivery tracking
-    const DeliveryTracking = require("../models/Deliverytracking");
     const tracking = await DeliveryTracking.findOne({ orderId });
     if (tracking) {
       tracking.workflowStatus.loaded.completed = true;
@@ -567,20 +522,23 @@ router.post("/complete-loading/:orderId", async (req, res) => {
         employeeId,
         employeeName,
       };
-      tracking.currentStatus = "ready for driver";
+      tracking.currentStatus = "order-picked-up";
       await tracking.save();
+
+      console.log(`✅ Delivery tracking updated for order ${orderId}`);
     }
 
     res.json({
       success: true,
       message: `Order ${orderId} loading completed successfully`,
-      newStatus: "ready for driver",
+      newStatus: "order-picked-up",
     });
   } catch (error) {
     console.error("❌ Error completing loading:", error);
     res.status(500).json({ error: "Failed to complete loading" });
   }
 });
+
 // Complete loading for entire vehicle (all orders in vehicle)
 router.post("/complete-vehicle-loading/:vehicleId", async (req, res) => {
   try {
@@ -610,10 +568,9 @@ router.post("/complete-vehicle-loading/:vehicleId", async (req, res) => {
           );
 
           if (allItemsVerified) {
-            // Update order status
-            customer.shoppingHistory[i].status = "ready for driver";
+            // ✅ FIXED: Use "order-picked-up" from master status list
+            customer.shoppingHistory[i].status = "order-picked-up";
 
-            // Update loading details
             if (!customer.shoppingHistory[i].loadingDetails) {
               customer.shoppingHistory[i].loadingDetails = {};
             }
@@ -637,7 +594,7 @@ router.post("/complete-vehicle-loading/:vehicleId", async (req, res) => {
                 employeeId: employeeId,
                 employeeName: employeeName,
               };
-              tracking.currentStatus = "ready for driver";
+              tracking.currentStatus = "order-picked-up";
               await tracking.save();
             }
 
@@ -671,9 +628,10 @@ router.post("/complete-vehicle-loading/:vehicleId", async (req, res) => {
 // Get verification statistics
 router.get("/stats", async (req, res) => {
   try {
+    // ✅ FIXED: Use "order-picked-up" from master status list
     const customers = await Customer.find({
       "shoppingHistory.status": {
-        $in: ["assigned-dispatch-officer-2", "ready for driver"],
+        $in: ["assigned-dispatch-officer-2", "order-picked-up"],
       },
     }).lean();
 
@@ -701,7 +659,7 @@ router.get("/stats", async (req, res) => {
           } else {
             stats.readyForDispatch++;
           }
-        } else if (order.status === "ready for driver") {
+        } else if (order.status === "order-picked-up") {
           stats.readyForDispatch++;
         }
 

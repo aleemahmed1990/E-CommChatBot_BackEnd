@@ -1,16 +1,17 @@
-// routes/driverOnDeliveryRoutes.js - Complete Driver on Delivery routes
+// routes/driverOnDeliveryRoutes.js - FIXED: Complete delivery only with photo requirement
+
 const express = require("express");
 const router = express.Router();
 const Customer = require("../models/customer");
 const DeliveryTracking = require("../models/Deliverytracking");
 const multer = require("multer");
 
-// Configure multer for handling file uploads (photos/videos)
+// Configure multer for file uploads
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
+    fileSize: 10 * 1024 * 1024,
   },
   fileFilter: (req, file, cb) => {
     if (
@@ -24,21 +25,20 @@ const upload = multer({
   },
 });
 
-// Get orders that are on-route (for driver on delivery)
+// Get active deliveries - orders with "on-way" status
 router.get("/active-deliveries", async (req, res) => {
   try {
     const { driverId } = req.query;
 
     const customers = await Customer.find({
-      "shoppingHistory.status": "on-route",
+      "shoppingHistory.status": "on-way",
     }).lean();
 
     let activeDeliveries = [];
 
     for (let customer of customers) {
       for (let order of customer.shoppingHistory) {
-        if (order.status === "on-route") {
-          // Filter by driver if specified
+        if (order.status === "on-way") {
           if (driverId && order.routeStartedBy?.driverId !== driverId) {
             continue;
           }
@@ -64,7 +64,6 @@ router.get("/active-deliveries", async (req, res) => {
       }
     }
 
-    // Sort by delivery time
     activeDeliveries.sort(
       (a, b) => new Date(a.deliveryDate) - new Date(b.deliveryDate)
     );
@@ -76,7 +75,7 @@ router.get("/active-deliveries", async (req, res) => {
   }
 });
 
-// Mark as arrived at delivery location
+// Mark as arrived
 router.post("/mark-arrived/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -94,7 +93,6 @@ router.post("/mark-arrived/:orderId", async (req, res) => {
       (o) => o.orderId === orderId
     );
 
-    // Mark as arrived
     customer.shoppingHistory[orderIndex].arrivedAt = new Date();
     customer.shoppingHistory[orderIndex].arrivedBy = {
       driverId: driverId,
@@ -107,7 +105,6 @@ router.post("/mark-arrived/:orderId", async (req, res) => {
 
     await customer.save();
 
-    // Update delivery tracking
     const tracking = await DeliveryTracking.findOne({ orderId: orderId });
     if (tracking && tracking.workflowStatus.inTransit) {
       tracking.workflowStatus.inTransit.currentLocation = {
@@ -118,6 +115,8 @@ router.post("/mark-arrived/:orderId", async (req, res) => {
       };
       await tracking.save();
     }
+
+    console.log(`✅ Driver marked as arrived for order ${orderId}`);
 
     res.json({
       success: true,
@@ -130,7 +129,7 @@ router.post("/mark-arrived/:orderId", async (req, res) => {
   }
 });
 
-// Upload delivery photo/video
+// Upload delivery photo - REQUIRED before completion
 router.post(
   "/upload-delivery-photo/:orderId",
   upload.single("deliveryPhoto"),
@@ -142,6 +141,8 @@ router.post(
       if (!req.file) {
         return res.status(400).json({ error: "No file uploaded" });
       }
+
+      console.log(`📸 Uploading delivery photo for order ${orderId}`);
 
       const customer = await Customer.findOne({
         "shoppingHistory.orderId": orderId,
@@ -155,12 +156,10 @@ router.post(
         (o) => o.orderId === orderId
       );
 
-      // Initialize delivery photos array if not exists
       if (!customer.shoppingHistory[orderIndex].deliveryPhotos) {
         customer.shoppingHistory[orderIndex].deliveryPhotos = [];
       }
 
-      // Convert file to base64 for storage
       const base64Data = req.file.buffer.toString("base64");
 
       const photoData = {
@@ -180,6 +179,8 @@ router.post(
       customer.shoppingHistory[orderIndex].deliveryPhotos.push(photoData);
       await customer.save();
 
+      console.log(`✅ Delivery photo uploaded for order ${orderId}`);
+
       res.json({
         success: true,
         message: "Delivery photo uploaded successfully",
@@ -193,7 +194,7 @@ router.post(
   }
 );
 
-// Complete delivery
+// Complete delivery - ONLY with photo upload + customer confirmation
 router.post("/complete-delivery/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -205,6 +206,8 @@ router.post("/complete-delivery/:orderId", async (req, res) => {
       customerSatisfaction,
       customerSignature,
     } = req.body;
+
+    console.log(`🎉 Completing delivery for order ${orderId}`);
 
     const customer = await Customer.findOne({
       "shoppingHistory.orderId": orderId,
@@ -219,14 +222,30 @@ router.post("/complete-delivery/:orderId", async (req, res) => {
     );
     const order = customer.shoppingHistory[orderIndex];
 
-    // Check if delivery photo is uploaded
+    // CRITICAL: Photo is REQUIRED
     if (!order.deliveryPhotos || order.deliveryPhotos.length === 0) {
+      console.log(`❌ Cannot complete - No photos for ${orderId}`);
       return res.status(400).json({
-        error: "Delivery photo is required to complete delivery",
+        error: "Delivery photo is REQUIRED to complete delivery",
+        details:
+          "Please upload a photo/video of the receiver before completing",
       });
     }
 
-    // Update order status to completed
+    // Customer confirmation is required
+    if (!customerConfirmed) {
+      console.log(
+        `❌ Cannot complete - No customer confirmation for ${orderId}`
+      );
+      return res.status(400).json({
+        error: "Customer confirmation is required",
+        details: "Customer must confirm receipt of delivery",
+      });
+    }
+
+    console.log(`✅ All checks passed - Marking ${orderId} as order-complete`);
+
+    // Update order status to "order-complete"
     customer.shoppingHistory[orderIndex].status = "order-complete";
     customer.shoppingHistory[orderIndex].deliveredAt = new Date();
     customer.shoppingHistory[orderIndex].deliveredBy = {
@@ -243,7 +262,9 @@ router.post("/complete-delivery/:orderId", async (req, res) => {
 
     await customer.save();
 
-    // Update delivery tracking - mark as delivered
+    console.log(`✅ Customer record updated to 'order-complete'`);
+
+    // Update DeliveryTracking
     const tracking = await DeliveryTracking.findOne({ orderId: orderId });
     if (tracking) {
       tracking.workflowStatus.delivered.completed = true;
@@ -258,18 +279,22 @@ router.post("/complete-delivery/:orderId", async (req, res) => {
       tracking.workflowStatus.delivered.customerSatisfaction =
         customerSatisfaction || 5;
 
-      // Update current status and timing
       tracking.currentStatus = "order-complete";
       tracking.timingMetrics.actualDeliveryTime = new Date();
 
       await tracking.save();
+
+      console.log(`✅ Delivery tracking updated to 'order-complete'`);
     }
+
+    console.log(`🎉 Order ${orderId} COMPLETED!`);
 
     res.json({
       success: true,
       message: `Order ${orderId} delivered successfully`,
       deliveredAt: new Date(),
       newStatus: "order-complete",
+      photosCount: order.deliveryPhotos.length,
     });
   } catch (error) {
     console.error("Error completing delivery:", error);
@@ -277,7 +302,7 @@ router.post("/complete-delivery/:orderId", async (req, res) => {
   }
 });
 
-// Get delivery statistics for driver
+// Get stats
 router.get("/stats", async (req, res) => {
   try {
     const { driverId } = req.query;
@@ -286,7 +311,7 @@ router.get("/stats", async (req, res) => {
 
     const customers = await Customer.find({
       "shoppingHistory.status": {
-        $in: ["on-route", "order-complete"],
+        $in: ["on-way", "order-complete"],
       },
     }).lean();
 
@@ -299,7 +324,6 @@ router.get("/stats", async (req, res) => {
 
     for (let customer of customers) {
       for (let order of customer.shoppingHistory) {
-        // Filter by driver if specified
         if (driverId) {
           const orderDriverId =
             order.routeStartedBy?.driverId || order.deliveredBy?.driverId;
@@ -308,11 +332,10 @@ router.get("/stats", async (req, res) => {
           }
         }
 
-        if (order.status === "on-route") {
+        if (order.status === "on-way") {
           stats.totalDeliveries++;
           stats.inProgress++;
 
-          // Check if started today
           if (order.routeStartedAt && new Date(order.routeStartedAt) >= today) {
             stats.todayDeliveries++;
           }
@@ -320,7 +343,6 @@ router.get("/stats", async (req, res) => {
           stats.totalDeliveries++;
           stats.completed++;
 
-          // Check if delivered today
           if (order.deliveredAt && new Date(order.deliveredAt) >= today) {
             stats.todayDeliveries++;
           }
@@ -328,6 +350,7 @@ router.get("/stats", async (req, res) => {
       }
     }
 
+    console.log("📊 Driver on delivery stats:", stats);
     res.json(stats);
   } catch (error) {
     console.error("Error fetching delivery stats:", error);
@@ -335,7 +358,7 @@ router.get("/stats", async (req, res) => {
   }
 });
 
-// Get order details for delivery
+// Get order details
 router.get("/order/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -366,6 +389,7 @@ router.get("/order/:orderId", async (req, res) => {
       arrivedAt: order.arrivedAt,
       arrivedBy: order.arrivedBy,
       deliveryPhotos: order.deliveryPhotos || [],
+      photosCount: order.deliveryPhotos?.length || 0,
       deliveredAt: order.deliveredAt,
       deliveredBy: order.deliveredBy,
       customerConfirmed: order.customerConfirmed,

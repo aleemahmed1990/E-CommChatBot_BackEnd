@@ -1,6 +1,30 @@
 const express = require("express");
 const router = express.Router();
 const Employee = require("../models/Employee");
+const multer = require("multer");
+const path = require("path");
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, "uploads/");
+  },
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + path.extname(file.originalname));
+  },
+});
+
+const upload = multer({ storage });
+
+const uploadFields = [
+  { name: "profilePicture", maxCount: 1 },
+  { name: "idCardFront", maxCount: 1 },
+  { name: "idCardBack", maxCount: 1 },
+  { name: "passportFront", maxCount: 1 },
+  { name: "passportBack", maxCount: 1 },
+  { name: "otherDoc1", maxCount: 1 },
+  { name: "otherDoc2", maxCount: 1 },
+];
 
 // ✅ GET: List all employees with filters
 router.get("/", async (req, res) => {
@@ -64,6 +88,22 @@ router.get("/", async (req, res) => {
       message: "Error fetching employees",
       error: error.message,
     });
+  }
+});
+
+// ✅ GET: Get available employees by role (for packing staff)
+router.get("/packing-staff", async (req, res) => {
+  try {
+    const employees = await Employee.find({
+      roles: { $in: ["packing-staff"] },
+      isActivated: true,
+      isBlocked: false,
+    }).select("employeeId name phone email currentAssignments maxAssignments");
+
+    res.json(employees);
+  } catch (error) {
+    console.error("Error fetching packing staff:", error);
+    res.json([]);
   }
 });
 
@@ -131,12 +171,98 @@ router.get("/:employeeId", async (req, res) => {
 });
 
 // ✅ POST: Create new employee
-router.post("/", async (req, res) => {
+router.post("/", upload.fields(uploadFields), async (req, res) => {
   try {
-    const employeeData = req.body;
+    const {
+      name,
+      email,
+      phone,
+      address,
+      emergencyContact,
+      homeLocation,
+      addedOn,
+      employeeCategory,
+      roles,
+      contacts,
+      isActivated,
+      isBlocked,
+    } = req.body;
 
     console.log("=== CREATE EMPLOYEE ===");
-    console.log("Data:", employeeData);
+    console.log("Name:", name);
+    console.log("Email:", email);
+    console.log("Category:", employeeCategory);
+    console.log("Request body:", req.body);
+
+    // Validate required fields
+    if (
+      !name ||
+      !email ||
+      !phone ||
+      !employeeCategory ||
+      !address ||
+      !homeLocation ||
+      !emergencyContact
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields",
+      });
+    }
+
+    const phoneArray = typeof phone === "string" ? [phone] : phone || [];
+    const rolesArray = roles
+      ? Array.isArray(roles)
+        ? roles
+        : JSON.parse(roles)
+      : [];
+    const contactsArray = contacts
+      ? Array.isArray(contacts)
+        ? contacts
+        : JSON.parse(contacts)
+      : [];
+
+    // Process uploaded files
+    const fileData = {};
+    if (req.files) {
+      if (req.files.profilePicture) {
+        fileData.profilePicture = req.files.profilePicture[0].path;
+      }
+      if (req.files.idCardFront) {
+        fileData.idCardFront = req.files.idCardFront[0].path;
+      }
+      if (req.files.idCardBack) {
+        fileData.idCardBack = req.files.idCardBack[0].path;
+      }
+      if (req.files.passportFront) {
+        fileData.passportFront = req.files.passportFront[0].path;
+      }
+      if (req.files.passportBack) {
+        fileData.passportBack = req.files.passportBack[0].path;
+      }
+      if (req.files.otherDoc1) {
+        fileData.otherDoc1 = req.files.otherDoc1[0].path;
+      }
+      if (req.files.otherDoc2) {
+        fileData.otherDoc2 = req.files.otherDoc2[0].path;
+      }
+    }
+
+    const employeeData = {
+      name,
+      email,
+      phone: phoneArray,
+      address,
+      emergencyContact,
+      homeLocation,
+      addedOn: addedOn || new Date(),
+      employeeCategory,
+      roles: rolesArray,
+      contacts: contactsArray,
+      isActivated: isActivated !== "false",
+      isBlocked: isBlocked === "true",
+      ...fileData,
+    };
 
     const employee = new Employee(employeeData);
     await employee.save();
@@ -150,10 +276,103 @@ router.post("/", async (req, res) => {
     });
   } catch (error) {
     console.error("Error creating employee:", error);
-    res.status(500).json({
+    res.status(400).json({
       success: false,
-      message: "Error creating employee",
-      error: error.message,
+      message: error.message || "Error creating employee",
+    });
+  }
+});
+
+// ✅ PUT: Update employee
+router.put("/:employeeId", upload.fields(uploadFields), async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const {
+      name,
+      email,
+      phone,
+      address,
+      emergencyContact,
+      homeLocation,
+      employeeCategory,
+      roles,
+      contacts,
+      isActivated,
+      isBlocked,
+    } = req.body;
+
+    const employee = await Employee.findOne({ employeeId });
+
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
+      });
+    }
+
+    const phoneArray = typeof phone === "string" ? [phone] : phone || [];
+    const rolesArray = roles
+      ? Array.isArray(roles)
+        ? roles
+        : JSON.parse(roles)
+      : [];
+    const contactsArray = contacts
+      ? Array.isArray(contacts)
+        ? contacts
+        : JSON.parse(contacts)
+      : [];
+
+    // Update fields
+    if (name) employee.name = name;
+    if (email) employee.email = email;
+    if (phoneArray.length) employee.phone = phoneArray;
+    if (address) employee.address = address;
+    if (emergencyContact) employee.emergencyContact = emergencyContact;
+    if (homeLocation) employee.homeLocation = homeLocation;
+    if (employeeCategory) employee.employeeCategory = employeeCategory;
+    if (rolesArray.length) employee.roles = rolesArray;
+    if (contactsArray.length) employee.contacts = contactsArray;
+    if (isActivated !== undefined)
+      employee.isActivated = isActivated !== "false";
+    if (isBlocked !== undefined) employee.isBlocked = isBlocked === "true";
+
+    // Update uploaded files
+    if (req.files) {
+      if (req.files.profilePicture) {
+        employee.profilePicture = req.files.profilePicture[0].path;
+      }
+      if (req.files.idCardFront) {
+        employee.idCardFront = req.files.idCardFront[0].path;
+      }
+      if (req.files.idCardBack) {
+        employee.idCardBack = req.files.idCardBack[0].path;
+      }
+      if (req.files.passportFront) {
+        employee.passportFront = req.files.passportFront[0].path;
+      }
+      if (req.files.passportBack) {
+        employee.passportBack = req.files.passportBack[0].path;
+      }
+      if (req.files.otherDoc1) {
+        employee.otherDoc1 = req.files.otherDoc1[0].path;
+      }
+      if (req.files.otherDoc2) {
+        employee.otherDoc2 = req.files.otherDoc2[0].path;
+      }
+    }
+
+    await employee.save();
+
+    res.json({
+      success: true,
+      message: "Employee updated successfully",
+      employee,
+    });
+  } catch (error) {
+    console.error("Error updating employee:", error);
+    res.status(400).json({
+      success: false,
+      message: error.message || "Error updating employee",
     });
   }
 });
@@ -230,7 +449,6 @@ router.post("/:employeeId/assign-order", async (req, res) => {
       });
     }
 
-    // Add order to assignedOrders
     employee.assignedOrders.push({
       orderId,
       customerId,
@@ -240,7 +458,6 @@ router.post("/:employeeId/assign-order", async (req, res) => {
       status: "assigned",
     });
 
-    // Increment current assignments
     employee.currentAssignments += 1;
 
     await employee.save();
@@ -295,14 +512,12 @@ router.put("/:employeeId/order-status/:orderId", async (req, res) => {
 
     employee.assignedOrders[orderIndex].status = status;
 
-    // If order is completed or failed, decrement assignments
     if (status === "completed" || status === "failed") {
       employee.currentAssignments = Math.max(
         0,
         employee.currentAssignments - 1
       );
 
-      // Update performance metrics if completed
       if (status === "completed") {
         employee.performanceMetrics.successfulDeliveries += 1;
         employee.performanceMetrics.totalDeliveries += 1;
@@ -367,7 +582,7 @@ router.get("/:employeeId/assignments", async (req, res) => {
   }
 });
 
-// ✅ PUT: Update employee location (for drivers on delivery)
+// ✅ PUT: Update employee location
 router.put("/:employeeId/location", async (req, res) => {
   try {
     const { employeeId } = req.params;
@@ -428,7 +643,6 @@ router.post("/:employeeId/activity", async (req, res) => {
       details,
     });
 
-    // Keep only last 100 activities
     if (employee.activityLog.length > 100) {
       employee.activityLog = employee.activityLog.slice(-100);
     }

@@ -1,25 +1,24 @@
-// FIXED DRIVER ROUTES - Using DeliveryTracking Schema
-
+// routes/driverRoutes.js - Fixed Driver routes using order-picked-up status
 const express = require("express");
 const router = express.Router();
 const Customer = require("../models/customer");
 const DeliveryTracking = require("../models/Deliverytracking");
 
-// FIXED: Get available vehicles for driver selection using DeliveryTracking
+// ✅ FIXED: Get available vehicles for driver selection using DeliveryTracking
 router.get("/vehicles", async (req, res) => {
   try {
     console.log(
-      "🚛 Driver: Fetching vehicles from DeliveryTracking with 'ready for driver' status..."
+      "🚛 Driver: Fetching vehicles from DeliveryTracking with 'order-picked-up' status..."
     );
 
-    // Get all delivery tracking records with "ready for driver" status
+    // ✅ FIXED: Use "order-picked-up" from master status list
     const trackingRecords = await DeliveryTracking.find({
-      currentStatus: "ready for driver",
+      currentStatus: "order-picked-up",
       isActive: true,
     }).lean();
 
     console.log(
-      `📊 Found ${trackingRecords.length} orders in DeliveryTracking with 'ready for driver' status`
+      `📊 Found ${trackingRecords.length} orders in DeliveryTracking with 'order-picked-up' status`
     );
 
     let vehicleData = {};
@@ -140,8 +139,7 @@ router.get("/vehicles", async (req, res) => {
   }
 });
 
-// FIXED: Get orders for a specific vehicle using DeliveryTracking
-// FIXED: Get orders for a specific vehicle using DeliveryTracking
+// ✅ FIXED: Get orders for a specific vehicle using DeliveryTracking
 router.get("/vehicle/:vehicleId/orders", async (req, res) => {
   try {
     const { vehicleId } = req.params;
@@ -149,14 +147,14 @@ router.get("/vehicle/:vehicleId/orders", async (req, res) => {
     console.log(`\n📦 Driver: Fetching orders for vehicle ${vehicleId}`);
     console.log(`📦 Requested Vehicle ID Type: ${typeof vehicleId}`);
 
-    // Get tracking records with "ready for driver" status
+    // ✅ FIXED: Use "order-picked-up" from master status list
     const trackingRecords = await DeliveryTracking.find({
-      currentStatus: "ready for driver",
+      currentStatus: "order-picked-up",
       isActive: true,
     }).lean();
 
     console.log(
-      `📊 Found ${trackingRecords.length} tracking records with 'ready for driver' status`
+      `📊 Found ${trackingRecords.length} tracking records with 'order-picked-up' status`
     );
 
     let orders = [];
@@ -302,12 +300,14 @@ router.get("/vehicle/:vehicleId/orders", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch vehicle orders" });
   }
 });
+
 // DEBUG ROUTE: Get all tracking records and their statuses
 router.get("/debug-tracking", async (req, res) => {
   try {
+    // ✅ FIXED: Use "order-picked-up" from master status list
     const trackingRecords = await DeliveryTracking.find({
       currentStatus: {
-        $in: ["ready for driver", "on-route", "order-complete"],
+        $in: ["order-picked-up", "on-way", "order-complete"],
       },
       isActive: true,
     }).lean();
@@ -345,11 +345,10 @@ router.get("/debug-tracking", async (req, res) => {
 
     res.json({
       totalTracking: debugInfo.length,
-      readyForDriverCount: debugInfo.filter(
-        (o) => o.trackingStatus === "ready for driver"
+      orderPickedUpCount: debugInfo.filter(
+        (o) => o.trackingStatus === "order-picked-up"
       ).length,
-      onRouteCount: debugInfo.filter((o) => o.trackingStatus === "on-route")
-        .length,
+      onWayCount: debugInfo.filter((o) => o.trackingStatus === "on-way").length,
       orderCompleteCount: debugInfo.filter(
         (o) => o.trackingStatus === "order-complete"
       ).length,
@@ -409,6 +408,7 @@ router.post("/verify-order/:orderId", async (req, res) => {
   }
 });
 
+// ✅ FIXED: Start route - Update order status to "on-way"
 router.post("/start-route/:vehicleId", async (req, res) => {
   try {
     const { vehicleId } = req.params;
@@ -417,14 +417,14 @@ router.post("/start-route/:vehicleId", async (req, res) => {
     console.log(`🚀 Driver: Starting route for vehicle ${vehicleId}`);
     console.log(`🚀 Driver ID: ${driverId}, Driver Name: ${driverName}`);
 
-    // Find all tracking records for this vehicle that are "ready for driver"
+    // ✅ FIXED: Find all tracking records with "order-picked-up" status
     const trackingRecords = await DeliveryTracking.find({
-      currentStatus: "ready for driver",
+      currentStatus: "order-picked-up",
       isActive: true,
     });
 
     console.log(
-      `📊 Found ${trackingRecords.length} tracking records with 'ready for driver' status`
+      `📊 Found ${trackingRecords.length} tracking records with 'order-picked-up' status`
     );
 
     let updatedOrders = [];
@@ -513,8 +513,8 @@ router.post("/start-route/:vehicleId", async (req, res) => {
 
           console.log(`✅ Order ${order.orderId} is verified by driver`);
 
-          // Update Customer order status
-          customer.shoppingHistory[orderIndex].status = "on-route";
+          // ✅ FIXED: Update Customer order status to "on-way"
+          customer.shoppingHistory[orderIndex].status = "on-way";
           customer.shoppingHistory[orderIndex].routeStartedAt = new Date();
           customer.shoppingHistory[orderIndex].routeStartedBy = {
             driverId: driverId,
@@ -522,23 +522,21 @@ router.post("/start-route/:vehicleId", async (req, res) => {
           };
 
           await customer.save();
-          console.log(
-            `✅ Updated customer order ${order.orderId} to 'on-route'`
-          );
+          console.log(`✅ Updated customer order ${order.orderId} to 'on-way'`);
 
-          // Update DeliveryTracking status
+          // ✅ FIXED: Update DeliveryTracking status to "on-way"
           tracking.workflowStatus.inTransit.completed = true;
           tracking.workflowStatus.inTransit.completedAt = new Date();
           tracking.workflowStatus.inTransit.startedBy = {
             employeeId: driverId,
             employeeName: driverName,
           };
-          tracking.currentStatus = "on-route";
+          tracking.currentStatus = "on-way";
           tracking.timingMetrics.dispatchedAt = new Date();
 
           await tracking.save();
           console.log(
-            `✅ Updated delivery tracking ${order.orderId} to 'on-route'`
+            `✅ Updated delivery tracking ${order.orderId} to 'on-way'`
           );
 
           updatedOrders.push(order.orderId);
@@ -584,8 +582,7 @@ router.post("/start-route/:vehicleId", async (req, res) => {
   }
 });
 
-// ADD THIS DEBUG ROUTE to your routes/driver.js
-
+// Debug route for verification
 router.get("/debug-verification/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -617,7 +614,7 @@ router.get("/debug-verification/:orderId", async (req, res) => {
   }
 });
 
-// ALSO ADD this simple route to check what's happening during start-route
+// Debug route for start-route
 router.get("/debug-start-route/:vehicleId", async (req, res) => {
   try {
     const { vehicleId } = req.params;
@@ -626,9 +623,9 @@ router.get("/debug-start-route/:vehicleId", async (req, res) => {
       `🔍 DEBUG: Checking start-route readiness for vehicle ${vehicleId}`
     );
 
-    // Get tracking records
+    // ✅ FIXED: Use "order-picked-up" from master status list
     const trackingRecords = await DeliveryTracking.find({
-      currentStatus: "ready for driver",
+      currentStatus: "order-picked-up",
       isActive: true,
     });
 
@@ -676,11 +673,13 @@ router.get("/debug-start-route/:vehicleId", async (req, res) => {
     res.status(500).json({ error: "Debug failed" });
   }
 });
+
 // Get driver statistics using DeliveryTracking
 router.get("/stats", async (req, res) => {
   try {
+    // ✅ FIXED: Use "order-picked-up" and "on-way" from master status list
     const trackingRecords = await DeliveryTracking.find({
-      currentStatus: { $in: ["ready for driver", "on-route"] },
+      currentStatus: { $in: ["order-picked-up", "on-way"] },
       isActive: true,
     }).lean();
 
@@ -693,9 +692,9 @@ router.get("/stats", async (req, res) => {
     let vehicles = new Set();
 
     for (let tracking of trackingRecords) {
-      if (tracking.currentStatus === "ready for driver") {
+      if (tracking.currentStatus === "order-picked-up") {
         stats.readyForPickup++;
-      } else if (tracking.currentStatus === "on-route") {
+      } else if (tracking.currentStatus === "on-way") {
         stats.onRoute++;
       }
 
@@ -727,440 +726,5 @@ router.get("/stats", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch driver stats" });
   }
 });
-// ADD THIS DEBUG ROUTE TO YOUR routes/driver.js
 
-// Enhanced debug route to check vehicle ID matching
-router.get("/debug-vehicle-matching", async (req, res) => {
-  try {
-    console.log("🔍 DEBUGGING VEHICLE ID MATCHING...");
-
-    // Get all tracking records with "ready for driver" status
-    const trackingRecords = await DeliveryTracking.find({
-      currentStatus: "ready for driver",
-      isActive: true,
-    }).lean();
-
-    let debugData = {
-      totalTrackingRecords: trackingRecords.length,
-      vehicleAssignments: [],
-      orderDetails: [],
-    };
-
-    for (let tracking of trackingRecords) {
-      try {
-        const customer = await Customer.findById(tracking.customerId);
-        if (!customer) continue;
-
-        const order = customer.shoppingHistory.find(
-          (o) => o.orderId === tracking.orderId
-        );
-        if (!order) continue;
-
-        const assignmentDetails = order.assignmentDetails;
-
-        console.log(`🔍 Order ${order.orderId}:`);
-        console.log(`   - Customer: ${customer.name}`);
-        console.log(`   - Order Status: ${order.status}`);
-        console.log(`   - Tracking Status: ${tracking.currentStatus}`);
-        console.log(`   - Has Assignment Details: ${!!assignmentDetails}`);
-
-        if (assignmentDetails?.assignedVehicle) {
-          console.log(
-            `   - Vehicle ID: ${assignmentDetails.assignedVehicle.vehicleId}`
-          );
-          console.log(
-            `   - Vehicle ID Type: ${typeof assignmentDetails.assignedVehicle
-              .vehicleId}`
-          );
-          console.log(
-            `   - Vehicle Name: ${assignmentDetails.assignedVehicle.displayName}`
-          );
-          console.log(
-            `   - Vehicle Category: ${assignmentDetails.assignedVehicle.category}`
-          );
-        } else {
-          console.log(`   - NO VEHICLE ASSIGNMENT!`);
-        }
-
-        debugData.orderDetails.push({
-          orderId: order.orderId,
-          customerName: customer.name,
-          orderStatus: order.status,
-          trackingStatus: tracking.currentStatus,
-          hasAssignment: !!assignmentDetails,
-          vehicleId: assignmentDetails?.assignedVehicle?.vehicleId,
-          vehicleIdType: typeof assignmentDetails?.assignedVehicle?.vehicleId,
-          vehicleName: assignmentDetails?.assignedVehicle?.displayName,
-          vehicleCategory: assignmentDetails?.assignedVehicle?.category,
-          fullAssignmentDetails: assignmentDetails,
-        });
-
-        if (assignmentDetails?.assignedVehicle) {
-          debugData.vehicleAssignments.push({
-            vehicleId: assignmentDetails.assignedVehicle.vehicleId,
-            vehicleIdType: typeof assignmentDetails.assignedVehicle.vehicleId,
-            vehicleName: assignmentDetails.assignedVehicle.displayName,
-            orderId: order.orderId,
-          });
-        }
-      } catch (error) {
-        console.error(`Error processing order ${tracking.orderId}:`, error);
-      }
-    }
-
-    console.log(`\n🚛 VEHICLE ASSIGNMENTS SUMMARY:`);
-    debugData.vehicleAssignments.forEach((va) => {
-      console.log(
-        `   - Vehicle: ${va.vehicleName} (ID: ${va.vehicleId}, Type: ${va.vehicleIdType})`
-      );
-      console.log(`     Order: ${va.orderId}`);
-    });
-
-    res.json(debugData);
-  } catch (error) {
-    console.error("Error in debug vehicle matching:", error);
-    res.status(500).json({ error: "Debug failed" });
-  }
-});
-
-// ALSO ADD THIS DEBUG TO YOUR EXISTING /vehicle/:vehicleId/orders ROUTE
-// Replace your existing route with this enhanced version:
-
-router.get("/vehicle/:vehicleId/orders", async (req, res) => {
-  try {
-    const { vehicleId } = req.params;
-
-    console.log(`\n📦 Driver: Fetching orders for vehicle ${vehicleId}`);
-    console.log(`📦 Requested Vehicle ID Type: ${typeof vehicleId}`);
-
-    // Get tracking records with "ready for driver" status
-    const trackingRecords = await DeliveryTracking.find({
-      currentStatus: "ready for driver",
-      isActive: true,
-    }).lean();
-
-    console.log(
-      `📊 Found ${trackingRecords.length} tracking records with 'ready for driver' status`
-    );
-
-    let orders = [];
-    let vehicleMatches = [];
-
-    for (let tracking of trackingRecords) {
-      try {
-        // Get customer and order details
-        const customer = await Customer.findById(tracking.customerId);
-        if (!customer) continue;
-
-        const order = customer.shoppingHistory.find(
-          (o) => o.orderId === tracking.orderId
-        );
-        if (!order) continue;
-
-        const assignedVehicleId =
-          order.assignmentDetails?.assignedVehicle?.vehicleId;
-
-        console.log(`\n🔍 Checking Order ${order.orderId}:`);
-        console.log(`   - Assigned Vehicle ID: ${assignedVehicleId}`);
-        console.log(
-          `   - Assigned Vehicle ID Type: ${typeof assignedVehicleId}`
-        );
-        console.log(`   - Requested Vehicle ID: ${vehicleId}`);
-        console.log(`   - Requested Vehicle ID Type: ${typeof vehicleId}`);
-
-        // Check different comparison methods
-        const strictMatch = assignedVehicleId === vehicleId;
-        const stringMatch = String(assignedVehicleId) === String(vehicleId);
-        const objectIdMatch = assignedVehicleId?.toString() === vehicleId;
-
-        console.log(`   - Strict Match (===): ${strictMatch}`);
-        console.log(`   - String Match: ${stringMatch}`);
-        console.log(`   - ObjectId Match: ${objectIdMatch}`);
-
-        vehicleMatches.push({
-          orderId: order.orderId,
-          assignedVehicleId,
-          assignedVehicleIdType: typeof assignedVehicleId,
-          requestedVehicleId: vehicleId,
-          requestedVehicleIdType: typeof vehicleId,
-          strictMatch,
-          stringMatch,
-          objectIdMatch,
-        });
-
-        // Use the most flexible matching
-        if (stringMatch || objectIdMatch || strictMatch) {
-          console.log(
-            `✅ MATCH FOUND! Adding order ${order.orderId} to vehicle ${vehicleId}`
-          );
-
-          orders.push({
-            orderId: order.orderId,
-            customerName: customer.name,
-            customerPhone: customer.phoneNumber[0] || "",
-            deliveryDate: order.deliveryDate,
-            timeSlot: order.timeSlot || "",
-            deliveryAddress: order.deliveryAddress,
-            items: order.items || [],
-            totalItems: order.items ? order.items.length : 0,
-            specialInstructions: order.adminReason || "",
-            assignmentDetails: order.assignmentDetails,
-            isVerified: order.driverVerification?.verified || false,
-            trackingStatus: tracking.currentStatus,
-            orderStatus: order.status,
-          });
-        } else {
-          console.log(`❌ NO MATCH for order ${order.orderId}`);
-        }
-      } catch (error) {
-        console.error(`❌ Error processing order ${tracking.orderId}:`, error);
-      }
-    }
-
-    // Sort by delivery time
-    orders.sort((a, b) => new Date(a.deliveryDate) - new Date(b.deliveryDate));
-
-    console.log(
-      `\n✅ Driver: Returning ${orders.length} orders for vehicle ${vehicleId}`
-    );
-    console.log(`📊 Vehicle Matching Summary:`, vehicleMatches);
-
-    res.json(orders);
-  } catch (error) {
-    console.error("❌ Error fetching vehicle orders:", error);
-    res.status(500).json({ error: "Failed to fetch vehicle orders" });
-  }
-});
-// ADD THIS DEBUG ROUTE TO YOUR routes/driver.js
-
-// Enhanced debug route to check vehicle ID matching
-router.get("/debug-vehicle-matching", async (req, res) => {
-  try {
-    console.log("🔍 DEBUGGING VEHICLE ID MATCHING...");
-
-    // Get all tracking records with "ready for driver" status
-    const trackingRecords = await DeliveryTracking.find({
-      currentStatus: "ready for driver",
-      isActive: true,
-    }).lean();
-
-    let debugData = {
-      totalTrackingRecords: trackingRecords.length,
-      vehicleAssignments: [],
-      orderDetails: [],
-    };
-
-    for (let tracking of trackingRecords) {
-      try {
-        const customer = await Customer.findById(tracking.customerId);
-        if (!customer) continue;
-
-        const order = customer.shoppingHistory.find(
-          (o) => o.orderId === tracking.orderId
-        );
-        if (!order) continue;
-
-        const assignmentDetails = order.assignmentDetails;
-
-        console.log(`🔍 Order ${order.orderId}:`);
-        console.log(`   - Customer: ${customer.name}`);
-        console.log(`   - Order Status: ${order.status}`);
-        console.log(`   - Tracking Status: ${tracking.currentStatus}`);
-        console.log(`   - Has Assignment Details: ${!!assignmentDetails}`);
-
-        if (assignmentDetails?.assignedVehicle) {
-          console.log(
-            `   - Vehicle ID: ${assignmentDetails.assignedVehicle.vehicleId}`
-          );
-          console.log(
-            `   - Vehicle ID Type: ${typeof assignmentDetails.assignedVehicle
-              .vehicleId}`
-          );
-          console.log(
-            `   - Vehicle Name: ${assignmentDetails.assignedVehicle.displayName}`
-          );
-          console.log(
-            `   - Vehicle Category: ${assignmentDetails.assignedVehicle.category}`
-          );
-        } else {
-          console.log(`   - NO VEHICLE ASSIGNMENT!`);
-        }
-
-        debugData.orderDetails.push({
-          orderId: order.orderId,
-          customerName: customer.name,
-          orderStatus: order.status,
-          trackingStatus: tracking.currentStatus,
-          hasAssignment: !!assignmentDetails,
-          vehicleId: assignmentDetails?.assignedVehicle?.vehicleId,
-          vehicleIdType: typeof assignmentDetails?.assignedVehicle?.vehicleId,
-          vehicleName: assignmentDetails?.assignedVehicle?.displayName,
-          vehicleCategory: assignmentDetails?.assignedVehicle?.category,
-          fullAssignmentDetails: assignmentDetails,
-        });
-
-        if (assignmentDetails?.assignedVehicle) {
-          debugData.vehicleAssignments.push({
-            vehicleId: assignmentDetails.assignedVehicle.vehicleId,
-            vehicleIdType: typeof assignmentDetails.assignedVehicle.vehicleId,
-            vehicleName: assignmentDetails.assignedVehicle.displayName,
-            orderId: order.orderId,
-          });
-        }
-      } catch (error) {
-        console.error(`Error processing order ${tracking.orderId}:`, error);
-      }
-    }
-
-    console.log(`\n🚛 VEHICLE ASSIGNMENTS SUMMARY:`);
-    debugData.vehicleAssignments.forEach((va) => {
-      console.log(
-        `   - Vehicle: ${va.vehicleName} (ID: ${va.vehicleId}, Type: ${va.vehicleIdType})`
-      );
-      console.log(`     Order: ${va.orderId}`);
-    });
-
-    res.json(debugData);
-  } catch (error) {
-    console.error("Error in debug vehicle matching:", error);
-    res.status(500).json({ error: "Debug failed" });
-  }
-});
-
-// ALSO ADD THIS DEBUG TO YOUR EXISTING /vehicle/:vehicleId/orders ROUTE
-// Replace your existing route with this enhanced version:
-
-router.get("/vehicle/:vehicleId/orders", async (req, res) => {
-  try {
-    const { vehicleId } = req.params;
-
-    console.log(`\n📦 Driver: Fetching orders for vehicle ${vehicleId}`);
-    console.log(`📦 Requested Vehicle ID Type: ${typeof vehicleId}`);
-
-    // Get tracking records with "ready for driver" status
-    const trackingRecords = await DeliveryTracking.find({
-      currentStatus: "ready for driver",
-      isActive: true,
-    }).lean();
-
-    console.log(
-      `📊 Found ${trackingRecords.length} tracking records with 'ready for driver' status`
-    );
-
-    let orders = [];
-    let vehicleMatches = [];
-
-    for (let tracking of trackingRecords) {
-      try {
-        // Get customer and order details
-        const customer = await Customer.findById(tracking.customerId);
-        if (!customer) {
-          console.log(`❌ Customer not found for tracking ${tracking.orderId}`);
-          continue;
-        }
-
-        const order = customer.shoppingHistory.find(
-          (o) => o.orderId === tracking.orderId
-        );
-        if (!order) {
-          console.log(
-            `❌ Order ${tracking.orderId} not found in customer ${customer.name}`
-          );
-          continue;
-        }
-
-        const assignedVehicleId =
-          order.assignmentDetails?.assignedVehicle?.vehicleId;
-
-        console.log(`\n🔍 Checking Order ${order.orderId}:`);
-        console.log(`   - Customer Order Status: ${order.status}`);
-        console.log(`   - DeliveryTracking Status: ${tracking.currentStatus}`);
-        console.log(
-          `   - Has Assignment Details: ${!!order.assignmentDetails}`
-        );
-        console.log(
-          `   - Has Assigned Vehicle: ${!!order.assignmentDetails
-            ?.assignedVehicle}`
-        );
-        console.log(`   - Assigned Vehicle ID: ${assignedVehicleId}`);
-        console.log(
-          `   - Assigned Vehicle ID Type: ${typeof assignedVehicleId}`
-        );
-        console.log(`   - Requested Vehicle ID: ${vehicleId}`);
-        console.log(`   - Requested Vehicle ID Type: ${typeof vehicleId}`);
-
-        if (!order.assignmentDetails?.assignedVehicle) {
-          console.log(`❌ Order ${order.orderId} has no vehicle assignment`);
-          continue;
-        }
-
-        // Check different comparison methods
-        const strictMatch = assignedVehicleId === vehicleId;
-        const stringMatch = String(assignedVehicleId) === String(vehicleId);
-        const objectIdMatch = assignedVehicleId?.toString() === vehicleId;
-
-        console.log(`   - Strict Match (===): ${strictMatch}`);
-        console.log(`   - String Match: ${stringMatch}`);
-        console.log(`   - ObjectId Match: ${objectIdMatch}`);
-
-        vehicleMatches.push({
-          orderId: order.orderId,
-          customerOrderStatus: order.status,
-          trackingStatus: tracking.currentStatus,
-          hasAssignment: !!order.assignmentDetails,
-          hasVehicle: !!order.assignmentDetails?.assignedVehicle,
-          assignedVehicleId,
-          assignedVehicleIdType: typeof assignedVehicleId,
-          requestedVehicleId: vehicleId,
-          requestedVehicleIdType: typeof vehicleId,
-          strictMatch,
-          stringMatch,
-          objectIdMatch,
-        });
-
-        // Use the most flexible matching
-        if (stringMatch || objectIdMatch || strictMatch) {
-          console.log(
-            `✅ MATCH FOUND! Adding order ${order.orderId} to vehicle ${vehicleId}`
-          );
-
-          orders.push({
-            orderId: order.orderId,
-            customerName: customer.name,
-            customerPhone: customer.phoneNumber[0] || "",
-            deliveryDate: order.deliveryDate,
-            timeSlot: order.timeSlot || "",
-            deliveryAddress: order.deliveryAddress,
-            items: order.items || [],
-            totalItems: order.items ? order.items.length : 0,
-            specialInstructions: order.adminReason || "",
-            assignmentDetails: order.assignmentDetails,
-            isVerified: order.driverVerification?.verified || false,
-            trackingStatus: tracking.currentStatus,
-            orderStatus: order.status,
-          });
-        } else {
-          console.log(
-            `❌ NO MATCH for order ${order.orderId} - Vehicle ID mismatch`
-          );
-        }
-      } catch (error) {
-        console.error(`❌ Error processing order ${tracking.orderId}:`, error);
-      }
-    }
-
-    // Sort by delivery time
-    orders.sort((a, b) => new Date(a.deliveryDate) - new Date(b.deliveryDate));
-
-    console.log(
-      `\n✅ Driver: Returning ${orders.length} orders for vehicle ${vehicleId}`
-    );
-    console.log(`📊 Vehicle Matching Summary:`, vehicleMatches);
-
-    res.json(orders);
-  } catch (error) {
-    console.error("❌ Error fetching vehicle orders:", error);
-    res.status(500).json({ error: "Failed to fetch vehicle orders" });
-  }
-});
 module.exports = router;

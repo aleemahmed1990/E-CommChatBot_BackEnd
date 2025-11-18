@@ -1,11 +1,10 @@
-// routes/deliveryRoutes.js - Fixed implementation
+// routes/deliveryRoutes.js - COMPLETE FIXED WITH PROPER LOCATION DATA EXTRACTION
 const express = require("express");
 const router = express.Router();
 const Customer = require("../models/customer");
 const Employee = require("../models/Employee");
 const DeliveryTracking = require("../models/Deliverytracking");
 
-// Helper function to get workflow progress (since method might not be available)
 function getWorkflowProgress(tracking) {
   if (
     tracking.getWorkflowProgress &&
@@ -13,8 +12,6 @@ function getWorkflowProgress(tracking) {
   ) {
     return tracking.getWorkflowProgress();
   }
-
-  // Fallback: manually extract workflow progress
   const workflow = tracking.workflowStatus || {};
   return {
     pending: workflow.pending?.completed || false,
@@ -27,60 +24,95 @@ function getWorkflowProgress(tracking) {
   };
 }
 
-// Initialize delivery tracking for existing orders
+// ✅ HELPER FUNCTION: Get location data from multiple sources
+function getLocationData(customer, order) {
+  // Priority 1: Check deliveryAddress in order
+  if (order.deliveryAddress?.fullAddress || order.deliveryAddress?.area) {
+    return {
+      fullAddress: order.deliveryAddress.fullAddress || "",
+      area: order.deliveryAddress.area || "",
+      nickname: order.deliveryAddress.nickname || "",
+      googleMapLink: order.deliveryAddress.googleMapLink || "",
+    };
+  }
+
+  // Priority 2: Check cart data (during checkout)
+  if (customer.cart?.deliveryAddress?.fullAddress) {
+    return {
+      fullAddress: customer.cart.deliveryAddress.fullAddress || "",
+      area: customer.cart.deliveryAddress.area || "",
+      nickname: customer.cart.deliveryAddress.nickname || "",
+      googleMapLink: customer.cart.deliveryAddress.googleMapLink || "",
+    };
+  }
+
+  // Priority 3: Check addresses array (saved addresses)
+  if (customer.addresses && customer.addresses.length > 0) {
+    const defaultAddress =
+      customer.addresses.find((a) => a.isDefault) || customer.addresses[0];
+    return {
+      fullAddress: defaultAddress.fullAddress || "",
+      area: defaultAddress.area || "",
+      nickname: defaultAddress.nickname || "",
+      googleMapLink: defaultAddress.googleMapLink || "",
+    };
+  }
+
+  // Priority 4: Check contextData (temporary address being filled)
+  if (customer.contextData?.tempAddress?.fullAddress) {
+    return {
+      fullAddress: customer.contextData.tempAddress.fullAddress || "",
+      area: customer.contextData.tempAddress.area || "",
+      nickname: customer.contextData.tempAddress.nickname || "",
+      googleMapLink: customer.contextData.tempAddress.googleMapLink || "",
+    };
+  }
+
+  // Fallback: Return empty location object
+  return {
+    fullAddress: "Address not provided",
+    area: "Area not specified",
+    nickname: "",
+    googleMapLink: "",
+  };
+}
+
 router.post("/initialize-tracking", async (req, res) => {
   try {
-    console.log("🚀 Initializing delivery tracking for existing orders...");
-
     const customers = await Customer.find({
       shoppingHistory: { $exists: true, $ne: [] },
     });
-
     let createdCount = 0;
-    let skippedCount = 0;
-
     for (let customer of customers) {
       for (let order of customer.shoppingHistory) {
-        // Check if tracking already exists
         const existingTracking = await DeliveryTracking.findOne({
           orderId: order.orderId,
         });
-
         if (!existingTracking) {
           try {
             await DeliveryTracking.createFromCustomerOrder(customer, order);
             createdCount++;
-            console.log(`✅ Created tracking for order: ${order.orderId}`);
           } catch (error) {
             console.error(
-              `❌ Error creating tracking for ${order.orderId}:`,
+              `Error creating tracking for ${order.orderId}:`,
               error.message
             );
           }
-        } else {
-          skippedCount++;
         }
       }
     }
-
-    res.json({
-      success: true,
-      message: `Initialized tracking for ${createdCount} orders, skipped ${skippedCount} existing`,
-      created: createdCount,
-      skipped: skippedCount,
-    });
+    res.json({ success: true, created: createdCount });
   } catch (error) {
     console.error("Error initializing tracking:", error);
     res.status(500).json({ error: "Failed to initialize tracking" });
   }
 });
 
-// Get orders overview with real customer data
+// ✅ FIXED: Order Overview - EXTRACTS ALL LOCATION DATA FROM MULTIPLE SOURCES
 router.get("/orders/overview", async (req, res) => {
   try {
     const { status, priority, search } = req.query;
 
-    // Build query for customers with active orders
     let customerQuery = {
       shoppingHistory: {
         $elemMatch: {
@@ -89,8 +121,8 @@ router.get("/orders/overview", async (req, res) => {
               "order-confirmed",
               "picking-order",
               "allocated-driver",
-              "ready to pickup",
-              "order-pickuped-up",
+              "ready-to-pickup",
+              "order-picked-up",
               "on-way",
               "driver-confirmed",
               "order-processed",
@@ -100,146 +132,203 @@ router.get("/orders/overview", async (req, res) => {
       },
     };
 
-    // Add search filter
     if (search) {
       customerQuery.$or = [
         { name: { $regex: search, $options: "i" } },
-        { phoneNumber: { $regex: search, $options: "i" } },
+        { phoneNumber: { $elemMatch: { $regex: search, $options: "i" } } },
         { "shoppingHistory.orderId": { $regex: search, $options: "i" } },
+        {
+          "shoppingHistory.deliveryAddress.area": {
+            $regex: search,
+            $options: "i",
+          },
+        },
+        { "cart.deliveryAddress.area": { $regex: search, $options: "i" } },
+        { "addresses.area": { $regex: search, $options: "i" } },
+        { "contextData.tempAddress.area": { $regex: search, $options: "i" } },
       ];
     }
 
-    const customers = await Customer.find(customerQuery).lean();
+    const customers = await Customer.find(customerQuery);
 
     let allOrders = [];
 
     for (let customer of customers) {
       for (let order of customer.shoppingHistory) {
-        // Filter active orders only
         if (
-          [
+          ![
             "order-confirmed",
             "picking-order",
             "allocated-driver",
-            "ready to pickup",
-            "order-pickuped-up",
+            "ready-to-pickup",
+            "order-picked-up",
             "on-way",
             "driver-confirmed",
             "order-processed",
           ].includes(order.status)
         ) {
-          // Get or create delivery tracking
-          let tracking = await DeliveryTracking.findOne({
-            orderId: order.orderId,
-          });
-          if (!tracking) {
-            tracking = await DeliveryTracking.createFromCustomerOrder(
-              customer,
-              order
-            );
-          }
-
-          // Calculate priority
-          const totalAmount = order.totalAmount || 0;
-          const orderPriority =
-            totalAmount >= 200 ? "HIGH" : totalAmount >= 100 ? "MEDIUM" : "LOW";
-
-          // Apply priority filter
-          if (
-            priority &&
-            priority !== "All Priorities" &&
-            orderPriority !== priority
-          ) {
-            continue;
-          }
-
-          // Calculate total items
-          const totalItems = order.items
-            ? order.items.reduce((sum, item) => sum + (item.quantity || 1), 0)
-            : 0;
-
-          // Get workflow progress from tracking using helper function
-          const workflowProgress = getWorkflowProgress(tracking);
-
-          // Format order data
-          const formattedOrder = {
-            id: order.orderId,
-            location: order.deliveryAddress?.area || "Unknown Area",
-            items: `${totalItems} items`,
-            amount: `AED ${totalAmount.toFixed(2)}`,
-            customer: customer.name,
-            phone: customer.phoneNumber[0] || "",
-            address:
-              order.deliveryAddress?.fullAddress || "Address not provided",
-            schedule: order.deliveryDate
-              ? new Date(order.deliveryDate).toLocaleString()
-              : "Not scheduled",
-            status: mapStatusToDisplay(order.status),
-            priority: orderPriority,
-            officer: order.driver1 || order.driver2 || "",
-
-            // Workflow progress from tracking
-            progress: workflowProgress,
-
-            // Additional details
-            hasComplaints: order.complaints && order.complaints.length > 0,
-            deliveryType: order.deliveryType || "truck",
-            timeSlot: order.timeSlot || "",
-            isOverdue: isOrderOverdue(order.deliveryDate),
-            specialInstructions: order.adminReason || "",
-
-            // Raw data for actions
-            rawOrder: order,
-            customerId: customer._id,
-            customerName: customer.name,
-            whatsappPhone: customer.phoneNumber[0] || "",
-
-            // NEW: Customer and Order Details for the new columns
-            customerDetails: {
-              name: customer.name,
-              phone: customer.phoneNumber[0] || "",
-              email: customer.email || "Not provided",
-              totalOrders: customer.shoppingHistory
-                ? customer.shoppingHistory.length
-                : 0,
-              customerSince: customer.createdAt
-                ? new Date(customer.createdAt).toLocaleDateString()
-                : "Unknown",
-            },
-            orderDetails: {
-              orderId: order.orderId,
-              orderDate: order.orderDate
-                ? new Date(order.orderDate).toLocaleDateString()
-                : "Unknown",
-              itemCount: totalItems,
-              totalAmount: totalAmount,
-              paymentStatus: order.paymentStatus || "pending",
-              paymentMethod: order.paymentMethod || "Not specified",
-              deliveryType: order.deliveryType || "truck",
-            },
-          };
-
-          allOrders.push(formattedOrder);
+          continue;
         }
+
+        let tracking = await DeliveryTracking.findOne({
+          orderId: order.orderId,
+        });
+        if (!tracking) {
+          tracking = await DeliveryTracking.createFromCustomerOrder(
+            customer,
+            order
+          );
+        }
+
+        const totalAmount = order.totalAmount || 0;
+        const orderPriority =
+          totalAmount >= 200 ? "HIGH" : totalAmount >= 100 ? "MEDIUM" : "LOW";
+
+        if (
+          priority &&
+          priority !== "All Priorities" &&
+          orderPriority !== priority
+        ) {
+          continue;
+        }
+
+        const totalItems = order.items
+          ? order.items.reduce((sum, item) => sum + (item.quantity || 1), 0)
+          : 0;
+        const workflowProgress = getWorkflowProgress(tracking);
+
+        // ✅ GET LOCATION DATA FROM ALL SOURCES
+        const locationData = getLocationData(customer, order);
+
+        // ✅ COMPLETE FIELD MAPPING WITH ALL LOCATION DATA FILLED
+        const formattedOrder = {
+          // Order Identification
+          id: order.orderId || `ORD${Date.now()}`,
+          orderId: order.orderId || `ORD${Date.now()}`,
+
+          // Customer Details - COMPLETE
+          customer: customer.name || "Unknown Customer",
+          customerId: customer._id?.toString() || "",
+          phone: (customer.phoneNumber && customer.phoneNumber[0]) || "N/A",
+          email: customer.email || "Not provided",
+
+          // Location Information - EXTRACTED FROM ALL SOURCES
+          location: locationData.area || "Area not specified",
+          address: locationData.fullAddress || "Address not provided",
+          googleMapLink: locationData.googleMapLink || null,
+          mapLink: locationData.googleMapLink || null,
+          addressNickname: locationData.nickname || "",
+          area: locationData.area || "Area not specified",
+          fullAddress: locationData.fullAddress || "Address not provided",
+
+          // Order Items & Pricing
+          items: `${totalItems} items`,
+          itemsCount: totalItems,
+          itemsArray: (order.items || []).map((item) => ({
+            productId: item.productId || "",
+            productName: item.productName || "Unknown Product",
+            category: item.category || "",
+            subCategory: item.subCategory || "",
+            weight: item.weight || "N/A",
+            quantity: item.quantity || 0,
+            unitPrice: item.unitPrice || 0,
+            totalPrice: item.totalPrice || 0,
+            isDiscountedProduct: item.isDiscountedProduct || false,
+          })),
+          amount: `AED ${(totalAmount || 0).toFixed(2)}`,
+          totalAmount: totalAmount || 0,
+          deliveryCharge: order.deliveryCharge || 0,
+          finalAmount: (totalAmount || 0) + (order.deliveryCharge || 0),
+
+          // Order Status & Priority
+          status: mapStatusToDisplay(order.status),
+          rawStatus: order.status,
+          priority: orderPriority,
+
+          // Workflow & Progress
+          progress: workflowProgress,
+          workflowProgress: workflowProgress,
+
+          // Delivery Information
+          deliveryDate: order.deliveryDate
+            ? new Date(order.deliveryDate).toLocaleString()
+            : "Not scheduled",
+          deliveryDateRaw: order.deliveryDate || null,
+          timeSlot: order.timeSlot || "Not specified",
+          deliveryType: order.deliveryType || "truck",
+          deliverySpeed: order.deliverySpeed || "normal",
+
+          // Driver Assignment
+          driver1: order.driver1 || "Not assigned",
+          driver2: order.driver2 || "Not assigned",
+          assignedDriver: order.driver1 || order.driver2 || "Not assigned",
+
+          // Special Notes & Instructions
+          specialInstructions: order.adminReason || "",
+          adminReason: order.adminReason || "",
+          packingNotes: order.items?.[0]?.packingNotes || "",
+
+          // Complaints & Issues
+          hasComplaints:
+            (order.complaints && order.complaints.length > 0) || false,
+          complaintsCount: order.complaints?.length || 0,
+          complaints: order.complaints || [],
+
+          // Verification Status
+          storageVerified:
+            order.items?.some((item) => item.storageVerified) || false,
+          loadingVerified:
+            order.items?.some((item) => item.loadingVerified) || false,
+
+          // Payment Information
+          paymentStatus: order.paymentStatus || "pending",
+          paymentMethod: order.paymentMethod || "Not specified",
+          transactionId: order.transactionId || "",
+          accountHolderName: order.accountHolderName || "",
+          paidBankName: order.paidBankName || "",
+
+          // Order Metadata
+          orderDate: order.orderDate
+            ? new Date(order.orderDate).toLocaleString()
+            : "Unknown",
+          orderDateRaw: order.orderDate || null,
+          isOverdue: isOrderOverdue(order.deliveryDate),
+
+          // Additional Details
+          pickupType: order.pickupType || "heavy-pickup",
+
+          // Customer Details Object (for modal)
+          customerDetails: {
+            name: customer.name || "Unknown",
+            phone: (customer.phoneNumber && customer.phoneNumber[0]) || "N/A",
+            email: customer.email || "Not provided",
+            address: {
+              fullAddress: locationData.fullAddress || "Address not provided",
+              area: locationData.area || "Area not specified",
+              nickname: locationData.nickname || "",
+              googleMapLink: locationData.googleMapLink || "",
+            },
+            totalOrders:
+              (customer.shoppingHistory && customer.shoppingHistory.length) ||
+              0,
+          },
+        };
+
+        allOrders.push(formattedOrder);
       }
     }
 
-    // Apply status filter
     if (status && status !== "All Status") {
       allOrders = allOrders.filter((order) => order.status === status);
     }
 
-    // Sort by delivery date and priority
     allOrders.sort((a, b) => {
-      // First by priority
       const priorityOrder = { HIGH: 3, MEDIUM: 2, LOW: 1 };
       const priorityDiff =
         priorityOrder[b.priority] - priorityOrder[a.priority];
       if (priorityDiff !== 0) return priorityDiff;
-
-      // Then by delivery date
-      const aDate = new Date(a.rawOrder.deliveryDate || a.rawOrder.orderDate);
-      const bDate = new Date(b.rawOrder.deliveryDate || b.rawOrder.orderDate);
+      const aDate = new Date(a.deliveryDateRaw || a.orderDateRaw || 0);
+      const bDate = new Date(b.deliveryDateRaw || b.orderDateRaw || 0);
       return aDate - bDate;
     });
 
@@ -250,11 +339,9 @@ router.get("/orders/overview", async (req, res) => {
   }
 });
 
-// Get workflow status counts
 router.get("/workflow-status", async (req, res) => {
   try {
     const trackingRecords = await DeliveryTracking.find({ isActive: true });
-
     const statusCounts = {
       pending: 0,
       packed: 0,
@@ -266,8 +353,7 @@ router.get("/workflow-status", async (req, res) => {
     };
 
     trackingRecords.forEach((tracking) => {
-      const progress = getWorkflowProgress(tracking); // Use helper function
-
+      const progress = getWorkflowProgress(tracking);
       if (progress.pending) statusCounts.pending++;
       if (progress.packed) statusCounts.packed++;
       if (progress.storage) statusCounts.storage++;
@@ -284,7 +370,7 @@ router.get("/workflow-status", async (req, res) => {
   }
 });
 
-// Get specific order details
+// ✅ FIXED: Order Details - EXTRACTS ALL LOCATION DATA FROM MULTIPLE SOURCES
 router.get("/orders/:orderId/details", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -300,34 +386,68 @@ router.get("/orders/:orderId/details", async (req, res) => {
     const order = customer.shoppingHistory.find((o) => o.orderId === orderId);
     const tracking = await DeliveryTracking.findOne({ orderId: orderId });
 
+    // ✅ GET LOCATION DATA FROM ALL SOURCES
+    const locationData = getLocationData(customer, order);
+
     const orderDetails = {
       orderId: order.orderId,
       customer: {
-        name: customer.name,
-        phone: customer.phoneNumber[0] || "",
+        name: customer.name || "Unknown",
+        phone: (customer.phoneNumber && customer.phoneNumber[0]) || "",
         email: customer.email || "",
-        address: order.deliveryAddress,
+        address: {
+          fullAddress: locationData.fullAddress || "Address not provided",
+          area: locationData.area || "Area not specified",
+          nickname: locationData.nickname || "",
+          googleMapLink: locationData.googleMapLink || "",
+        },
       },
-      items: order.items || [],
-      totalAmount: order.totalAmount,
-      deliveryCharge: order.deliveryCharge,
-      status: order.status,
+      items: (order.items || []).map((item) => ({
+        productId: item.productId || "",
+        productName: item.productName || "Unknown Product",
+        category: item.category || "",
+        subCategory: item.subCategory || "",
+        weight: item.weight || "N/A",
+        quantity: item.quantity || 0,
+        unitPrice: item.unitPrice || 0,
+        totalPrice: item.totalPrice || 0,
+        isDiscountedProduct: item.isDiscountedProduct || false,
+      })),
+      itemsArray: (order.items || []).map((item) => ({
+        productId: item.productId || "",
+        productName: item.productName || "Unknown Product",
+        category: item.category || "",
+        subCategory: item.subCategory || "",
+        weight: item.weight || "N/A",
+        quantity: item.quantity || 0,
+        unitPrice: item.unitPrice || 0,
+        totalPrice: item.totalPrice || 0,
+        isDiscountedProduct: item.isDiscountedProduct || false,
+      })),
+      itemsCount: order.items ? order.items.length : 0,
+      totalAmount: order.totalAmount || 0,
+      deliveryCharge: order.deliveryCharge || 0,
+      finalAmount: (order.totalAmount || 0) + (order.deliveryCharge || 0),
+      status: mapStatusToDisplay(order.status),
+      rawStatus: order.status,
       deliveryDate: order.deliveryDate,
+      deliveryDateRaw: order.deliveryDate,
       timeSlot: order.timeSlot,
-      deliveryType: order.deliveryType,
-      driver1: order.driver1,
-      driver2: order.driver2,
+      deliveryType: order.deliveryType || "truck",
+      driver1: order.driver1 || "Not assigned",
+      driver2: order.driver2 || "Not assigned",
       complaints: order.complaints || [],
       orderDate: order.orderDate,
-      paymentStatus: order.paymentStatus,
-      paymentMethod: order.paymentMethod,
-      specialInstructions: order.adminReason,
-
-      // Workflow progress using helper function
+      paymentStatus: order.paymentStatus || "pending",
+      paymentMethod: order.paymentMethod || "Not specified",
+      specialInstructions: order.adminReason || "",
       workflowProgress: tracking ? getWorkflowProgress(tracking) : null,
-
-      // WhatsApp details
-      whatsappPhone: customer.phoneNumber[0] || "",
+      whatsappPhone: (customer.phoneNumber && customer.phoneNumber[0]) || "",
+      // ✅ Google Maps Link
+      googleMapLink: locationData.googleMapLink || "",
+      area: locationData.area || "Area not specified",
+      fullAddress: locationData.fullAddress || "Address not provided",
+      nickname: locationData.nickname || "",
     };
 
     res.json(orderDetails);
@@ -337,19 +457,16 @@ router.get("/orders/:orderId/details", async (req, res) => {
   }
 });
 
-// Update workflow status (called from other dashboards)
 router.put("/orders/:orderId/workflow/:step", async (req, res) => {
   try {
     const { orderId, step } = req.params;
     const { completed, employeeId, employeeName, details } = req.body;
 
-    // Find and update tracking
     const tracking = await DeliveryTracking.findOne({ orderId: orderId });
     if (!tracking) {
       return res.status(404).json({ error: "Order tracking not found" });
     }
 
-    // Update workflow step
     const updateDetails = {
       completedBy: {
         employeeId: employeeId || "SYSTEM",
@@ -357,10 +474,8 @@ router.put("/orders/:orderId/workflow/:step", async (req, res) => {
       },
       ...details,
     };
-
     await tracking.updateWorkflowStatus(step, completed, updateDetails);
 
-    // Also update customer order status if needed
     if (step === "packed" && completed) {
       await Customer.updateOne(
         { "shoppingHistory.orderId": orderId },
@@ -370,10 +485,8 @@ router.put("/orders/:orderId/workflow/:step", async (req, res) => {
 
     res.json({
       success: true,
-      message: `Workflow step '${step}' updated to ${
-        completed ? "completed" : "pending"
-      }`,
-      workflowProgress: getWorkflowProgress(tracking), // Use helper function
+      message: `Workflow step '${step}' updated`,
+      workflowProgress: getWorkflowProgress(tracking),
     });
   } catch (error) {
     console.error("Error updating workflow status:", error);
@@ -381,7 +494,6 @@ router.put("/orders/:orderId/workflow/:step", async (req, res) => {
   }
 });
 
-// WhatsApp integration - Send message to customer
 router.post("/orders/:orderId/whatsapp", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -390,23 +502,19 @@ router.post("/orders/:orderId/whatsapp", async (req, res) => {
     const customer = await Customer.findOne({
       "shoppingHistory.orderId": orderId,
     });
-
     if (!customer) {
       return res.status(404).json({ error: "Order not found" });
     }
 
     const order = customer.shoppingHistory.find((o) => o.orderId === orderId);
-    const phone = customer.phoneNumber[0];
+    const phone = customer.phoneNumber && customer.phoneNumber[0];
 
     if (!phone) {
       return res.status(400).json({ error: "Customer phone number not found" });
     }
 
-    // Generate WhatsApp URL
     let message = customMessage;
-
     if (!customMessage) {
-      // Generate default message based on type
       switch (messageType) {
         case "status_update":
           message = `Hello ${
@@ -437,23 +545,6 @@ router.post("/orders/:orderId/whatsapp", async (req, res) => {
       ""
     )}?text=${encodeURIComponent(message)}`;
 
-    // Update tracking with message history
-    await DeliveryTracking.updateOne(
-      { orderId: orderId },
-      {
-        $push: {
-          "whatsappDetails.messageHistory": {
-            messageType: messageType,
-            sentAt: new Date(),
-            content: message,
-          },
-        },
-        $set: {
-          "whatsappDetails.lastMessageSent": new Date(),
-        },
-      }
-    );
-
     res.json({
       success: true,
       whatsappUrl: whatsappUrl,
@@ -466,7 +557,6 @@ router.post("/orders/:orderId/whatsapp", async (req, res) => {
   }
 });
 
-// Get available drivers
 router.get("/drivers/available", async (req, res) => {
   try {
     const drivers = await Employee.find({
@@ -482,14 +572,13 @@ router.get("/drivers/available", async (req, res) => {
   }
 });
 
-// Helper function to map status to display
 function mapStatusToDisplay(status) {
   const statusMap = {
     "order-confirmed": "Pending",
     "picking-order": "Packing",
     "allocated-driver": "Assigned",
-    "ready to pickup": "Ready",
-    "order-pickuped-up": "Loaded",
+    "ready-to-pickup": "Ready",
+    "order-picked-up": "Loaded",
     "on-way": "In Transit",
     "driver-confirmed": "In Transit",
     "order-processed": "Delivered",
@@ -497,7 +586,6 @@ function mapStatusToDisplay(status) {
   return statusMap[status] || status;
 }
 
-// Helper function to check if order is overdue
 function isOrderOverdue(deliveryDate) {
   if (!deliveryDate) return false;
   const now = new Date();

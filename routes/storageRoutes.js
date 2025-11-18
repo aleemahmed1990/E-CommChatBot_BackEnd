@@ -28,17 +28,15 @@ function getWorkflowProgress(tracking) {
 // Get storage queue - orders that are packed and ready for verification
 router.get("/queue", async (req, res) => {
   try {
-    // Get orders that are packed and ready for storage verification
     const customers = await Customer.find({
-      "shoppingHistory.status": "allocated-driver", // Orders that have been packed
-    }).lean();
+      "shoppingHistory.status": "allocated-driver",
+    });
 
     let storageQueue = [];
 
     for (let customer of customers) {
       for (let order of customer.shoppingHistory) {
         if (order.status === "allocated-driver") {
-          // Get delivery tracking for workflow status
           let tracking = await DeliveryTracking.findOne({
             orderId: order.orderId,
           });
@@ -50,10 +48,8 @@ router.get("/queue", async (req, res) => {
             );
           }
 
-          // Only include orders that are packed but not yet in storage
           const progress = getWorkflowProgress(tracking);
           if (progress.packed && !progress.storage) {
-            // Calculate priority based on order amount
             const totalAmount = order.totalAmount || 0;
             const priority =
               totalAmount >= 200
@@ -62,18 +58,30 @@ router.get("/queue", async (req, res) => {
                 ? "medium"
                 : "low";
 
-            // Get packing details
-            const packingStaff =
-              order.packingDetails?.packingStaff?.staffName || "Unknown";
-            const receivedAt =
-              order.packingDetails?.packingCompletedAt || order.updatedAt;
+            // ✅ FIXED: Get packing details from items - packedBy contains staffName and staffId
+            let packedBy = "Unknown";
+            let packedAt = null;
+
+            // Get packing info from first packed item
+            if (order.items && order.items.length > 0) {
+              const packedItem = order.items.find(
+                (item) => item.packedBy && item.packedBy.staffName
+              );
+              if (packedItem) {
+                packedBy = packedItem.packedBy.staffName; // Get exact staff name
+                packedAt = packedItem.packedAt; // Get exact timestamp when item was packed
+              }
+            }
+
+            const receivedAt = packedAt || order.orderDate;
 
             storageQueue.push({
               orderId: order.orderId,
               customerName: customer.name,
               customerPhone: customer.phoneNumber[0] || "",
               priority: priority,
-              packedBy: packingStaff,
+              packedBy: packedBy, // ✅ Shows exact staff name
+              packedAt: packedAt, // ✅ Shows exact packed timestamp
               receivedAt: receivedAt,
               deliveryDate: order.deliveryDate,
               deliveryTime: order.timeSlot || "",
@@ -100,7 +108,6 @@ router.get("/queue", async (req, res) => {
       }
     }
 
-    // Sort by priority and delivery time
     storageQueue.sort((a, b) => {
       const priorityOrder = { high: 3, medium: 2, low: 1 };
       const priorityDiff =
@@ -140,7 +147,6 @@ router.get("/stats", async (req, res) => {
             if (tracking.workflowStatus.storage.completed) {
               stats.completed++;
             } else {
-              // Check if verification is in progress
               const hasVerifiedItems =
                 order.items &&
                 order.items.some((item) => item.storageVerified === true);
@@ -189,6 +195,22 @@ router.get("/order/:orderId", async (req, res) => {
       });
     }
 
+    // ✅ FIXED: Get packing details from items - packedBy contains staffName, staffId, and timestamp
+    let packingStaffName = "Unknown";
+    let packingStaffId = null;
+    let packingCompletedAt = null;
+
+    if (order.items && order.items.length > 0) {
+      const packedItem = order.items.find(
+        (item) => item.packedBy && item.packedBy.staffName
+      );
+      if (packedItem) {
+        packingStaffName = packedItem.packedBy.staffName;
+        packingStaffId = packedItem.packedBy.staffId;
+        packingCompletedAt = packedItem.packedAt;
+      }
+    }
+
     const orderDetails = {
       orderId: order.orderId,
       customerName: customer.name,
@@ -199,7 +221,14 @@ router.get("/order/:orderId", async (req, res) => {
       deliveryAddress: order.deliveryAddress,
       specialInstructions: order.adminReason || "",
       items: order.items || [],
-      packingDetails: order.packingDetails || {},
+      packingDetails: {
+        packingStaff: {
+          staffName: packingStaffName, // ✅ Exact staff name from items
+          staffId: packingStaffId, // ✅ Staff ID from items
+        },
+        packedAt: packingCompletedAt, // ✅ Exact timestamp from items
+        packingStartedAt: order.packingDetails?.packingStartedAt || null,
+      },
       storageDetails: order.storageDetails || {
         verificationStartedAt: null,
         verificationCompletedAt: null,
@@ -226,7 +255,6 @@ router.post("/start/:orderId", async (req, res) => {
     const { orderId } = req.params;
     const { employeeId, employeeName } = req.body;
 
-    // Update customer order with storage verification start
     const result = await Customer.updateOne(
       { "shoppingHistory.orderId": orderId },
       {
@@ -279,7 +307,7 @@ router.put("/item/:orderId/:itemIndex", async (req, res) => {
 
     // Mark item as verified
     order.items[itemIndex].storageVerified = verified;
-    order.items[itemIndex].storageCondition = condition || "good"; // good, damaged, missing
+    order.items[itemIndex].storageCondition = condition || "good";
     order.items[itemIndex].verifiedAt = new Date();
     order.items[itemIndex].verifiedBy = {
       staffId: employeeId,
@@ -341,7 +369,6 @@ router.post("/complaint/:orderId/:itemIndex", async (req, res) => {
 
     const complaintId = `STORAGE_COMP_${Date.now()}`;
 
-    // Add complaint to item
     if (!order.items[itemIndex].storageComplaints) {
       order.items[itemIndex].storageComplaints = [];
     }
@@ -358,7 +385,9 @@ router.post("/complaint/:orderId/:itemIndex", async (req, res) => {
       status: "open",
     });
 
-    // Update storage details
+    // Mark item as having complaint (counts as processed)
+    order.items[itemIndex].storageVerified = false;
+
     if (!order.storageDetails) order.storageDetails = {};
     order.storageDetails.hasStorageComplaints = true;
 
@@ -395,7 +424,7 @@ router.post("/complete/:orderId", async (req, res) => {
     );
     const order = customer.shoppingHistory[orderIndex];
 
-    // Check if all items are verified
+    // Check if all items are verified or have complaints
     const allItemsVerified = order.items.every(
       (item) =>
         item.storageVerified === true || item.storageComplaints?.length > 0
@@ -408,8 +437,8 @@ router.post("/complete/:orderId", async (req, res) => {
       });
     }
 
-    // Update order status to ready for pickup
-    order.status = "ready to pickup";
+    // Update order status to ready to pickup
+    order.status = "ready-to-pickup";
 
     // Update storage details
     if (!order.storageDetails) order.storageDetails = {};
@@ -421,26 +450,29 @@ router.post("/complete/:orderId", async (req, res) => {
     await customer.save();
 
     // Update delivery tracking workflow - mark storage as completed
-    const tracking = await DeliveryTracking.findOne({ orderId: orderId });
-    if (tracking) {
-      tracking.workflowStatus.storage.completed = true;
-      tracking.workflowStatus.storage.completedAt = new Date();
-      tracking.workflowStatus.storage.completedBy = {
-        employeeId: employeeId,
-        employeeName: employeeName,
-      };
-      tracking.workflowStatus.storage.storageLocation = storageLocation;
-
-      // Update current status
-      tracking.currentStatus = "ready to pickup";
-
-      await tracking.save();
+    let tracking = await DeliveryTracking.findOne({ orderId: orderId });
+    if (!tracking) {
+      tracking = await DeliveryTracking.createFromCustomerOrder(
+        customer,
+        order
+      );
     }
+
+    tracking.workflowStatus.storage.completed = true;
+    tracking.workflowStatus.storage.completedAt = new Date();
+    tracking.workflowStatus.storage.completedBy = {
+      employeeId: employeeId,
+      employeeName: employeeName,
+    };
+    tracking.workflowStatus.storage.storageLocation = storageLocation;
+    tracking.currentStatus = "ready-to-pickup";
+
+    await tracking.save();
 
     res.json({
       success: true,
       message: `Order ${orderId} storage verification completed successfully`,
-      newStatus: "ready to pickup",
+      newStatus: "ready-to-pickup",
     });
   } catch (error) {
     console.error("Error completing storage verification:", error);

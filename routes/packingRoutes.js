@@ -1,34 +1,28 @@
-// routes/packingRoutes.js - Complete packing staff routes
+// routes/packingRoutes.js - COMPLETE FIXED
 const express = require("express");
 const router = express.Router();
 const Customer = require("../models/customer");
+const Employee = require("../models/Employee");
 const DeliveryTracking = require("../models/Deliverytracking");
 
-// Helper function to get workflow progress
-function getWorkflowProgress(tracking) {
-  if (
-    tracking.getWorkflowProgress &&
-    typeof tracking.getWorkflowProgress === "function"
-  ) {
-    return tracking.getWorkflowProgress();
+router.get("/staff", async (req, res) => {
+  try {
+    const staff = await Employee.find({
+      roles: "packing-staff",
+      isActivated: true,
+      isBlocked: false,
+    }).select("employeeId name email phone currentAssignments maxAssignments");
+
+    res.json(Array.isArray(staff) ? staff : [staff]);
+  } catch (error) {
+    console.error("Error fetching packing staff:", error);
+    res.json([]);
   }
+});
 
-  const workflow = tracking.workflowStatus || {};
-  return {
-    pending: workflow.pending?.completed || false,
-    packed: workflow.packed?.completed || false,
-    storage: workflow.storage?.completed || false,
-    assigned: workflow.assigned?.completed || false,
-    loaded: workflow.loaded?.completed || false,
-    inTransit: workflow.inTransit?.completed || false,
-    delivered: workflow.delivered?.completed || false,
-  };
-}
-
-// Get packing queue - orders ready for packing
+// ✅ FIXED: Complete packing queue with ALL data
 router.get("/queue", async (req, res) => {
   try {
-    // Get orders that are confirmed and ready for packing
     const customers = await Customer.find({
       "shoppingHistory.status": {
         $in: ["order-confirmed", "picking-order", "allocated-driver"],
@@ -44,7 +38,6 @@ router.get("/queue", async (req, res) => {
             order.status
           )
         ) {
-          // Get delivery tracking for workflow status
           let tracking = await DeliveryTracking.findOne({
             orderId: order.orderId,
           });
@@ -56,18 +49,15 @@ router.get("/queue", async (req, res) => {
             );
           }
 
-          // Calculate priority based on order amount
           const totalAmount = order.totalAmount || 0;
           const priority =
             totalAmount >= 200 ? "high" : totalAmount >= 100 ? "medium" : "low";
 
-          // Calculate pack-by time (2-3 hours before delivery)
           const deliveryTime = new Date(order.deliveryDate || Date.now());
           const packByTime = new Date(
             deliveryTime.getTime() - 2.5 * 60 * 60 * 1000
-          ); // 2.5 hours before
+          );
 
-          // Count packed items
           const totalItems = order.items ? order.items.length : 0;
           const packedItems = order.items
             ? order.items.filter((item) => item.packingStatus === "packed")
@@ -76,8 +66,11 @@ router.get("/queue", async (req, res) => {
 
           packingQueue.push({
             orderId: order.orderId,
-            customerName: customer.name,
-            customerPhone: customer.phoneNumber[0] || "",
+            customerName: customer.name || "Unknown",
+            customerPhone:
+              (customer.phoneNumber && customer.phoneNumber[0]) || "",
+            customerEmail: customer.email || "",
+            customerId: customer._id?.toString() || "",
             priority: priority,
             deliveryDate: order.deliveryDate,
             packByTime: packByTime,
@@ -87,21 +80,33 @@ router.get("/queue", async (req, res) => {
             packedItemsCount: packedItems,
             packingProgress:
               totalItems > 0 ? Math.round((packedItems / totalItems) * 100) : 0,
-            deliveryAddress: order.deliveryAddress,
+            // ✅ COMPLETE DELIVERY ADDRESS
+            deliveryAddress: {
+              nickname: order.deliveryAddress?.nickname || "",
+              area: order.deliveryAddress?.area || "",
+              fullAddress: order.deliveryAddress?.fullAddress || "",
+              googleMapLink: order.deliveryAddress?.googleMapLink || "",
+            },
+            // ✅ COMPLETE ORDER DETAILS
             specialInstructions: order.adminReason || "",
             timeSlot: order.timeSlot || "",
+            totalAmount: totalAmount,
+            deliveryCharge: order.deliveryCharge || 0,
+            finalAmount: totalAmount + (order.deliveryCharge || 0),
+            paymentStatus: order.paymentStatus || "pending",
+            paymentMethod: order.paymentMethod || "",
+            // ✅ COMPLETE PACKING DETAILS
+            packingDetails: order.packingDetails || {},
           });
         }
       }
     }
 
-    // Sort by priority and pack-by time
     packingQueue.sort((a, b) => {
       const priorityOrder = { high: 3, medium: 2, low: 1 };
       const priorityDiff =
         priorityOrder[b.priority] - priorityOrder[a.priority];
       if (priorityDiff !== 0) return priorityDiff;
-
       return new Date(a.packByTime) - new Date(b.packByTime);
     });
 
@@ -112,7 +117,6 @@ router.get("/queue", async (req, res) => {
   }
 });
 
-// Get packing statistics
 router.get("/stats", async (req, res) => {
   try {
     const customers = await Customer.find({
@@ -146,7 +150,7 @@ router.get("/stats", async (req, res) => {
   }
 });
 
-// Get detailed order for packing
+// ✅ FIXED: Complete order details with ALL customer and item data
 router.get("/order/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -161,7 +165,7 @@ router.get("/order/:orderId", async (req, res) => {
 
     const order = customer.shoppingHistory.find((o) => o.orderId === orderId);
 
-    // Initialize packing status for items if not exists
+    // Ensure all items have proper structure
     if (order.items) {
       order.items.forEach((item, index) => {
         if (!item.packingStatus) {
@@ -174,25 +178,72 @@ router.get("/order/:orderId", async (req, res) => {
     }
 
     const orderDetails = {
+      // ✅ ORDER IDENTIFICATION
       orderId: order.orderId,
-      customerName: customer.name,
-      customerPhone: customer.phoneNumber[0] || "",
+      customerId: customer._id?.toString() || "",
+
+      // ✅ CUSTOMER INFORMATION
+      customerName: customer.name || "Unknown",
+      customerPhone: (customer.phoneNumber && customer.phoneNumber[0]) || "",
+      customerEmail: customer.email || "",
+
+      // ✅ DELIVERY ADDRESS - COMPLETE
+      deliveryAddress: {
+        nickname: order.deliveryAddress?.nickname || "",
+        area: order.deliveryAddress?.area || "",
+        fullAddress: order.deliveryAddress?.fullAddress || "",
+        googleMapLink: order.deliveryAddress?.googleMapLink || "",
+      },
+
+      // ✅ ORDER STATUS & TIMING
       status: order.status,
       deliveryDate: order.deliveryDate,
-      timeSlot: order.timeSlot,
-      deliveryAddress: order.deliveryAddress,
+      timeSlot: order.timeSlot || "",
+
+      // ✅ ORDER AMOUNTS
+      totalAmount: order.totalAmount || 0,
+      deliveryCharge: order.deliveryCharge || 0,
+      finalAmount: (order.totalAmount || 0) + (order.deliveryCharge || 0),
+
+      // ✅ SPECIAL INSTRUCTIONS
       specialInstructions: order.adminReason || "",
-      items: order.items || [],
-      packingDetails: order.packingDetails || {
-        packingStartedAt: null,
-        packingCompletedAt: null,
-        packingStaff: {},
-        packingNotes: "",
-        totalItemsPacked: 0,
+
+      // ✅ ITEMS WITH COMPLETE STRUCTURE
+      items: (order.items || []).map((item, index) => ({
+        itemIndex: index,
+        productName: item.productName || "Unknown Product",
+        quantity: item.quantity || 1,
+        weight: item.weight || "N/A",
+        packingStatus: item.packingStatus || "pending",
+        packedAt: item.packedAt || null,
+        packedBy: item.packedBy || {},
+        itemComplaints: item.itemComplaints || [],
+        totalPrice: item.totalPrice || 0,
+      })),
+
+      // ✅ PACKING DETAILS
+      packingDetails: {
+        packingStartedAt: order.packingDetails?.packingStartedAt || null,
+        packingCompletedAt: order.packingDetails?.packingCompletedAt || null,
+        packingStaff: order.packingDetails?.packingStaff || {},
+        packingNotes: order.packingDetails?.packingNotes || "",
+        totalItemsPacked: order.packingDetails?.totalItemsPacked || 0,
         totalItemsRequested: order.items ? order.items.length : 0,
-        packingProgress: 0,
-        hasPackingComplaints: false,
+        packingProgress: order.packingDetails?.packingProgress || 0,
+        hasPackingComplaints:
+          order.packingDetails?.hasPackingComplaints || false,
       },
+
+      // ✅ PAYMENT INFORMATION
+      paymentStatus: order.paymentStatus || "pending",
+      paymentMethod: order.paymentMethod || "",
+      accountHolderName: order.accountHolderName || "",
+      paidBankName: order.paidBankName || "",
+      transactionId: order.transactionId || "",
+
+      // ✅ DELIVERY TYPE & SPEED
+      deliveryType: order.deliveryType || "truck",
+      deliverySpeed: order.deliverySpeed || "normal",
     };
 
     res.json(orderDetails);
@@ -202,13 +253,16 @@ router.get("/order/:orderId", async (req, res) => {
   }
 });
 
-// Start packing process
 router.post("/start/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
     const { employeeId, employeeName } = req.body;
 
-    // Update customer order status
+    const employee = await Employee.findOne({ employeeId: employeeId });
+    if (!employee) {
+      return res.status(404).json({ error: "Employee not found" });
+    }
+
     const result = await Customer.updateOne(
       { "shoppingHistory.orderId": orderId },
       {
@@ -226,7 +280,20 @@ router.post("/start/:orderId", async (req, res) => {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    // Update delivery tracking workflow
+    await Employee.updateOne(
+      { employeeId: employeeId },
+      {
+        $inc: { currentAssignments: 1 },
+        $push: {
+          assignedOrders: {
+            orderId: orderId,
+            status: "in-progress",
+            assignedAt: new Date(),
+          },
+        },
+      }
+    );
+
     const tracking = await DeliveryTracking.findOne({ orderId: orderId });
     if (tracking) {
       tracking.workflowStatus.pending.completed = true;
@@ -249,7 +316,6 @@ router.post("/start/:orderId", async (req, res) => {
   }
 });
 
-// Mark individual item as packed
 router.put("/item/:orderId/:itemIndex", async (req, res) => {
   try {
     const { orderId, itemIndex } = req.params;
@@ -272,7 +338,6 @@ router.put("/item/:orderId/:itemIndex", async (req, res) => {
       return res.status(404).json({ error: "Item not found" });
     }
 
-    // Mark item as packed
     order.items[itemIndex].packingStatus = "packed";
     order.items[itemIndex].packedAt = new Date();
     order.items[itemIndex].packedBy = {
@@ -281,7 +346,6 @@ router.put("/item/:orderId/:itemIndex", async (req, res) => {
       timestamp: new Date(),
     };
 
-    // Update packing details
     const packedItems = order.items.filter(
       (item) => item.packingStatus === "packed"
     ).length;
@@ -309,7 +373,6 @@ router.put("/item/:orderId/:itemIndex", async (req, res) => {
   }
 });
 
-// Add complaint for item
 router.post("/complaint/:orderId/:itemIndex", async (req, res) => {
   try {
     const { orderId, itemIndex } = req.params;
@@ -335,7 +398,6 @@ router.post("/complaint/:orderId/:itemIndex", async (req, res) => {
 
     const complaintId = `ITEM_COMP_${Date.now()}`;
 
-    // Add complaint to item
     if (!order.items[itemIndex].itemComplaints) {
       order.items[itemIndex].itemComplaints = [];
     }
@@ -352,7 +414,6 @@ router.post("/complaint/:orderId/:itemIndex", async (req, res) => {
       status: "open",
     });
 
-    // Mark item as unavailable if complaint indicates so
     if (
       ["not_available", "damaged", "expired", "insufficient_stock"].includes(
         complaintType
@@ -361,7 +422,6 @@ router.post("/complaint/:orderId/:itemIndex", async (req, res) => {
       order.items[itemIndex].packingStatus = "unavailable";
     }
 
-    // Update packing details
     order.packingDetails = order.packingDetails || {};
     order.packingDetails.hasPackingComplaints = true;
 
@@ -378,7 +438,6 @@ router.post("/complaint/:orderId/:itemIndex", async (req, res) => {
   }
 });
 
-// Complete packing for entire order
 router.post("/complete/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -397,7 +456,6 @@ router.post("/complete/:orderId", async (req, res) => {
     );
     const order = customer.shoppingHistory[orderIndex];
 
-    // Check if all items are packed or handled
     const allItemsHandled = order.items.every(
       (item) =>
         item.packingStatus === "packed" || item.packingStatus === "unavailable"
@@ -409,10 +467,7 @@ router.post("/complete/:orderId", async (req, res) => {
       });
     }
 
-    // Update order status to allocated-driver (next stage)
     order.status = "allocated-driver";
-
-    // Update packing details
     order.packingDetails = order.packingDetails || {};
     order.packingDetails.packingCompletedAt = new Date();
     order.packingDetails.packingNotes = packingNotes;
@@ -420,7 +475,40 @@ router.post("/complete/:orderId", async (req, res) => {
 
     await customer.save();
 
-    // Update delivery tracking workflow - mark as packed
+    await Employee.updateOne(
+      { employeeId: employeeId },
+      {
+        $inc: { currentAssignments: -1 },
+        $pull: {
+          assignedOrders: { orderId: orderId },
+        },
+        $push: {
+          packingHistory: {
+            orderId: orderId,
+            customerId: customer._id,
+            customerName: customer.name,
+            startedAt: order.packingDetails.packingStartedAt,
+            completedAt: new Date(),
+            totalItems: order.items ? order.items.length : 0,
+            packedItems: order.items
+              ? order.items.filter((item) => item.packingStatus === "packed")
+                  .length
+              : 0,
+            status: "completed",
+            notes: packingNotes,
+            complaints: order.items
+              ? order.items.reduce(
+                  (count, item) =>
+                    count +
+                    (item.itemComplaints ? item.itemComplaints.length : 0),
+                  0
+                )
+              : 0,
+          },
+        },
+      }
+    );
+
     const tracking = await DeliveryTracking.findOne({ orderId: orderId });
     if (tracking) {
       tracking.workflowStatus.packed.completed = true;
@@ -430,10 +518,7 @@ router.post("/complete/:orderId", async (req, res) => {
         employeeName: employeeName,
       };
       tracking.workflowStatus.packed.packingNotes = packingNotes;
-
-      // Update current status
       tracking.currentStatus = "allocated-driver";
-
       await tracking.save();
     }
 
@@ -448,7 +533,6 @@ router.post("/complete/:orderId", async (req, res) => {
   }
 });
 
-// Get item complaints for order
 router.get("/complaints/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -462,7 +546,6 @@ router.get("/complaints/:orderId", async (req, res) => {
     }
 
     const order = customer.shoppingHistory.find((o) => o.orderId === orderId);
-
     let complaints = [];
 
     order.items.forEach((item, index) => {
@@ -481,54 +564,6 @@ router.get("/complaints/:orderId", async (req, res) => {
   } catch (error) {
     console.error("Error fetching complaints:", error);
     res.status(500).json({ error: "Failed to fetch complaints" });
-  }
-});
-
-// Resolve item complaint
-router.put("/complaint/:orderId/:itemIndex/:complaintId", async (req, res) => {
-  try {
-    const { orderId, itemIndex, complaintId } = req.params;
-    const { resolution, employeeId, employeeName } = req.body;
-
-    const customer = await Customer.findOne({
-      "shoppingHistory.orderId": orderId,
-    });
-
-    if (!customer) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    const orderIndex = customer.shoppingHistory.findIndex(
-      (o) => o.orderId === orderId
-    );
-    const order = customer.shoppingHistory[orderIndex];
-
-    if (!order.items[itemIndex]) {
-      return res.status(404).json({ error: "Item not found" });
-    }
-
-    const complaint = order.items[itemIndex].itemComplaints.find(
-      (c) => c.complaintId === complaintId
-    );
-
-    if (!complaint) {
-      return res.status(404).json({ error: "Complaint not found" });
-    }
-
-    // Update complaint
-    complaint.status = "resolved";
-    complaint.resolution = resolution;
-    complaint.resolvedAt = new Date();
-
-    await customer.save();
-
-    res.json({
-      success: true,
-      message: "Complaint resolved successfully",
-    });
-  } catch (error) {
-    console.error("Error resolving complaint:", error);
-    res.status(500).json({ error: "Failed to resolve complaint" });
   }
 });
 
