@@ -333,7 +333,7 @@ app.use("/api/user-admin", adminRouter); // Changed path to avoid conflict
 // API endpoint to get all areas
 app.get("/api/areas", async (req, res) => {
   try {
-    const areas = await Area.find().sort({ name: 1 });
+    const areas = await Area.find().sort({ state: 1, area: 1 });
     res.json(areas);
   } catch (error) {
     console.error("Error fetching areas:", error);
@@ -344,26 +344,24 @@ app.get("/api/areas", async (req, res) => {
 // API endpoint to create a new area
 app.post("/api/areas", async (req, res) => {
   try {
-    const { name, displayName, truckPrice, scooterPrice } = req.body;
+    const { state, area, displayName, truckPrice, scooterPrice } = req.body;
 
-    // Validate required fields
-    if (!name || !displayName) {
+    if (!state || !area || !displayName) {
       return res
         .status(400)
-        .json({ error: "Name and display name are required" });
+        .json({ error: "State, area and display name are required" });
     }
 
-    // Check if area already exists
-    const existingArea = await Area.findOne({ name: name.toLowerCase() });
+    const existingArea = await Area.findOne({ state, area });
     if (existingArea) {
       return res
         .status(400)
-        .json({ error: "Area with this name already exists" });
+        .json({ error: "Area already exists in this state" });
     }
 
-    // Create new area
     const newArea = new Area({
-      name: name.toLowerCase(),
+      state,
+      area,
       displayName,
       truckPrice: truckPrice || 0,
       scooterPrice: scooterPrice || 0,
@@ -383,11 +381,6 @@ app.put("/api/areas/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const updateData = req.body;
-
-    // If name is being updated, make sure it's lowercase
-    if (updateData.name) {
-      updateData.name = updateData.name.toLowerCase();
-    }
 
     const updatedArea = await Area.findByIdAndUpdate(
       id,
@@ -410,7 +403,6 @@ app.put("/api/areas/:id", async (req, res) => {
 app.delete("/api/areas/:id", async (req, res) => {
   try {
     const { id } = req.params;
-
     const deletedArea = await Area.findByIdAndDelete(id);
 
     if (!deletedArea) {
@@ -424,14 +416,29 @@ app.delete("/api/areas/:id", async (req, res) => {
   }
 });
 
-// API endpoint to get only active areas (for chatbot use)
+// API endpoint to get only active areas
 app.get("/api/areas/active", async (req, res) => {
   try {
-    const activeAreas = await Area.find({ isActive: true }).sort({ name: 1 });
+    const activeAreas = await Area.find({ isActive: true }).sort({
+      state: 1,
+      area: 1,
+    });
     res.json(activeAreas);
   } catch (error) {
     console.error("Error fetching active areas:", error);
     res.status(500).json({ error: "Failed to fetch active areas" });
+  }
+});
+
+// API endpoint to get areas by state
+app.get("/api/areas/state/:state", async (req, res) => {
+  try {
+    const { state } = req.params;
+    const areas = await Area.find({ state, isActive: true }).sort({ area: 1 });
+    res.json(areas);
+  } catch (error) {
+    console.error("Error fetching areas by state:", error);
+    res.status(500).json({ error: "Failed to fetch areas by state" });
   }
 });
 

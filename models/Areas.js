@@ -1,12 +1,15 @@
 const mongoose = require("mongoose");
 
 const areaSchema = new mongoose.Schema({
-  name: {
+  state: {
     type: String,
     required: true,
-    unique: true,
     trim: true,
-    lowercase: true,
+  },
+  area: {
+    type: String,
+    required: true,
+    trim: true,
   },
   displayName: {
     type: String,
@@ -39,14 +42,12 @@ const areaSchema = new mongoose.Schema({
   },
 });
 
-// Update the updatedAt field before saving
 areaSchema.pre("save", function (next) {
   this.updatedAt = Date.now();
   next();
 });
 
-// Index for faster queries
-areaSchema.index({ name: 1 });
+areaSchema.index({ state: 1, area: 1 });
 areaSchema.index({ isActive: 1 });
 
 const Area = mongoose.model("Area", areaSchema);

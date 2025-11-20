@@ -619,30 +619,59 @@ async function checkAndSendConfirmations() {
 // Helper function to get active areas
 const getActiveAreas = async () => {
   try {
-    return await Area.find({ isActive: true }).sort({ name: 1 });
+    return await Area.find({ isActive: true }).sort({ state: 1, area: 1 });
   } catch (error) {
     console.error("Error fetching areas:", error);
-    // Fallback to default areas if database fails
-    return [
-      { _id: "1", name: "seminyak", displayName: "Seminyak", deliveryFee: 0 },
-      { _id: "2", name: "legian", displayName: "Legian", deliveryFee: 0 },
-      { _id: "3", name: "sanur", displayName: "Sanur", deliveryFee: 0 },
-      { _id: "4", name: "ubud", displayName: "Ubud", deliveryFee: 200000 },
-    ];
+    return [];
   }
 };
 
-// Helper function to format areas for display
+// Helper function to format areas for display with state
 const formatAreasForDisplay = (areas) => {
-  return areas
-    .map((area, index) => {
-      const feeText =
-        area.deliveryFee > 0
-          ? ` (extra charge ${formatRupiah(area.deliveryFee)})`
-          : "";
-      return `${index + 1}- ${area.displayName}${feeText}`;
-    })
-    .join("\n");
+  const groupedByState = {};
+
+  areas.forEach((area) => {
+    if (!groupedByState[area.state]) {
+      groupedByState[area.state] = [];
+    }
+    groupedByState[area.state].push(area);
+  });
+
+  let message = "";
+  let counter = 1;
+
+  Object.keys(groupedByState)
+    .sort()
+    .forEach((state) => {
+      message += `\n📍 *${state}*\n`;
+      groupedByState[state].forEach((area) => {
+        const feeText =
+          area.truckPrice > 0 || area.scooterPrice > 0
+            ? ` (Truck: ₹${area.truckPrice}, Scooter: ₹${area.scooterPrice})`
+            : " (Free)";
+        message += `${counter}. ${area.displayName}${feeText}\n`;
+        counter++;
+      });
+    });
+
+  return message;
+};
+
+// Modified getActiveAreas to return flat list with state info for chatbot
+const getActivAreasForChatbot = async () => {
+  try {
+    const areas = await Area.find({ isActive: true }).sort({
+      state: 1,
+      area: 1,
+    });
+    return areas.map((a) => ({
+      ...a.toObject(),
+      fullDisplay: `${a.state} - ${a.displayName}`,
+    }));
+  } catch (error) {
+    console.error("Error fetching areas:", error);
+    return [];
+  }
 };
 
 async function sendOrderConfirmation(orderId, customer) {
@@ -2751,15 +2780,15 @@ async function processChatMessage(phoneNumber, text, message) {
             // Delivery options - go to location selection
             await customer.updateConversationState("checkout_location");
 
-            // Get active areas from database
             const activeAreas = await getActiveAreas();
             const areasDisplay = formatAreasForDisplay(activeAreas);
 
             const locPrompt = customer.addresses?.length
-              ? `Select a drop-off location:\n\n${areasDisplay}\n\nOr type 'saved' to use a saved address.`
-              : `Select drop-off location:\n\n${areasDisplay}`;
+              ? `Select a drop-off location:\n${areasDisplay}\n\nOr type 'saved' to use a saved address.`
+              : `Select drop-off location:\n${areasDisplay}`;
 
             await sendWhatsAppMessage(phoneNumber, locPrompt);
+            break;
           }
         } else {
           await sendWhatsAppMessage(
@@ -2848,24 +2877,20 @@ async function processChatMessage(phoneNumber, text, message) {
             return;
           }
         }
-
-        // Get active areas from database
         const activeAreas = await getActiveAreas();
         const selectedIndex = parseInt(text) - 1;
 
         if (selectedIndex >= 0 && selectedIndex < activeAreas.length) {
           const selectedArea = activeAreas[selectedIndex];
-          const extraCharge = selectedArea.deliveryFee;
 
-          // Save location in cart
-          customer.cart.deliveryLocation = selectedArea.name;
-          customer.cart.deliveryCharge += extraCharge;
+          customer.cart.deliveryLocation = `${selectedArea.state} - ${selectedArea.area}`;
+          customer.cart.deliveryCharge += selectedArea.truckPrice;
 
-          // Initialize delivery address if not exists
           if (!customer.cart.deliveryAddress) {
             customer.cart.deliveryAddress = {};
           }
-          customer.cart.deliveryAddress.area = selectedArea.name;
+          customer.cart.deliveryAddress.area = selectedArea.area;
+          customer.cart.deliveryAddress.state = selectedArea.state;
 
           // Update order history if order exists
           const idx = customer.orderHistory.findIndex(
@@ -8610,59 +8635,47 @@ Don't worry — the driver will reach you and deliver the products safely..` +
         }
         break;
 
-      // UPDATED add_address_area_step case
       case "add_address_area_step":
         try {
-          // Get active areas from database
           const activeAreas = await getActiveAreas();
           const selectedIndex = parseInt(text) - 1;
 
-          // Check if the selected area is valid
           if (selectedIndex < 0 || selectedIndex >= activeAreas.length) {
             const areasDisplay = formatAreasForDisplay(activeAreas);
             await sendWhatsAppMessage(
               phoneNumber,
-              `Please select a valid area number (1-${activeAreas.length}).\n\n${areasDisplay}`
+              `Please select a valid area number.\n${areasDisplay}`
             );
             return;
           }
 
-          // Make sure contextData and tempAddress exist
           if (!customer.contextData || !customer.contextData.tempAddress) {
-            throw new Error("Address information was lost. Please start over.");
+            throw new Error("Address information was lost");
           }
 
-          // Save the area using the selected area
           const selectedArea = activeAreas[selectedIndex];
-          customer.contextData.tempAddress.area = selectedArea.name;
-          customer.contextData.tempAddress.areaDisplayName =
-            selectedArea.displayName;
+          customer.contextData.tempAddress.area = selectedArea.area;
+          customer.contextData.tempAddress.state = selectedArea.state;
+          customer.contextData.tempAddress.areaDisplayName = `${selectedArea.state} - ${selectedArea.displayName}`;
           customer.contextData.tempAddress.areaDeliveryFee =
-            selectedArea.deliveryFee;
+            selectedArea.truckPrice;
 
           await customer.save();
-          console.log("Saved area to tempAddress:", selectedArea.name);
 
-          // Move to final step - asking for Google Maps link
           await customer.updateConversationState("add_address_maplink_step");
           await sendWhatsAppMessage(
             phoneNumber,
-            "Almost done! Finally, please enter a Google Maps link for this address (or type 'none' if you don't have one):"
+            "Almost done! Finally, please enter a Google Maps link for this address (or type 'none'):"
           );
         } catch (error) {
           console.error("Error saving address area:", error);
           await sendWhatsAppMessage(
             phoneNumber,
-            "Sorry, there was an error: " +
-              error.message +
-              ". Let's try again from the beginning."
+            "Sorry, there was an error. Let's try again."
           );
-
-          // Return to address management
           await customer.updateConversationState("manage_addresses");
         }
         break;
-
       // Step 4: Collect map link and finalize the address
       case "add_address_maplink_step":
         try {
