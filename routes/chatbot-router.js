@@ -2884,7 +2884,7 @@ async function processChatMessage(phoneNumber, text, message) {
           const selectedArea = activeAreas[selectedIndex];
 
           customer.cart.deliveryLocation = `${selectedArea.state} - ${selectedArea.area}`;
-          customer.cart.deliveryCharge += selectedArea.truckPrice;
+          customer.cart.deliveryCharge = selectedArea.truckPrice; // ✅ Replace, don't add
 
           if (!customer.cart.deliveryAddress) {
             customer.cart.deliveryAddress = {};
@@ -2910,9 +2910,10 @@ async function processChatMessage(phoneNumber, text, message) {
 
           // Confirmation message
           let confirmationMsg = `You selected ${selectedArea.displayName}.`;
-          if (extraCharge > 0) {
+          if (selectedArea.truckPrice > 0) {
+            // ✅ CORRECT - use selectedArea.truckPrice
             confirmationMsg += ` Additional charge of ${formatRupiah(
-              extraCharge
+              selectedArea.truckPrice
             )} will be applied.`;
           } else {
             confirmationMsg += " Free delivery to this area.";
