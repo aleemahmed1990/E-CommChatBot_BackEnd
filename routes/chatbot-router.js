@@ -481,48 +481,78 @@ router.get("/instance-info", async (req, res) => {
     res.status(500).json({ error: "Failed to get instance info" });
   }
 });
-// 5. Enhanced order status update endpoint
 router.put("/api/orders/:orderId/status", async (req, res) => {
   const { orderId } = req.params;
   const { status } = req.body;
 
-  console.log(`🔄 Processing status update for ${orderId} to ${status}`);
+  console.log(
+    `🔄 Processing status update for ${orderId} to ${status} (server side)`
+  );
 
   try {
     // Find customer with this order
     const customer = await Customer.findOne({
-      "orderHistory.orderId": orderId,
-    }).lean();
+      $or: [
+        { "orderHistory.orderId": orderId },
+        { "shoppingHistory.orderId": orderId },
+      ],
+    });
 
     if (!customer) {
       console.error(`❌ Order ${orderId} not found`);
       return res.status(404).json({ error: "Order not found" });
     }
 
-    // Update status in database
-    const updateResult = await Customer.updateOne(
-      { "orderHistory.orderId": orderId },
-      { $set: { "orderHistory.$.status": status } }
+    // Update in orderHistory
+    const orderHistoryIndex = customer.orderHistory.findIndex(
+      (o) => o.orderId === orderId
     );
+    if (orderHistoryIndex >= 0) {
+      customer.orderHistory[orderHistoryIndex].status = status;
+    }
 
-    console.log(`✅ Database update result:`, updateResult);
+    // Update in shoppingHistory
+    const shoppingHistoryIndex = customer.shoppingHistory.findIndex(
+      (o) => o.orderId === orderId
+    );
+    if (shoppingHistoryIndex >= 0) {
+      customer.shoppingHistory[shoppingHistoryIndex].status = status;
+    }
 
-    // Trigger confirmation if status is order-confirmed
+    await customer.save();
+    console.log(`✅ Database update completed`);
+
+    // ✅ TRIGGER APPROPRIATE MESSAGE BASED ON STATUS
     if (status === "order-confirmed") {
       console.log(`📨 Triggering confirmation for ${orderId}`);
-
       try {
-        const order = customer.orderHistory.find((o) => o.orderId === orderId);
-        const result = await sendOrderConfirmation(orderId, customer);
-
-        console.log(`📩 Confirmation result:`, result);
+        await sendOrderConfirmation(orderId, customer);
+        console.log(`📩 Confirmation sent successfully`);
       } catch (confirmationError) {
         console.error(`❌ Confirmation failed:`, confirmationError);
-        // Continue even if confirmation fails
+      }
+    } else if (status === "on-way") {
+      console.log(`🚚 Triggering on-the-way message for ${orderId}`);
+      try {
+        await sendOnTheWayMessage(orderId, customer);
+        console.log(`🚚 On-the-way message sent successfully`);
+      } catch (onTheWayError) {
+        console.error(`❌ On-the-way message failed:`, onTheWayError);
+      }
+    } else if (status === "order-complete") {
+      console.log(`✅ Triggering delivery complete message for ${orderId}`);
+      try {
+        await sendDeliveryCompleteMessage(orderId, customer);
+        console.log(`✅ Delivery complete message sent successfully`);
+      } catch (completeError) {
+        console.error(`❌ Delivery complete message failed:`, completeError);
       }
     }
 
-    res.json({ success: true });
+    res.json({
+      success: true,
+      message: `Order status updated to ${status} and messages queued`,
+    });
   } catch (error) {
     console.error(`❌ Status update failed:`, error);
     res.status(500).json({
@@ -674,49 +704,54 @@ const getActivAreasForChatbot = async () => {
   }
 };
 
-async function sendOrderConfirmation(orderId, customer) {
+async function checkAndSendConfirmations() {
   try {
-    console.log(`📨 Starting confirmation for order ${orderId}`);
+    console.log("🔍 Checking for orders needing confirmation...");
 
-    const order = customer.orderHistory.find((o) => o.orderId === orderId);
-    if (!order) throw new Error(`Order ${orderId} not found`);
+    // Find orders with "order-confirmed" status
+    const customers = await Customer.find({
+      "orderHistory.status": "order-confirmed",
+    });
 
-    // Use the first phone number exactly as stored
-    const phone = customer.phoneNumber[0];
-    if (!phone) throw new Error("No phone number available");
+    console.log(`📊 Found ${customers.length} customers with confirmed orders`);
 
-    console.log(`📞 Using phone number: ${phone}`);
+    for (const customer of customers) {
+      try {
+        // Find confirmed orders that haven't been processed
+        const confirmedOrders = customer.orderHistory.filter(
+          (o) => o.status === "order-confirmed" && !o.confirmationSentAt
+        );
 
-    // Generate PDF
-    const pdfPath = await generateOrderConfirmationPDF(order, customer);
-    console.log(`✅ PDF generated at ${pdfPath}`);
+        for (const order of confirmedOrders) {
+          console.log(
+            `📨 Sending confirmation for order ${order.orderId} to ${customer.name}`
+          );
 
-    // Build detailed order message
-    const message = buildDetailedOrderMessage(order, customer);
+          try {
+            await sendOrderConfirmation(order.orderId, customer);
 
-    // Send document with detailed message
-    const result = await sendDocumentWithMessage(phone, pdfPath, message);
-    console.log(`📩 Confirmation sent to ${phone}`);
+            // Mark as sent
+            order.confirmationSentAt = new Date();
+            await customer.save();
 
-    // Clean up
-    fs.unlinkSync(pdfPath);
-    return result;
-  } catch (error) {
-    console.error(`❌ Confirmation failed:`, error);
-
-    // Fallback to text message
-    try {
-      const order = customer.orderHistory.find((o) => o.orderId === orderId);
-      const fallbackMessage = buildDetailedOrderMessage(order, customer, true);
-      await sendWhatsAppMessage(customer.phoneNumber[0], fallbackMessage);
-      console.log(`📩 Sent fallback text message`);
-    } catch (fallbackError) {
-      console.error(`❌ Fallback also failed:`, fallbackError);
+            console.log(`✅ Confirmation sent for ${order.orderId}`);
+          } catch (err) {
+            console.error(
+              `❌ Failed to send confirmation for ${order.orderId}:`,
+              err.message
+            );
+          }
+        }
+      } catch (err) {
+        console.error(`❌ Failed to process customer ${customer._id}:`, err);
+      }
     }
-
-    throw error;
+  } catch (err) {
+    console.error("❌ Error in checkAndSendConfirmations:", err);
   }
 }
+
+// ✅ FIX #2: IMPROVED sendDocumentWithMessage() with better validation
 
 // Helper function to build detailed order message
 function buildDetailedOrderMessage(order, customer, isFallback = false) {
@@ -1017,15 +1052,21 @@ async function sendDocumentWithMessage(to, filePath, message) {
     const fileData = fs.readFileSync(filePath);
     const base64Data = fileData.toString("base64");
 
-    // Prepare payload - use the number exactly as stored
+    // ✅ FIX: Validate phone format before sending
+    if (!to || to.length < 8) {
+      throw new Error(`Invalid phone number: ${to}`);
+    }
+
+    // Prepare payload - ensure phone is in correct format
+    const cleanPhone = to.replace(/\D/g, "");
     const payload = new URLSearchParams();
     payload.append("token", ULTRAMSG_CONFIG.token);
-    payload.append("to", to); // Use the raw number
+    payload.append("to", cleanPhone); // ✅ Send clean number
     payload.append("document", `data:application/pdf;base64,${base64Data}`);
     payload.append("filename", `order_confirmation_${Date.now()}.pdf`);
     payload.append("caption", message);
 
-    console.log(`⚡ Sending to UltraMSG API for ${to}...`);
+    console.log(`⚡ Sending to UltraMsg API for ${cleanPhone}...`);
     console.log(`📄 File size: ${Math.round(fileData.length / 1024)}KB`);
 
     const response = await axios.post(
@@ -1035,22 +1076,21 @@ async function sendDocumentWithMessage(to, filePath, message) {
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
         },
-        timeout: 60000, // Increased timeout for document uploads
+        timeout: 60000,
       }
     );
 
-    console.log(`✅ UltraMSG response:`, response.data);
+    console.log(`✅ UltraMsg response:`, response.data);
 
     // Check if response indicates success
     if (response.data.sent === false || response.data.error) {
-      throw new Error(`UltraMSG API error: ${JSON.stringify(response.data)}`);
+      throw new Error(`UltraMsg API error: ${JSON.stringify(response.data)}`);
     }
 
     return response.data;
   } catch (error) {
     console.error(`❌ Document send failed for ${to}:`, error.message);
 
-    // Log more details for debugging
     if (error.response) {
       console.error(`API Response Status: ${error.response.status}`);
       console.error(`API Response Data:`, error.response.data);
@@ -1059,6 +1099,7 @@ async function sendDocumentWithMessage(to, filePath, message) {
     throw error;
   }
 }
+
 // 4. Phone number normalizer for UltraMsg
 function normalizePhoneForUltraMsg(phone) {
   // Remove all non-digit characters
@@ -1079,6 +1120,202 @@ function normalizeWhatsAppId(rawPhone) {
   return rawPhone.replace(/\D/g, "");
 }
 
+async function sendDeliveryCompleteMessage(orderId, customer) {
+  try {
+    console.log(`📦 Sending delivery complete message for order ${orderId}`);
+
+    const order = customer.shoppingHistory.find((o) => o.orderId === orderId);
+    if (!order) {
+      throw new Error(`Order ${orderId} not found in shopping history`);
+    }
+
+    const phone = customer.phoneNumber[0];
+    if (!phone) throw new Error("No phone number available");
+
+    // Get delivery media from order
+    const deliveryMedia = order.deliveryMedia;
+    if (!deliveryMedia) {
+      throw new Error("No delivery media found for this order");
+    }
+
+    // ✅ STEP 1: Send intro message
+    const introMessage =
+      `✅ *Product Confirmed & Delivered!* ✅\n\n` +
+      `Your order #${orderId} has been confirmed by our driver and delivered to your location.\n\n` +
+      `📸 *Evidence Provided:*\n` +
+      `We've documented the delivery process with photos and video for your records.`;
+
+    await sendWhatsAppMessage(phone, introMessage);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    // ✅ STEP 2: Send delivery video if available
+    if (deliveryMedia.deliveryVideo && deliveryMedia.deliveryVideo.base64Data) {
+      try {
+        console.log(`📹 Sending delivery video...`);
+        const videoCaption =
+          `📹 *Delivery Video*\n\n` +
+          `This video shows the delivery confirmation, receipt verification, and customer acknowledgment.`;
+
+        await sendVideoViaUltraMsg(
+          phone,
+          deliveryMedia.deliveryVideo.base64Data,
+          deliveryMedia.deliveryVideo.mimetype || "video/mp4",
+          videoCaption
+        );
+
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      } catch (videoError) {
+        console.error(`⚠️ Error sending delivery video:`, videoError.message);
+      }
+    }
+
+    // ✅ STEP 3: Send receipt photos in sequence
+    const photoSequence = [
+      {
+        data: deliveryMedia.receiptInHandPhoto,
+        caption: `🧾 *Receipt in Hand*\n\nThis confirms the delivery was handed to someone at your location.`,
+      },
+      {
+        data: deliveryMedia.receiptCloseUpPhoto,
+        caption: `🧾 *Receipt Close-Up*\n\nClear view of your order receipt for verification.`,
+      },
+      {
+        data: deliveryMedia.receiptNextToFacePhoto,
+        caption: `👤 *Proof of Delivery*\n\nReceipt held by the recipient for identity verification.`,
+      },
+      {
+        data: deliveryMedia.entrancePhoto,
+        caption: `🏠 *Delivery Location*\n\nPhoto of the entrance where your order was delivered.`,
+      },
+    ];
+
+    for (const photo of photoSequence) {
+      if (photo.data && photo.data.base64Data) {
+        try {
+          console.log(`📸 Sending photo: ${photo.caption.split("\n")[0]}`);
+
+          await sendPhotoViaUltraMsg(
+            phone,
+            photo.data.base64Data,
+            photo.data.mimetype || "image/jpeg",
+            photo.caption
+          );
+
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        } catch (photoError) {
+          console.error(
+            `⚠️ Error sending photo: ${photo.caption.split("\n")[0]}`,
+            photoError.message
+          );
+        }
+      }
+    }
+
+    // ✅ STEP 4: Send thank you message
+    const thankYouMessage =
+      `Thank you — we appreciate having you as our customer.\n` +
+      `We would love to serve you again soon. ❤️\n\n` +
+      `If you have any questions about this delivery, please contact our support team.`;
+
+    await sendWhatsAppMessage(phone, thankYouMessage);
+    console.log(`✅ Delivery complete message sequence sent to ${phone}`);
+
+    return true;
+  } catch (error) {
+    console.error(`❌ Error sending delivery complete message:`, error);
+    throw error;
+  }
+}
+
+// ✅ FIX #4: NEW FUNCTION - Send On-the-Way Message
+async function sendOnTheWayMessage(orderId, customer) {
+  try {
+    console.log(`🚚 Sending on-the-way message for order ${orderId}`);
+
+    const order = customer.shoppingHistory.find((o) => o.orderId === orderId);
+    if (!order) {
+      throw new Error(`Order ${orderId} not found`);
+    }
+
+    const phone = customer.phoneNumber[0];
+    if (!phone) throw new Error("No phone number available");
+
+    // Get delivery details
+    const deliveryLocation =
+      order.deliveryAddress?.area || order.deliveryLocation || "your location";
+    const deliveryTimeFrame = order.deliveryTimeFrame || "soon";
+
+    const onTheWayMessage =
+      `🚚 *Your Order is On the Way!* 🚚\n\n` +
+      `Order #${orderId}\n` +
+      `📦 Status: On Delivery\n\n` +
+      `Your product is on the way and will be delivered to you soon.\n\n` +
+      `📍 Delivery Area: ${deliveryLocation}\n` +
+      `⏰ Expected Time: ${deliveryTimeFrame}\n\n` +
+      `Please be at the location today. Thank you!`;
+
+    await sendWhatsAppMessage(phone, onTheWayMessage);
+    console.log(`✅ On-the-way message sent to ${phone}`);
+
+    return true;
+  } catch (error) {
+    console.error(`❌ Error sending on-the-way message:`, error);
+    throw error;
+  }
+}
+
+// ✅ FIX #5: HELPER FUNCTIONS - Send media via UltraMsg
+async function sendVideoViaUltraMsg(to, base64Data, mimetype, caption) {
+  const cleanPhone = to.replace(/\D/g, "");
+  const payload = new URLSearchParams();
+  payload.append("token", ULTRAMSG_CONFIG.token);
+  payload.append("to", cleanPhone);
+  payload.append("video", `data:${mimetype};base64,${base64Data}`);
+  payload.append("caption", caption);
+
+  const response = await axios.post(
+    `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/video`,
+    payload,
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      timeout: 60000,
+    }
+  );
+
+  if (!response.data?.sent) {
+    throw new Error(`Video send failed: ${JSON.stringify(response.data)}`);
+  }
+
+  return response.data;
+}
+
+async function sendPhotoViaUltraMsg(to, base64Data, mimetype, caption) {
+  const cleanPhone = to.replace(/\D/g, "");
+  const payload = new URLSearchParams();
+  payload.append("token", ULTRAMSG_CONFIG.token);
+  payload.append("to", cleanPhone);
+  payload.append("image", `data:${mimetype};base64,${base64Data}`);
+  payload.append("caption", caption);
+
+  const response = await axios.post(
+    `${ULTRAMSG_CONFIG.baseURL}/${ULTRAMSG_CONFIG.instanceId}/messages/image`,
+    payload,
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      timeout: 30000,
+    }
+  );
+
+  if (!response.data?.sent) {
+    throw new Error(`Photo send failed: ${JSON.stringify(response.data)}`);
+  }
+
+  return response.data;
+}
 // Replace your cleanPhoneNumber function with:
 function cleanPhoneNumber(phoneNumber) {
   // Remove WhatsApp suffixes if present

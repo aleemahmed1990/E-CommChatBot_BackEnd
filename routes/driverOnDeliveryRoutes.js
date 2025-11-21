@@ -1,4 +1,4 @@
-// routes/driverOnDeliveryRoutes.js - FIXED: Complete delivery only with photo requirement
+// routes/driverOnDeliveryRoutes.js - COMPLETE IMPLEMENTATION
 
 const express = require("express");
 const router = express.Router();
@@ -6,12 +6,12 @@ const Customer = require("../models/customer");
 const DeliveryTracking = require("../models/Deliverytracking");
 const multer = require("multer");
 
-// Configure multer for file uploads
+// Configure multer for multiple file uploads
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 10 * 1024 * 1024,
+    fileSize: 50 * 1024 * 1024, // 50MB for videos
   },
   fileFilter: (req, file, cb) => {
     if (
@@ -25,7 +25,7 @@ const upload = multer({
   },
 });
 
-// Get active deliveries - orders with "on-way" status
+// Get active deliveries
 router.get("/active-deliveries", async (req, res) => {
   try {
     const { driverId } = req.query;
@@ -43,6 +43,10 @@ router.get("/active-deliveries", async (req, res) => {
             continue;
           }
 
+          // Check delivery media completion
+          const hasDeliveryMedia =
+            order.deliveryMedia && order.deliveryMedia.allMediaUploaded;
+
           activeDeliveries.push({
             orderId: order.orderId,
             customerName: customer.name,
@@ -51,22 +55,16 @@ router.get("/active-deliveries", async (req, res) => {
             timeSlot: order.timeSlot || "",
             deliveryAddress: order.deliveryAddress,
             specialInstructions: order.adminReason || "",
-            routeStartedAt: order.routeStartedAt,
-            routeStartedBy: order.routeStartedBy,
             items: order.items || [],
             totalItems: order.items ? order.items.length : 0,
-            assignmentDetails: order.assignmentDetails,
-            deliveryPhotos: order.deliveryPhotos || [],
             isArrived: order.arrivedAt ? true : false,
             arrivedAt: order.arrivedAt,
+            deliveryMedia: order.deliveryMedia || {},
+            hasDeliveryMedia: hasDeliveryMedia,
           });
         }
       }
     }
-
-    activeDeliveries.sort(
-      (a, b) => new Date(a.deliveryDate) - new Date(b.deliveryDate)
-    );
 
     res.json(activeDeliveries);
   } catch (error) {
@@ -99,22 +97,16 @@ router.post("/mark-arrived/:orderId", async (req, res) => {
       driverName: driverName,
     };
 
-    if (location) {
-      customer.shoppingHistory[orderIndex].arrivalLocation = location;
+    // Initialize deliveryMedia if not exists
+    if (!customer.shoppingHistory[orderIndex].deliveryMedia) {
+      customer.shoppingHistory[orderIndex].deliveryMedia = {
+        allMediaUploaded: false,
+        allMediaVerified: false,
+        hasCustomerComplaints: false,
+      };
     }
 
     await customer.save();
-
-    const tracking = await DeliveryTracking.findOne({ orderId: orderId });
-    if (tracking && tracking.workflowStatus.inTransit) {
-      tracking.workflowStatus.inTransit.currentLocation = {
-        address: location?.address || "Delivery location",
-        latitude: location?.latitude,
-        longitude: location?.longitude,
-        lastUpdated: new Date(),
-      };
-      await tracking.save();
-    }
 
     console.log(`✅ Driver marked as arrived for order ${orderId}`);
 
@@ -129,20 +121,20 @@ router.post("/mark-arrived/:orderId", async (req, res) => {
   }
 });
 
-// Upload delivery photo - REQUIRED before completion
+// 1. Upload DELIVERY VIDEO (MANDATORY)
 router.post(
-  "/upload-delivery-photo/:orderId",
-  upload.single("deliveryPhoto"),
+  "/upload-delivery-video/:orderId",
+  upload.single("deliveryVideo"),
   async (req, res) => {
     try {
       const { orderId } = req.params;
-      const { driverId, driverName, notes } = req.body;
+      const { driverId, driverName, videoDetails } = req.body;
 
       if (!req.file) {
-        return res.status(400).json({ error: "No file uploaded" });
+        return res.status(400).json({ error: "No video file uploaded" });
       }
 
-      console.log(`📸 Uploading delivery photo for order ${orderId}`);
+      console.log(`📹 Uploading delivery video for order ${orderId}`);
 
       const customer = await Customer.findOne({
         "shoppingHistory.orderId": orderId,
@@ -156,14 +148,14 @@ router.post(
         (o) => o.orderId === orderId
       );
 
-      if (!customer.shoppingHistory[orderIndex].deliveryPhotos) {
-        customer.shoppingHistory[orderIndex].deliveryPhotos = [];
+      if (!customer.shoppingHistory[orderIndex].deliveryMedia) {
+        customer.shoppingHistory[orderIndex].deliveryMedia = {};
       }
 
       const base64Data = req.file.buffer.toString("base64");
 
-      const photoData = {
-        photoId: `PHOTO_${Date.now()}`,
+      customer.shoppingHistory[orderIndex].deliveryMedia.deliveryVideo = {
+        videoId: `DELVID_${Date.now()}`,
         filename: req.file.originalname,
         mimetype: req.file.mimetype,
         fileSize: req.file.size,
@@ -173,28 +165,397 @@ router.post(
           driverId: driverId,
           driverName: driverName,
         },
-        notes: notes || "",
+        videoDetails: videoDetails ? JSON.parse(videoDetails) : {},
+        verificationStatus: "pending",
       };
 
-      customer.shoppingHistory[orderIndex].deliveryPhotos.push(photoData);
       await customer.save();
 
-      console.log(`✅ Delivery photo uploaded for order ${orderId}`);
+      console.log(`✅ Delivery video uploaded for order ${orderId}`);
 
       res.json({
         success: true,
-        message: "Delivery photo uploaded successfully",
-        photoId: photoData.photoId,
-        uploadedAt: photoData.uploadedAt,
+        message: "Delivery video uploaded successfully",
+        videoId: `DELVID_${Date.now()}`,
       });
     } catch (error) {
-      console.error("Error uploading delivery photo:", error);
-      res.status(500).json({ error: "Failed to upload delivery photo" });
+      console.error("Error uploading delivery video:", error);
+      res.status(500).json({ error: "Failed to upload delivery video" });
     }
   }
 );
 
-// Complete delivery - ONLY with photo upload + customer confirmation
+// 2. Upload COMPLAINT VIDEO (CONDITIONAL)
+router.post(
+  "/upload-complaint-video/:orderId",
+  upload.single("complaintVideo"),
+  async (req, res) => {
+    try {
+      const { orderId } = req.params;
+      const { driverId, driverName, complaintDetails } = req.body;
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No video file uploaded" });
+      }
+
+      console.log(`📹 Uploading complaint video for order ${orderId}`);
+
+      const customer = await Customer.findOne({
+        "shoppingHistory.orderId": orderId,
+      });
+
+      if (!customer) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      const orderIndex = customer.shoppingHistory.findIndex(
+        (o) => o.orderId === orderId
+      );
+
+      if (!customer.shoppingHistory[orderIndex].deliveryMedia) {
+        customer.shoppingHistory[orderIndex].deliveryMedia = {};
+      }
+
+      const base64Data = req.file.buffer.toString("base64");
+
+      customer.shoppingHistory[orderIndex].deliveryMedia.complaintVideo = {
+        videoId: `COMPVID_${Date.now()}`,
+        filename: req.file.originalname,
+        mimetype: req.file.mimetype,
+        fileSize: req.file.size,
+        base64Data: base64Data,
+        uploadedAt: new Date(),
+        uploadedBy: {
+          driverId: driverId,
+          driverName: driverName,
+        },
+        complaintDetails: complaintDetails ? JSON.parse(complaintDetails) : {},
+        verificationStatus: "pending",
+      };
+
+      customer.shoppingHistory[
+        orderIndex
+      ].deliveryMedia.hasCustomerComplaints = true;
+
+      await customer.save();
+
+      console.log(`✅ Complaint video uploaded for order ${orderId}`);
+
+      res.json({
+        success: true,
+        message: "Complaint video uploaded successfully",
+        videoId: `COMPVID_${Date.now()}`,
+      });
+    } catch (error) {
+      console.error("Error uploading complaint video:", error);
+      res.status(500).json({ error: "Failed to upload complaint video" });
+    }
+  }
+);
+
+// 3. Upload ENTRANCE PHOTO (MANDATORY)
+router.post(
+  "/upload-entrance-photo/:orderId",
+  upload.single("entrancePhoto"),
+  async (req, res) => {
+    try {
+      const { orderId } = req.params;
+      const { driverId, driverName } = req.body;
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No photo uploaded" });
+      }
+
+      console.log(`📸 Uploading entrance photo for order ${orderId}`);
+
+      const customer = await Customer.findOne({
+        "shoppingHistory.orderId": orderId,
+      });
+
+      if (!customer) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      const orderIndex = customer.shoppingHistory.findIndex(
+        (o) => o.orderId === orderId
+      );
+
+      if (!customer.shoppingHistory[orderIndex].deliveryMedia) {
+        customer.shoppingHistory[orderIndex].deliveryMedia = {};
+      }
+
+      const base64Data = req.file.buffer.toString("base64");
+
+      customer.shoppingHistory[orderIndex].deliveryMedia.entrancePhoto = {
+        photoId: `ENTRANCE_${Date.now()}`,
+        filename: req.file.originalname,
+        mimetype: req.file.mimetype,
+        fileSize: req.file.size,
+        base64Data: base64Data,
+        uploadedAt: new Date(),
+        uploadedBy: {
+          driverId: driverId,
+          driverName: driverName,
+        },
+        verificationStatus: "pending",
+      };
+
+      await customer.save();
+
+      console.log(`✅ Entrance photo uploaded for order ${orderId}`);
+
+      res.json({
+        success: true,
+        message: "Entrance photo uploaded successfully",
+        photoId: `ENTRANCE_${Date.now()}`,
+      });
+    } catch (error) {
+      console.error("Error uploading entrance photo:", error);
+      res.status(500).json({ error: "Failed to upload entrance photo" });
+    }
+  }
+);
+
+// 4. Upload RECEIPT IN HAND PHOTO (MANDATORY)
+router.post(
+  "/upload-receipt-in-hand/:orderId",
+  upload.single("receiptInHandPhoto"),
+  async (req, res) => {
+    try {
+      const { orderId } = req.params;
+      const { driverId, driverName } = req.body;
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No photo uploaded" });
+      }
+
+      console.log(`📸 Uploading receipt-in-hand photo for order ${orderId}`);
+
+      const customer = await Customer.findOne({
+        "shoppingHistory.orderId": orderId,
+      });
+
+      if (!customer) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      const orderIndex = customer.shoppingHistory.findIndex(
+        (o) => o.orderId === orderId
+      );
+
+      if (!customer.shoppingHistory[orderIndex].deliveryMedia) {
+        customer.shoppingHistory[orderIndex].deliveryMedia = {};
+      }
+
+      const base64Data = req.file.buffer.toString("base64");
+
+      customer.shoppingHistory[orderIndex].deliveryMedia.receiptInHandPhoto = {
+        photoId: `RECEIPT_HAND_${Date.now()}`,
+        filename: req.file.originalname,
+        mimetype: req.file.mimetype,
+        fileSize: req.file.size,
+        base64Data: base64Data,
+        uploadedAt: new Date(),
+        uploadedBy: {
+          driverId: driverId,
+          driverName: driverName,
+        },
+        verificationStatus: "pending",
+      };
+
+      await customer.save();
+
+      console.log(`✅ Receipt-in-hand photo uploaded for order ${orderId}`);
+
+      res.json({
+        success: true,
+        message: "Receipt-in-hand photo uploaded successfully",
+        photoId: `RECEIPT_HAND_${Date.now()}`,
+      });
+    } catch (error) {
+      console.error("Error uploading receipt-in-hand photo:", error);
+      res.status(500).json({ error: "Failed to upload receipt-in-hand photo" });
+    }
+  }
+);
+
+// 5. Upload RECEIPT CLOSE-UP PHOTO (MANDATORY)
+router.post(
+  "/upload-receipt-closeup/:orderId",
+  upload.single("receiptCloseUpPhoto"),
+  async (req, res) => {
+    try {
+      const { orderId } = req.params;
+      const { driverId, driverName } = req.body;
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No photo uploaded" });
+      }
+
+      console.log(`📸 Uploading receipt close-up photo for order ${orderId}`);
+
+      const customer = await Customer.findOne({
+        "shoppingHistory.orderId": orderId,
+      });
+
+      if (!customer) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      const orderIndex = customer.shoppingHistory.findIndex(
+        (o) => o.orderId === orderId
+      );
+
+      if (!customer.shoppingHistory[orderIndex].deliveryMedia) {
+        customer.shoppingHistory[orderIndex].deliveryMedia = {};
+      }
+
+      const base64Data = req.file.buffer.toString("base64");
+
+      customer.shoppingHistory[orderIndex].deliveryMedia.receiptCloseUpPhoto = {
+        photoId: `RECEIPT_CLOSEUP_${Date.now()}`,
+        filename: req.file.originalname,
+        mimetype: req.file.mimetype,
+        fileSize: req.file.size,
+        base64Data: base64Data,
+        uploadedAt: new Date(),
+        uploadedBy: {
+          driverId: driverId,
+          driverName: driverName,
+        },
+        verificationStatus: "pending",
+      };
+
+      await customer.save();
+
+      console.log(`✅ Receipt close-up photo uploaded for order ${orderId}`);
+
+      res.json({
+        success: true,
+        message: "Receipt close-up photo uploaded successfully",
+        photoId: `RECEIPT_CLOSEUP_${Date.now()}`,
+      });
+    } catch (error) {
+      console.error("Error uploading receipt close-up photo:", error);
+      res
+        .status(500)
+        .json({ error: "Failed to upload receipt close-up photo" });
+    }
+  }
+);
+
+// 6. Upload RECEIPT NEXT TO FACE PHOTO (MANDATORY)
+router.post(
+  "/upload-receipt-next-to-face/:orderId",
+  upload.single("receiptNextToFacePhoto"),
+  async (req, res) => {
+    try {
+      const { orderId } = req.params;
+      const { driverId, driverName } = req.body;
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No photo uploaded" });
+      }
+
+      console.log(
+        `📸 Uploading receipt-next-to-face photo for order ${orderId}`
+      );
+
+      const customer = await Customer.findOne({
+        "shoppingHistory.orderId": orderId,
+      });
+
+      if (!customer) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      const orderIndex = customer.shoppingHistory.findIndex(
+        (o) => o.orderId === orderId
+      );
+
+      if (!customer.shoppingHistory[orderIndex].deliveryMedia) {
+        customer.shoppingHistory[orderIndex].deliveryMedia = {};
+      }
+
+      const base64Data = req.file.buffer.toString("base64");
+
+      customer.shoppingHistory[
+        orderIndex
+      ].deliveryMedia.receiptNextToFacePhoto = {
+        photoId: `RECEIPT_FACE_${Date.now()}`,
+        filename: req.file.originalname,
+        mimetype: req.file.mimetype,
+        fileSize: req.file.size,
+        base64Data: base64Data,
+        uploadedAt: new Date(),
+        uploadedBy: {
+          driverId: driverId,
+          driverName: driverName,
+        },
+        verificationStatus: "pending",
+      };
+
+      await customer.save();
+
+      console.log(
+        `✅ Receipt-next-to-face photo uploaded for order ${orderId}`
+      );
+
+      res.json({
+        success: true,
+        message: "Receipt-next-to-face photo uploaded successfully",
+        photoId: `RECEIPT_FACE_${Date.now()}`,
+      });
+    } catch (error) {
+      console.error("Error uploading receipt-next-to-face photo:", error);
+      res
+        .status(500)
+        .json({ error: "Failed to upload receipt-next-to-face photo" });
+    }
+  }
+);
+
+// Mark customer has complaints
+router.post("/mark-has-complaints/:orderId", async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { hasComplaints, complaintDescription } = req.body;
+
+    const customer = await Customer.findOne({
+      "shoppingHistory.orderId": orderId,
+    });
+
+    if (!customer) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const orderIndex = customer.shoppingHistory.findIndex(
+      (o) => o.orderId === orderId
+    );
+
+    if (!customer.shoppingHistory[orderIndex].deliveryMedia) {
+      customer.shoppingHistory[orderIndex].deliveryMedia = {};
+    }
+
+    customer.shoppingHistory[orderIndex].deliveryMedia.hasCustomerComplaints =
+      hasComplaints;
+    customer.shoppingHistory[orderIndex].deliveryMedia.complaintDescription =
+      complaintDescription || "";
+
+    await customer.save();
+
+    res.json({
+      success: true,
+      message: "Complaint status updated",
+      hasComplaints: hasComplaints,
+    });
+  } catch (error) {
+    console.error("Error marking complaints:", error);
+    res.status(500).json({ error: "Failed to mark complaints" });
+  }
+});
+
+// Complete delivery - ONLY with ALL required media
 router.post("/complete-delivery/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -204,10 +565,9 @@ router.post("/complete-delivery/:orderId", async (req, res) => {
       customerConfirmed,
       deliveryNotes,
       customerSatisfaction,
-      customerSignature,
     } = req.body;
 
-    console.log(`🎉 Completing delivery for order ${orderId}`);
+    console.log(`🎉 Attempting to complete delivery for order ${orderId}`);
 
     const customer = await Customer.findOne({
       "shoppingHistory.orderId": orderId,
@@ -222,28 +582,74 @@ router.post("/complete-delivery/:orderId", async (req, res) => {
     );
     const order = customer.shoppingHistory[orderIndex];
 
-    // CRITICAL: Photo is REQUIRED
-    if (!order.deliveryPhotos || order.deliveryPhotos.length === 0) {
-      console.log(`❌ Cannot complete - No photos for ${orderId}`);
+    // ✅ CRITICAL: Check ALL required media is uploaded
+    const media = order.deliveryMedia || {};
+
+    // Check mandatory items
+    if (!media.deliveryVideo || !media.deliveryVideo.base64Data) {
       return res.status(400).json({
-        error: "Delivery photo is REQUIRED to complete delivery",
-        details:
-          "Please upload a photo/video of the receiver before completing",
+        error: "❌ DELIVERY VIDEO REQUIRED",
+        details: "You must upload the delivery video before completing",
       });
     }
 
-    // Customer confirmation is required
-    if (!customerConfirmed) {
-      console.log(
-        `❌ Cannot complete - No customer confirmation for ${orderId}`
-      );
+    if (!media.entrancePhoto || !media.entrancePhoto.base64Data) {
       return res.status(400).json({
-        error: "Customer confirmation is required",
+        error: "❌ ENTRANCE PHOTO REQUIRED",
+        details: "You must upload the entrance photo before completing",
+      });
+    }
+
+    if (!media.receiptInHandPhoto || !media.receiptInHandPhoto.base64Data) {
+      return res.status(400).json({
+        error: "❌ RECEIPT IN HAND PHOTO REQUIRED",
+        details:
+          "You must upload the photo of person holding receipt before completing",
+      });
+    }
+
+    if (!media.receiptCloseUpPhoto || !media.receiptCloseUpPhoto.base64Data) {
+      return res.status(400).json({
+        error: "❌ RECEIPT CLOSE-UP PHOTO REQUIRED",
+        details: "You must upload the receipt close-up photo before completing",
+      });
+    }
+
+    if (
+      !media.receiptNextToFacePhoto ||
+      !media.receiptNextToFacePhoto.base64Data
+    ) {
+      return res.status(400).json({
+        error: "❌ RECEIPT NEXT TO FACE PHOTO REQUIRED",
+        details:
+          "You must upload the receipt next to face photo before completing",
+      });
+    }
+
+    // If customer has complaints, complaint video is required
+    if (media.hasCustomerComplaints) {
+      if (!media.complaintVideo || !media.complaintVideo.base64Data) {
+        return res.status(400).json({
+          error: "❌ COMPLAINT VIDEO REQUIRED",
+          details:
+            "Customer has complaints - you must upload the complaint video before completing",
+        });
+      }
+    }
+
+    if (!customerConfirmed) {
+      return res.status(400).json({
+        error: "❌ CUSTOMER CONFIRMATION REQUIRED",
         details: "Customer must confirm receipt of delivery",
       });
     }
 
-    console.log(`✅ All checks passed - Marking ${orderId} as order-complete`);
+    console.log(`✅ All media checks passed for order ${orderId}`);
+
+    // Mark all media as uploaded
+    customer.shoppingHistory[orderIndex].deliveryMedia.allMediaUploaded = true;
+    customer.shoppingHistory[orderIndex].deliveryMedia.uploadCompletedAt =
+      new Date();
 
     // Update order status to "order-complete"
     customer.shoppingHistory[orderIndex].status = "order-complete";
@@ -257,12 +663,10 @@ router.post("/complete-delivery/:orderId", async (req, res) => {
     customer.shoppingHistory[orderIndex].deliveryNotes = deliveryNotes || "";
     customer.shoppingHistory[orderIndex].customerSatisfaction =
       customerSatisfaction || 5;
-    customer.shoppingHistory[orderIndex].customerSignature =
-      customerSignature || "";
 
     await customer.save();
 
-    console.log(`✅ Customer record updated to 'order-complete'`);
+    console.log(`✅ Order ${orderId} marked as order-complete`);
 
     // Update DeliveryTracking
     const tracking = await DeliveryTracking.findOne({ orderId: orderId });
@@ -273,28 +677,25 @@ router.post("/complete-delivery/:orderId", async (req, res) => {
         employeeId: driverId,
         employeeName: driverName,
       };
-      tracking.workflowStatus.delivered.customerSignature =
-        customerSignature || "";
-      tracking.workflowStatus.delivered.deliveryNotes = deliveryNotes || "";
-      tracking.workflowStatus.delivered.customerSatisfaction =
-        customerSatisfaction || 5;
-
       tracking.currentStatus = "order-complete";
-      tracking.timingMetrics.actualDeliveryTime = new Date();
-
       await tracking.save();
-
-      console.log(`✅ Delivery tracking updated to 'order-complete'`);
     }
 
-    console.log(`🎉 Order ${orderId} COMPLETED!`);
+    console.log(`🎉 Order ${orderId} COMPLETED with all media!`);
 
     res.json({
       success: true,
-      message: `Order ${orderId} delivered successfully`,
+      message: `Order ${orderId} delivered successfully with all required media`,
       deliveredAt: new Date(),
       newStatus: "order-complete",
-      photosCount: order.deliveryPhotos.length,
+      mediaUploaded: {
+        deliveryVideo: true,
+        entrancePhoto: true,
+        receiptInHand: true,
+        receiptCloseUp: true,
+        receiptNextToFace: true,
+        complaintVideo: media.hasCustomerComplaints ? true : "not required",
+      },
     });
   } catch (error) {
     console.error("Error completing delivery:", error);
@@ -350,11 +751,10 @@ router.get("/stats", async (req, res) => {
       }
     }
 
-    console.log("📊 Driver on delivery stats:", stats);
     res.json(stats);
   } catch (error) {
-    console.error("Error fetching delivery stats:", error);
-    res.status(500).json({ error: "Failed to fetch delivery stats" });
+    console.error("Error fetching stats:", error);
+    res.status(500).json({ error: "Failed to fetch stats" });
   }
 });
 
@@ -383,18 +783,10 @@ router.get("/order/:orderId", async (req, res) => {
       deliveryAddress: order.deliveryAddress,
       specialInstructions: order.adminReason || "",
       items: order.items || [],
-      assignmentDetails: order.assignmentDetails || {},
-      routeStartedAt: order.routeStartedAt,
-      routeStartedBy: order.routeStartedBy,
       arrivedAt: order.arrivedAt,
-      arrivedBy: order.arrivedBy,
-      deliveryPhotos: order.deliveryPhotos || [],
-      photosCount: order.deliveryPhotos?.length || 0,
+      deliveryMedia: order.deliveryMedia || {},
       deliveredAt: order.deliveredAt,
-      deliveredBy: order.deliveredBy,
       customerConfirmed: order.customerConfirmed,
-      deliveryNotes: order.deliveryNotes,
-      customerSatisfaction: order.customerSatisfaction,
     };
 
     res.json(orderDetails);

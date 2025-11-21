@@ -333,6 +333,7 @@ const shoppingHistorySchema = new mongoose.Schema(
       required: true,
       default: Date.now,
     },
+
     items: [
       {
         productId: String,
@@ -351,7 +352,6 @@ const shoppingHistorySchema = new mongoose.Schema(
           type: Boolean,
           default: false,
         },
-
         packingStatus: {
           type: String,
           enum: ["pending", "packing", "packed", "unavailable"],
@@ -364,118 +364,220 @@ const shoppingHistorySchema = new mongoose.Schema(
           timestamp: Date,
         },
         packingNotes: String,
-
-        itemComplaints: [
-          {
-            complaintId: {
-              type: String,
-              default: function () {
-                return "ITEM_COMP_" + Date.now().toString().slice(-8);
-              },
-            },
-            complaintType: {
-              type: String,
-              enum: [
-                "not_available",
-                "damaged",
-                "expired",
-                "insufficient_stock",
-                "quality_issue",
-                "other",
-              ],
-              required: true,
-            },
-            complaintDetails: String,
-            reportedBy: {
-              staffId: String,
-              staffName: String,
-              timestamp: {
-                type: Date,
-                default: Date.now,
-              },
-            },
-            status: {
-              type: String,
-              enum: ["open", "resolved"],
-              default: "open",
-            },
-            resolution: String,
-            resolvedAt: Date,
-          },
-        ],
-
+        // ... other item fields
         storageVerified: {
           type: Boolean,
           default: false,
         },
-        storageCondition: {
-          type: String,
-          enum: ["good", "damaged", "missing"],
-          default: "good",
-        },
-        verifiedAt: Date,
-        verifiedBy: {
-          staffId: String,
-          staffName: String,
-          timestamp: Date,
-        },
-
         loadingVerified: {
           type: Boolean,
           default: false,
         },
-        loadingNotes: {
-          type: String,
-          default: "",
+        // ... rest of item fields
+      },
+    ], // ← items array ENDS here
+
+    // ✅ CORRECT: deliveryMedia goes HERE, AFTER items array, at ORDER level
+    deliveryMedia: {
+      // 1. DELIVERY VIDEO (MANDATORY)
+      deliveryVideo: {
+        videoId: String,
+        filename: String,
+        mimetype: String,
+        fileSize: Number,
+        base64Data: String, // Store video as base64
+        uploadedAt: Date,
+        uploadedBy: {
+          driverId: String,
+          driverName: String,
         },
-        loadingVerifiedAt: Date,
-        loadingVerifiedBy: {
+        videoDetails: {
+          driverVisibleInVideo: { type: Boolean, default: false },
+          receiverVisibleInVideo: { type: Boolean, default: false },
+          orderReceivedStatementClear: { type: Boolean, default: false },
+          allItemsShown: { type: Boolean, default: false },
+          everythingCheckedConfirmed: { type: Boolean, default: false },
+          customerIssuesMentioned: String,
+        },
+        verificationStatus: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
+        verifiedBy: {
           staffId: String,
           staffName: String,
-          timestamp: Date,
+          verifiedAt: Date,
         },
-
-        storageComplaints: [
-          {
-            complaintId: {
-              type: String,
-              default: function () {
-                return "STORAGE_COMP_" + Date.now().toString().slice(-8);
-              },
-            },
-            complaintType: {
-              type: String,
-              enum: [
-                "damaged",
-                "missing",
-                "wrong_item",
-                "quantity_mismatch",
-                "packaging_issue",
-                "other",
-              ],
-              required: true,
-            },
-            complaintDetails: String,
-            reportedBy: {
-              staffId: String,
-              staffName: String,
-              timestamp: {
-                type: Date,
-                default: Date.now,
-              },
-            },
-            status: {
-              type: String,
-              enum: ["open", "resolved"],
-              default: "open",
-            },
-            resolution: String,
-            resolvedAt: Date,
-          },
-        ],
+        rejectionReason: String,
       },
-    ],
 
+      // 2. COMPLAINT VIDEO (CONDITIONAL)
+      complaintVideo: {
+        videoId: String,
+        filename: String,
+        mimetype: String,
+        fileSize: Number,
+        base64Data: String,
+        uploadedAt: Date,
+        uploadedBy: {
+          driverId: String,
+          driverName: String,
+        },
+        complaintDetails: {
+          issuesFocused: String,
+          problemShownClearly: { type: Boolean, default: false },
+          allDetailsRecorded: { type: Boolean, default: false },
+          evidenceVisible: { type: Boolean, default: false },
+        },
+        verificationStatus: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
+        verifiedBy: {
+          staffId: String,
+          staffName: String,
+          verifiedAt: Date,
+        },
+      },
+
+      // 3. ENTRANCE PHOTO (MANDATORY)
+      entrancePhoto: {
+        photoId: String,
+        filename: String,
+        mimetype: String,
+        fileSize: Number,
+        base64Data: String,
+        uploadedAt: Date,
+        uploadedBy: {
+          driverId: String,
+          driverName: String,
+        },
+        photoQuality: {
+          clearVisible: { type: Boolean, default: false },
+          entranceIdentifiable: { type: Boolean, default: false },
+        },
+        verificationStatus: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
+        verifiedBy: {
+          staffId: String,
+          staffName: String,
+          verifiedAt: Date,
+        },
+      },
+
+      // 4. PHOTO WITH RECEIPT IN HAND (MANDATORY)
+      receiptInHandPhoto: {
+        photoId: String,
+        filename: String,
+        mimetype: String,
+        fileSize: Number,
+        base64Data: String,
+        uploadedAt: Date,
+        uploadedBy: {
+          driverId: String,
+          driverName: String,
+        },
+        photoQuality: {
+          customerFaceVisible: { type: Boolean, default: false },
+          receiptClearlyVisible: { type: Boolean, default: false },
+          receiptHeldProperly: { type: Boolean, default: false },
+        },
+        verificationStatus: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
+        verifiedBy: {
+          staffId: String,
+          staffName: String,
+          verifiedAt: Date,
+        },
+      },
+
+      // 5. RECEIPT CLOSE-UP PHOTO (MANDATORY)
+      receiptCloseUpPhoto: {
+        photoId: String,
+        filename: String,
+        mimetype: String,
+        fileSize: Number,
+        base64Data: String,
+        uploadedAt: Date,
+        uploadedBy: {
+          driverId: String,
+          driverName: String,
+        },
+        photoQuality: {
+          receiptTextReadable: { type: Boolean, default: false },
+          allDetailsVisible: { type: Boolean, default: false },
+          properLighting: { type: Boolean, default: false },
+        },
+        verificationStatus: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
+        verifiedBy: {
+          staffId: String,
+          staffName: String,
+          verifiedAt: Date,
+        },
+      },
+
+      // 6. RECEIPT NEXT TO FACE PHOTO (MANDATORY)
+      receiptNextToFacePhoto: {
+        photoId: String,
+        filename: String,
+        mimetype: String,
+        fileSize: Number,
+        base64Data: String,
+        uploadedAt: Date,
+        uploadedBy: {
+          driverId: String,
+          driverName: String,
+        },
+        photoQuality: {
+          faceAndReceiptBothVisible: { type: Boolean, default: false },
+          receiptReadable: { type: Boolean, default: false },
+          faceIdentifiable: { type: Boolean, default: false },
+        },
+        verificationStatus: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
+        verifiedBy: {
+          staffId: String,
+          staffName: String,
+          verifiedAt: Date,
+        },
+      },
+
+      // OVERALL VERIFICATION STATUS
+      allMediaUploaded: {
+        type: Boolean,
+        default: false,
+      },
+      allMediaVerified: {
+        type: Boolean,
+        default: false,
+      },
+      uploadCompletedAt: Date,
+      verificationCompletedAt: Date,
+
+      // Customer complaint flag
+      hasCustomerComplaints: {
+        type: Boolean,
+        default: false,
+      },
+      complaintDescription: String,
+    }, // ← deliveryMedia ENDS here
+
+    // Continue with other ORDER-level fields
     storageDetails: {
       verificationStartedAt: Date,
       verificationCompletedAt: Date,
@@ -536,61 +638,6 @@ const shoppingHistorySchema = new mongoose.Schema(
       notes: String,
     },
 
-    orderRequirements: {
-      calculatedVolume: {
-        type: Number,
-        default: 0,
-      },
-      calculatedWeight: {
-        type: Number,
-        default: 0,
-      },
-      totalPackages: {
-        type: Number,
-        default: 0,
-      },
-      lastCalculated: Date,
-    },
-
-    loadingDetails: {
-      verificationStartedAt: Date,
-      verificationCompletedAt: Date,
-      verificationStaff: {
-        staffId: String,
-        staffName: String,
-      },
-      loadingNotes: String,
-      totalItemsLoaded: {
-        type: Number,
-        default: 0,
-      },
-      totalItemsRequested: {
-        type: Number,
-        default: 0,
-      },
-      loadingProgress: {
-        type: Number,
-        default: 0,
-      },
-      isReadyForDispatch: {
-        type: Boolean,
-        default: false,
-      },
-    },
-
-    driverVerification: {
-      verified: {
-        type: Boolean,
-        default: false,
-      },
-      verifiedAt: Date,
-      verifiedBy: {
-        driverId: String,
-        driverName: String,
-      },
-      notes: String,
-    },
-
     routeStartedAt: Date,
     routeStartedBy: {
       driverId: String,
@@ -601,11 +648,6 @@ const shoppingHistorySchema = new mongoose.Schema(
     arrivedBy: {
       driverId: String,
       driverName: String,
-    },
-    arrivalLocation: {
-      address: String,
-      latitude: Number,
-      longitude: Number,
     },
 
     deliveryPhotos: [
@@ -640,7 +682,7 @@ const shoppingHistorySchema = new mongoose.Schema(
       max: 5,
       default: 5,
     },
-    customerSignature: String,
+
     totalAmount: {
       type: Number,
       required: true,
@@ -649,44 +691,23 @@ const shoppingHistorySchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
-    discounts: {
-      firstOrderDiscount: { type: Number, default: 0 },
-      ecoDeliveryDiscount: { type: Number, default: 0 },
-      referralDiscount: { type: Number, default: 0 },
-    },
+
     status: {
       type: String,
       enum: ORDER_STATUSES,
       default: "cart-not-paid",
     },
-    paymentStatus: {
-      type: String,
-      enum: ["pending", "paid", "failed", "refunded"],
-      default: "pending",
-    },
-    paymentMethod: String,
-    transactionId: String,
-    deliveryOption: String,
-    deliveryLocation: String,
-    deliveryTimeFrame: String,
-    deliveryType: {
-      type: String,
-      enum: ["truck", "scooter", "self_pickup"],
-      default: "truck",
-    },
-    deliverySpeed: {
-      type: String,
-      enum: ["normal", "speed", "early_morning", "eco"],
-      default: "normal",
-    },
+
     deliveryAddress: {
       nickname: String,
       area: String,
       fullAddress: String,
       googleMapLink: String,
     },
+
     deliveryDate: Date,
     timeSlot: { type: String, default: null },
+
     driver1: { type: String, default: null },
     driver2: { type: String, default: null },
     pickupType: {
@@ -2663,6 +2684,53 @@ customerSchema.pre("save", async function (next) {
   }
   next();
 });
+
+customerSchema.methods.checkDeliveryMediaComplete = function (orderId) {
+  const order = this.shoppingHistory.find((o) => o.orderId === orderId);
+  if (!order || !order.deliveryMedia) return false;
+
+  const media = order.deliveryMedia;
+
+  // Check mandatory items
+  const hasDeliveryVideo =
+    media.deliveryVideo && media.deliveryVideo.base64Data;
+  const hasEntrancePhoto =
+    media.entrancePhoto && media.entrancePhoto.base64Data;
+  const hasReceiptInHand =
+    media.receiptInHandPhoto && media.receiptInHandPhoto.base64Data;
+  const hasReceiptCloseUp =
+    media.receiptCloseUpPhoto && media.receiptCloseUpPhoto.base64Data;
+  const hasReceiptNextToFace =
+    media.receiptNextToFacePhoto && media.receiptNextToFacePhoto.base64Data;
+
+  // Check if complaint video is needed and uploaded
+  const needsComplaintVideo = media.hasCustomerComplaints === true;
+  const hasComplaintVideo =
+    media.complaintVideo && media.complaintVideo.base64Data;
+
+  const complaintVideoOk = needsComplaintVideo ? hasComplaintVideo : true;
+
+  return (
+    hasDeliveryVideo &&
+    hasEntrancePhoto &&
+    hasReceiptInHand &&
+    hasReceiptCloseUp &&
+    hasReceiptNextToFace &&
+    complaintVideoOk
+  );
+};
+
+// Export for reference
+module.exports = {
+  DELIVERY_MEDIA_REQUIREMENTS: {
+    DELIVERY_VIDEO: "deliveryVideo",
+    COMPLAINT_VIDEO: "complaintVideo",
+    ENTRANCE_PHOTO: "entrancePhoto",
+    RECEIPT_IN_HAND: "receiptInHandPhoto",
+    RECEIPT_CLOSE_UP: "receiptCloseUpPhoto",
+    RECEIPT_NEXT_TO_FACE: "receiptNextToFacePhoto",
+  },
+};
 
 const Customer = mongoose.model("Customer", customerSchema);
 

@@ -119,6 +119,9 @@ app.use("/api/vendors", vendorRoutes);
 // Also ensure your driver routes are included:
 
 app.use("/api/driver", driverRoutes);
+const deliveredOrdersRoutes = require("./routes/deliveredOrdersRoutes");
+
+app.use("/api/delivery", deliveredOrdersRoutes);
 
 // ========== IMPORT YOUR NEW VIDEO ROUTES ==========
 const videoRoutes = require("./routes/videos"); // This should be your new video routes file

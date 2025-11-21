@@ -25,18 +25,38 @@ function getWorkflowProgress(tracking) {
   };
 }
 
-// Get storage queue - orders that are packed and ready for verification
+// ✅ UPDATED: Get storage queue - NOW SHOWS ALL ORDERS with all possible statuses
 router.get("/queue", async (req, res) => {
   try {
+    // ✅ ALL POSSIBLE ORDER STATUSES
+    const allOrderStatuses = [
+      "picking-order",
+      "allocated-driver",
+      "assigned-dispatch-officer-2",
+      "ready-to-pickup",
+      "order-not-pickedup",
+      "order-picked-up",
+      "on-way",
+      "driver-confirmed",
+      "order-processed",
+      "refund",
+      "complain-order",
+      "issue-driver",
+      "parcel-returned",
+      "order-complete",
+    ];
+
+    // Get ALL customers with orders in any of these statuses
     const customers = await Customer.find({
-      "shoppingHistory.status": "allocated-driver",
+      "shoppingHistory.status": { $in: allOrderStatuses },
     });
 
     let storageQueue = [];
 
     for (let customer of customers) {
       for (let order of customer.shoppingHistory) {
-        if (order.status === "allocated-driver") {
+        // ✅ Include ALL orders with any of the defined statuses
+        if (allOrderStatuses.includes(order.status)) {
           let tracking = await DeliveryTracking.findOne({
             orderId: order.orderId,
           });
@@ -49,65 +69,68 @@ router.get("/queue", async (req, res) => {
           }
 
           const progress = getWorkflowProgress(tracking);
-          if (progress.packed && !progress.storage) {
-            const totalAmount = order.totalAmount || 0;
-            const priority =
-              totalAmount >= 200
-                ? "high"
-                : totalAmount >= 100
-                ? "medium"
-                : "low";
 
-            // ✅ FIXED: Get packing details from items - packedBy contains staffName and staffId
-            let packedBy = "Unknown";
-            let packedAt = null;
+          const totalAmount = order.totalAmount || 0;
+          const priority =
+            totalAmount >= 200 ? "high" : totalAmount >= 100 ? "medium" : "low";
 
-            // Get packing info from first packed item
-            if (order.items && order.items.length > 0) {
-              const packedItem = order.items.find(
-                (item) => item.packedBy && item.packedBy.staffName
-              );
-              if (packedItem) {
-                packedBy = packedItem.packedBy.staffName; // Get exact staff name
-                packedAt = packedItem.packedAt; // Get exact timestamp when item was packed
-              }
+          // Get packing details from items
+          let packedBy = "Unknown";
+          let packedAt = null;
+
+          if (order.items && order.items.length > 0) {
+            const packedItem = order.items.find(
+              (item) => item.packedBy && item.packedBy.staffName
+            );
+            if (packedItem) {
+              packedBy = packedItem.packedBy.staffName;
+              packedAt = packedItem.packedAt;
             }
-
-            const receivedAt = packedAt || order.orderDate;
-
-            storageQueue.push({
-              orderId: order.orderId,
-              customerName: customer.name,
-              customerPhone: customer.phoneNumber[0] || "",
-              priority: priority,
-              packedBy: packedBy, // ✅ Shows exact staff name
-              packedAt: packedAt, // ✅ Shows exact packed timestamp
-              receivedAt: receivedAt,
-              deliveryDate: order.deliveryDate,
-              deliveryTime: order.timeSlot || "",
-              status: tracking.workflowStatus.storage.completed
-                ? "verified"
-                : "pending",
-              totalItems: order.items ? order.items.length : 0,
-              verifiedItems: order.items
-                ? order.items.filter((item) => item.storageVerified === true)
-                    .length
-                : 0,
-              deliveryAddress: order.deliveryAddress,
-              specialInstructions: order.adminReason || "",
-              hasComplaints: order.items
-                ? order.items.some(
-                    (item) =>
-                      item.storageComplaints &&
-                      item.storageComplaints.length > 0
-                  )
-                : false,
-            });
           }
+
+          const receivedAt = packedAt || order.orderDate;
+
+          // ✅ Determine storage status based on verification state
+          let storageStatus = "pending";
+          if (order.storageDetails?.verificationCompletedAt) {
+            storageStatus = "handed_to_dispatch"; // Completed and handed over
+          } else if (order.storageDetails?.verificationStartedAt) {
+            storageStatus = "verifying"; // In progress
+          } else {
+            storageStatus = "pending"; // Not started
+          }
+
+          storageQueue.push({
+            orderId: order.orderId,
+            customerName: customer.name,
+            customerPhone: customer.phoneNumber[0] || "",
+            priority: priority,
+            packedBy: packedBy,
+            packedAt: packedAt,
+            receivedAt: receivedAt,
+            deliveryDate: order.deliveryDate,
+            deliveryTime: order.timeSlot || "",
+            status: storageStatus, // ✅ Storage workflow status
+            totalItems: order.items ? order.items.length : 0,
+            verifiedItems: order.items
+              ? order.items.filter((item) => item.storageVerified === true)
+                  .length
+              : 0,
+            deliveryAddress: order.deliveryAddress,
+            specialInstructions: order.adminReason || "",
+            hasComplaints: order.items
+              ? order.items.some(
+                  (item) =>
+                    item.storageComplaints && item.storageComplaints.length > 0
+                )
+              : false,
+            orderStatus: order.status, // ✅ Original order status for reference
+          });
         }
       }
     }
 
+    // Sort by priority and delivery date
     storageQueue.sort((a, b) => {
       const priorityOrder = { high: 3, medium: 2, low: 1 };
       const priorityDiff =
@@ -124,11 +147,29 @@ router.get("/queue", async (req, res) => {
   }
 });
 
-// Get storage statistics
+// ✅ UPDATED: Get storage statistics - count all statuses
 router.get("/stats", async (req, res) => {
   try {
+    // ✅ ALL POSSIBLE ORDER STATUSES
+    const allOrderStatuses = [
+      "picking-order",
+      "allocated-driver",
+      "assigned-dispatch-officer-2",
+      "ready-to-pickup",
+      "order-not-pickedup",
+      "order-picked-up",
+      "on-way",
+      "driver-confirmed",
+      "order-processed",
+      "refund",
+      "complain-order",
+      "issue-driver",
+      "parcel-returned",
+      "order-complete",
+    ];
+
     const customers = await Customer.find({
-      "shoppingHistory.status": "allocated-driver",
+      "shoppingHistory.status": { $in: allOrderStatuses },
     }).lean();
 
     let stats = {
@@ -139,23 +180,13 @@ router.get("/stats", async (req, res) => {
 
     for (let customer of customers) {
       for (let order of customer.shoppingHistory) {
-        if (order.status === "allocated-driver") {
-          const tracking = await DeliveryTracking.findOne({
-            orderId: order.orderId,
-          });
-          if (tracking) {
-            if (tracking.workflowStatus.storage.completed) {
-              stats.completed++;
-            } else {
-              const hasVerifiedItems =
-                order.items &&
-                order.items.some((item) => item.storageVerified === true);
-              if (hasVerifiedItems) {
-                stats.verifying++;
-              } else {
-                stats.pending++;
-              }
-            }
+        if (allOrderStatuses.includes(order.status)) {
+          if (order.storageDetails?.verificationCompletedAt) {
+            stats.completed++;
+          } else if (order.storageDetails?.verificationStartedAt) {
+            stats.verifying++;
+          } else {
+            stats.pending++;
           }
         }
       }
@@ -195,7 +226,7 @@ router.get("/order/:orderId", async (req, res) => {
       });
     }
 
-    // ✅ FIXED: Get packing details from items - packedBy contains staffName, staffId, and timestamp
+    // Get packing details from items
     let packingStaffName = "Unknown";
     let packingStaffId = null;
     let packingCompletedAt = null;
@@ -223,10 +254,10 @@ router.get("/order/:orderId", async (req, res) => {
       items: order.items || [],
       packingDetails: {
         packingStaff: {
-          staffName: packingStaffName, // ✅ Exact staff name from items
-          staffId: packingStaffId, // ✅ Staff ID from items
+          staffName: packingStaffName,
+          staffId: packingStaffId,
         },
-        packedAt: packingCompletedAt, // ✅ Exact timestamp from items
+        packedAt: packingCompletedAt,
         packingStartedAt: order.packingDetails?.packingStartedAt || null,
       },
       storageDetails: order.storageDetails || {
