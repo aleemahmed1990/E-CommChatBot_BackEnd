@@ -408,16 +408,15 @@ router.post("/verify-order/:orderId", async (req, res) => {
   }
 });
 
-// ✅ FIXED: Start route - Update order status to "on-way"
+// ✅ SIMPLE: Start route - NO verification check, just change status
 router.post("/start-route/:vehicleId", async (req, res) => {
   try {
     const { vehicleId } = req.params;
     const { driverId, driverName } = req.body;
 
     console.log(`🚀 Driver: Starting route for vehicle ${vehicleId}`);
-    console.log(`🚀 Driver ID: ${driverId}, Driver Name: ${driverName}`);
 
-    // ✅ FIXED: Find all tracking records with "order-picked-up" status
+    // Find all tracking records with "order-picked-up" status
     const trackingRecords = await DeliveryTracking.find({
       currentStatus: "order-picked-up",
       isActive: true,
@@ -429,25 +428,16 @@ router.post("/start-route/:vehicleId", async (req, res) => {
 
     let updatedOrders = [];
     let errors = [];
-    let debugInfo = [];
 
     for (let tracking of trackingRecords) {
       try {
         const customer = await Customer.findById(tracking.customerId);
-        if (!customer) {
-          console.log(`❌ Customer not found for tracking ${tracking.orderId}`);
-          continue;
-        }
+        if (!customer) continue;
 
         const orderIndex = customer.shoppingHistory.findIndex(
           (o) => o.orderId === tracking.orderId
         );
-        if (orderIndex === -1) {
-          console.log(
-            `❌ Order ${tracking.orderId} not found in customer ${customer.name}`
-          );
-          continue;
-        }
+        if (orderIndex === -1) continue;
 
         const order = customer.shoppingHistory[orderIndex];
 
@@ -458,62 +448,10 @@ router.post("/start-route/:vehicleId", async (req, res) => {
           String(assignedVehicleId) === String(vehicleId) ||
           assignedVehicleId?.toString() === vehicleId;
 
-        console.log(`\n🔍 START ROUTE - Checking order ${order.orderId}:`);
-        console.log(`   - Order Status: ${order.status}`);
-        console.log(`   - Tracking Status: ${tracking.currentStatus}`);
-        console.log(`   - Assigned Vehicle ID: ${assignedVehicleId}`);
-        console.log(`   - Requested Vehicle ID: ${vehicleId}`);
-        console.log(`   - Vehicle ID matches: ${vehicleIdMatches}`);
-        console.log(
-          `   - Has Driver Verification: ${!!order.driverVerification}`
-        );
-        console.log(
-          `   - Driver Verified: ${order.driverVerification?.verified}`
-        );
-        console.log(
-          `   - Driver Verified Type: ${typeof order.driverVerification
-            ?.verified}`
-        );
-        console.log(
-          `   - Driver Verified Strictly: ${
-            order.driverVerification?.verified === true
-          }`
-        );
-
-        // Store debug info
-        debugInfo.push({
-          orderId: order.orderId,
-          orderStatus: order.status,
-          trackingStatus: tracking.currentStatus,
-          assignedVehicleId,
-          requestedVehicleId: vehicleId,
-          vehicleIdMatches,
-          hasDriverVerification: !!order.driverVerification,
-          driverVerified: order.driverVerification?.verified,
-          driverVerifiedType: typeof order.driverVerification?.verified,
-          driverVerifiedStrictly: order.driverVerification?.verified === true,
-          driverVerificationFull: order.driverVerification,
-        });
-
-        // Check if this order belongs to the specified vehicle
         if (vehicleIdMatches) {
-          console.log(
-            `✅ Order ${order.orderId} belongs to vehicle ${vehicleId}`
-          );
+          console.log(`✅ Updating order ${order.orderId} to 'on-way'`);
 
-          // Check if order is verified by driver
-          const isVerified = order.driverVerification?.verified === true;
-
-          if (!isVerified) {
-            const errorMsg = `Order ${order.orderId} not verified by driver (verification status: ${order.driverVerification?.verified})`;
-            errors.push(errorMsg);
-            console.log(`⚠️ ${errorMsg}`);
-            continue;
-          }
-
-          console.log(`✅ Order ${order.orderId} is verified by driver`);
-
-          // ✅ FIXED: Update Customer order status to "on-way"
+          // ✅ SIMPLE: Just change the status - NO verification check
           customer.shoppingHistory[orderIndex].status = "on-way";
           customer.shoppingHistory[orderIndex].routeStartedAt = new Date();
           customer.shoppingHistory[orderIndex].routeStartedBy = {
@@ -524,7 +462,7 @@ router.post("/start-route/:vehicleId", async (req, res) => {
           await customer.save();
           console.log(`✅ Updated customer order ${order.orderId} to 'on-way'`);
 
-          // ✅ FIXED: Update DeliveryTracking status to "on-way"
+          // Update DeliveryTracking
           tracking.workflowStatus.inTransit.completed = true;
           tracking.workflowStatus.inTransit.completedAt = new Date();
           tracking.workflowStatus.inTransit.startedBy = {
@@ -540,10 +478,6 @@ router.post("/start-route/:vehicleId", async (req, res) => {
           );
 
           updatedOrders.push(order.orderId);
-        } else {
-          console.log(
-            `❌ Order ${order.orderId} does not belong to vehicle ${vehicleId}`
-          );
         }
       } catch (error) {
         console.error(`❌ Error processing order ${tracking.orderId}:`, error);
@@ -553,16 +487,11 @@ router.post("/start-route/:vehicleId", async (req, res) => {
       }
     }
 
-    console.log(`\n📊 START ROUTE DEBUG INFO:`, debugInfo);
-
     if (updatedOrders.length === 0) {
-      console.log(`❌ No orders ready to start route for vehicle ${vehicleId}`);
-      console.log(`❌ Errors encountered:`, errors);
-
+      console.log(`❌ No orders found for vehicle ${vehicleId}`);
       return res.status(400).json({
-        error: "No orders were ready to start route",
+        error: "No orders were found for this vehicle",
         details: errors,
-        debugInfo: debugInfo,
       });
     }
 
@@ -574,7 +503,7 @@ router.post("/start-route/:vehicleId", async (req, res) => {
       success: true,
       message: `Route started for vehicle ${vehicleId}`,
       ordersOnRoute: updatedOrders,
-      errors: errors,
+      totalOrders: updatedOrders.length,
     });
   } catch (error) {
     console.error("Error starting route:", error);
