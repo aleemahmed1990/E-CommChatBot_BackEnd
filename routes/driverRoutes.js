@@ -510,7 +510,6 @@ router.post("/start-route/:vehicleId", async (req, res) => {
     res.status(500).json({ error: "Failed to start route" });
   }
 });
-
 // Debug route for verification
 router.get("/debug-verification/:orderId", async (req, res) => {
   try {
